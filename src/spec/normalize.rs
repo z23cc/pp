@@ -62,6 +62,12 @@ fn normalize_operation(operation: &mut Operation, op_name: &str, warnings: &mut 
 
     if let Some(ReferenceOr::Item(request_body)) = operation.request_body.as_mut() {
         normalize_request_body(request_body, op_name, warnings);
+        if request_body_has_schemaless_content(request_body) {
+            operation.request_body = None;
+            warnings.push(format!(
+                "normalized {op_name} — dropped requestBody (no schema specified)"
+            ));
+        }
     }
 
     for response in operation.responses.responses.values_mut() {
@@ -143,6 +149,13 @@ fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec
             dropped.join(", ")
         ));
     }
+}
+
+fn request_body_has_schemaless_content(request_body: &RequestBody) -> bool {
+    request_body
+        .content
+        .values()
+        .any(|media_type| media_type.schema.is_none())
 }
 
 fn normalize_content(
@@ -262,5 +275,38 @@ paths:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("kept application/json"));
         assert!(warnings[0].contains("dropped application/xml"));
+    }
+
+    #[test]
+    fn schemaless_request_body_is_dropped_and_warns() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Schemaless Body
+  version: "1.0.0"
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        content:
+          application/json: {}
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec);
+        let path = spec.paths.paths.get("/pets").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+
+        assert!(path.post.as_ref().unwrap().request_body.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("dropped requestBody (no schema specified)"));
     }
 }

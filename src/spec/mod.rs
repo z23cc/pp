@@ -43,7 +43,7 @@ pub fn load(path: &Path) -> Result<LoadedSpec> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let mut spec =
-        parse(&raw).with_context(|| format!("failed to parse spec: {}", path.display()))?;
+        parse(&raw, path).with_context(|| format!("failed to parse spec: {}", path.display()))?;
     let normalization_warnings = normalize::normalize(&mut spec);
     let facts = inspect_openapi(&spec)?;
 
@@ -85,7 +85,14 @@ fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
     })
 }
 
-fn parse(raw: &str) -> Result<OpenAPI> {
+fn parse(raw: &str, path: &Path) -> Result<OpenAPI> {
+    if let Some(version) = detect_openapi_31(raw) {
+        return Err(anyhow!(
+            "OpenAPI 3.1 is not yet supported by pp (uses openapiv3 crate which targets 3.0). Found 'openapi: {version}' in {}. See plan: docs/plans/2026-05-12-001-feat-rust-printing-press-mvp-plan.md scope boundaries.",
+            path.display()
+        ));
+    }
+
     // Try JSON first if it looks like JSON, otherwise YAML. serde_yaml accepts
     // JSON too, so YAML is a safe fallback.
     let trimmed = raw.trim_start();
@@ -94,6 +101,26 @@ fn parse(raw: &str) -> Result<OpenAPI> {
     } else {
         serde_yaml::from_str(raw).map_err(|e| anyhow!("YAML parse error: {e}"))
     }
+}
+
+fn detect_openapi_31(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let line = line.trim_start();
+        let Some(value) = line.strip_prefix("openapi:") else {
+            continue;
+        };
+        let version = value.trim().trim_matches(['\'', '"']);
+        if version.starts_with("3.1") {
+            return Some(version.to_string());
+        }
+    }
+
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(after_key) = compact.split_once("\"openapi\":\"").map(|(_, value)| value) else {
+        return None;
+    };
+    let version = after_key.split('"').next().unwrap_or_default();
+    version.starts_with("3.1").then(|| version.to_string())
 }
 
 fn count_operations(spec: &OpenAPI) -> usize {
@@ -127,47 +154,52 @@ fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
         return Ok(AuthKind::None);
     }
 
-    let mut unsupported = Vec::new();
+    let mut first_unsupported = None;
     for (_name, scheme_ref) in &components.security_schemes {
-        let scheme = match scheme_ref {
-            ReferenceOr::Item(s) => s,
-            ReferenceOr::Reference { reference } => {
-                unsupported.push(format!(
-                    "$ref security scheme not supported in MVP: {reference}"
-                ));
-                continue;
-            }
+        let auth_kind = match scheme_ref {
+            ReferenceOr::Item(scheme) => auth_kind_for_scheme(scheme),
+            ReferenceOr::Reference { reference } => AuthKind::Unsupported {
+                reason: format!("$ref security scheme not supported in MVP: {reference}"),
+            },
         };
 
-        match scheme {
-            SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("bearer") => {
-                return Ok(AuthKind::Bearer);
-            }
-            SecurityScheme::HTTP { scheme, .. } => unsupported.push(format!(
-                "http auth scheme '{scheme}' not supported in MVP (only bearer)"
-            )),
-            SecurityScheme::APIKey { location, name, .. } => match location {
-                openapiv3::APIKeyLocation::Header => {
-                    return Ok(AuthKind::ApiKey {
-                        header_name: name.clone(),
-                    });
+        match auth_kind {
+            AuthKind::Bearer | AuthKind::ApiKey { .. } => return Ok(auth_kind),
+            AuthKind::Unsupported { .. } => {
+                if first_unsupported.is_none() {
+                    first_unsupported = Some(auth_kind);
                 }
-                other => unsupported.push(format!(
-                    "apiKey in '{other:?}' not supported in MVP (only header)"
-                )),
-            },
-            SecurityScheme::OAuth2 { .. } => {
-                unsupported.push("OAuth2 not supported in MVP".into());
             }
-            SecurityScheme::OpenIDConnect { .. } => {
-                unsupported.push("OpenID Connect not supported in MVP".into());
-            }
+            AuthKind::None => {}
         }
     }
 
-    Ok(AuthKind::Unsupported {
-        reason: unsupported.join("; "),
-    })
+    Ok(first_unsupported.unwrap_or(AuthKind::None))
+}
+
+fn auth_kind_for_scheme(scheme: &SecurityScheme) -> AuthKind {
+    match scheme {
+        SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("bearer") => {
+            AuthKind::Bearer
+        }
+        SecurityScheme::HTTP { scheme, .. } => AuthKind::Unsupported {
+            reason: format!("http auth scheme '{scheme}' not supported in MVP (only bearer)"),
+        },
+        SecurityScheme::APIKey { location, name, .. } => match location {
+            openapiv3::APIKeyLocation::Header => AuthKind::ApiKey {
+                header_name: name.clone(),
+            },
+            other => AuthKind::Unsupported {
+                reason: format!("apiKey in '{other:?}' not supported in MVP (only header)"),
+            },
+        },
+        SecurityScheme::OAuth2 { .. } => AuthKind::Unsupported {
+            reason: "OAuth2 not supported in MVP".into(),
+        },
+        SecurityScheme::OpenIDConnect { .. } => AuthKind::Unsupported {
+            reason: "OpenID Connect not supported in MVP".into(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -242,9 +274,79 @@ components:
     }
 
     #[test]
+    fn openapi_31_yaml_errors_before_parse() {
+        let err = parse(
+            r#"
+openapi: 3.1.0
+info:
+  title: Future API
+  version: "1.0.0"
+paths: {}
+"#,
+            Path::new("future.yaml"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("3.1"));
+    }
+
+    #[test]
     fn bearer_auth_detected() {
         let spec: OpenAPI = serde_yaml::from_str(BEARER_SPEC).unwrap();
         assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
+    }
+
+    #[test]
+    fn oauth2_first_bearer_second_detects_bearer() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: My API
+  version: "1.0.0"
+paths: {}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows: {}
+    bearerAuth:
+      type: http
+      scheme: bearer
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
+    }
+
+    #[test]
+    fn all_unsupported_auth_returns_first_unsupported() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: My API
+  version: "1.0.0"
+paths: {}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+    oauth2:
+      type: oauth2
+      flows: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            derive_auth_kind(&spec).unwrap(),
+            AuthKind::Unsupported {
+                reason: "http auth scheme 'basic' not supported in MVP (only bearer)".into()
+            }
+        );
     }
 
     #[test]

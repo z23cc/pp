@@ -47,6 +47,9 @@ else the first 2xx code, else the first available entry such as `default`. This
 trades away progenitor-side typed error handling for MVP compatibility; printed
 CLIs still surface API errors through the generated error path.
 
+Operations declaring a request body without a JSON Schema lose body input on the
+CLI side; this matches progenitor's inability to generate a typed argument.
+
 ## Auth
 
 For `http` bearer auth, the generated CLI reads `<BIN>_TOKEN`:
