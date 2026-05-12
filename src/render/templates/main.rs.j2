@@ -1,0 +1,16 @@
+mod auth;
+mod cli_builder;
+mod context;
+mod print;
+
+use anyhow::Result;
+use clap::CommandFactory;
+use context::Context;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let command = cli_builder::Cli::command();
+    let matches = command.get_matches();
+    let context = Context::new()?;
+    cli_builder::dispatch(&context, &matches).await
+}

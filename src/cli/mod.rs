@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -49,9 +50,52 @@ impl Cli {
                 println!("{}", serde_json::to_string_pretty(&facts)?);
                 Ok(())
             }
-            Command::Generate { spec, output, name, build } => {
-                let _ = (spec, output, name, build);
-                anyhow::bail!("`generate` not implemented yet (Week 2 work items 4-8)");
+            Command::Generate {
+                spec,
+                output,
+                name,
+                build,
+            } => {
+                let facts = crate::spec::inspect(&spec)?;
+                let bin_name = name.unwrap_or(facts.bin_name);
+                let api_name = format!("{bin_name}-api");
+                let manifest = crate::render::WrapperManifest::new(
+                    bin_name,
+                    facts.base_url,
+                    facts.base_url_is_relative,
+                    facts.auth_kind,
+                    api_name.clone(),
+                );
+
+                let progenitor_version = crate::progenitor_driver::check_available()?;
+                if !progenitor_version.contains(crate::progenitor_driver::PINNED_VERSION) {
+                    eprintln!(
+                        "warning: expected cargo-progenitor {}, found {progenitor_version}",
+                        crate::progenitor_driver::PINNED_VERSION
+                    );
+                }
+                crate::progenitor_driver::generate(&spec, &output.join("api"), &api_name)?;
+                crate::render::render(&manifest, &output)?;
+
+                if build {
+                    let out = ProcessCommand::new("cargo")
+                        .arg("build")
+                        .arg("--release")
+                        .current_dir(&output)
+                        .output()
+                        .with_context(|| {
+                            format!("failed to spawn cargo build in {}", output.display())
+                        })?;
+                    if !out.status.success() {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        return Err(anyhow!(
+                            "cargo build --release failed (exit {}):\n{stderr}",
+                            out.status.code().unwrap_or(-1)
+                        ));
+                    }
+                }
+
+                Ok(())
             }
             Command::Validate { workspace } => {
                 let _ = workspace;

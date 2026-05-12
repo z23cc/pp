@@ -1,6 +1,7 @@
 mod cli;
-mod spec;
 mod progenitor_driver;
+mod render;
+mod spec;
 
 use anyhow::Result;
 use clap::Parser;

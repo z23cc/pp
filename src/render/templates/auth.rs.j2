@@ -1,0 +1,18 @@
+use anyhow::Result;
+use crate::context::Context;
+
+impl Context {
+    pub fn auth_header() -> Result<Option<(String, String)>> {
+{% if auth_kind.kind == "none" %}
+        Ok(None)
+{% elif auth_kind.kind == "bearer" %}
+        let token = std::env::var("{{ token_env_var }}")?;
+        Ok(Some(("authorization".to_string(), format!("Bearer {token}"))))
+{% elif auth_kind.kind == "api_key" %}
+        let key = std::env::var("{{ api_key_env_var }}")?;
+        Ok(Some(("{{ auth_kind.header_name }}".to_string(), key)))
+{% elif auth_kind.kind == "unsupported" %}
+        compile_error!("unsupported auth for generated wrapper: {{ auth_kind.reason }} (KTD-5: OAuth2/basic/cookie/composed auth are Phase 2+)");
+{% endif %}
+    }
+}

@@ -1,0 +1,27 @@
+use anyhow::Result;
+
+/// Runtime context shared by generated CLI command handlers.
+pub struct Context {
+    pub client: reqwest::Client,
+    pub base_url: String,
+    pub auth: Option<(String, String)>,
+}
+
+impl Context {
+    pub fn new() -> Result<Self> {
+        let auth = Self::auth_header()?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some((name, value)) = &auth {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())?,
+                reqwest::header::HeaderValue::from_str(value)?,
+            );
+        }
+        let client = reqwest::Client::builder().default_headers(headers).build()?;
+        Ok(Self {
+            client,
+            base_url: "{{ base_url }}".to_string(),
+            auth,
+        })
+    }
+}

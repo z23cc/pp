@@ -8,14 +8,19 @@ use std::process::Command;
 /// Pinned cargo-progenitor version. Bump deliberately + smoke-test petstore.
 pub const PINNED_VERSION: &str = "0.10";
 
-/// Run `cargo-progenitor -i <spec> -o <out_dir> -n <name> -v 0.1.0`.
+/// Run `cargo-progenitor progenitor -i <spec> -o <out_dir> -n <name> -v 0.1.0`.
 /// On failure, returns the captured stderr verbatim.
 pub fn generate(spec: &Path, out_dir: &Path, name: &str) -> Result<()> {
     let status = Command::new("cargo-progenitor")
-        .arg("-i").arg(spec)
-        .arg("-o").arg(out_dir)
-        .arg("-n").arg(name)
-        .arg("-v").arg("0.1.0")
+        .arg("progenitor")
+        .arg("-i")
+        .arg(spec)
+        .arg("-o")
+        .arg(out_dir)
+        .arg("-n")
+        .arg(name)
+        .arg("-v")
+        .arg("0.1.0")
         .output()
         .with_context(|| {
             "failed to spawn cargo-progenitor; install with `cargo install cargo-progenitor`"
@@ -30,18 +35,19 @@ pub fn generate(spec: &Path, out_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check that `cargo-progenitor --version` is available and roughly matches
-/// the pinned major.minor. Returns the detected version string on success.
+/// Check that `cargo-progenitor` is available.
 pub fn check_available() -> Result<String> {
     let out = Command::new("cargo-progenitor")
-        .arg("--version")
+        .arg("--help")
         .output()
         .with_context(|| {
             "cargo-progenitor not found; install with `cargo install cargo-progenitor`"
         })?;
     if !out.status.success() {
-        return Err(anyhow!("cargo-progenitor --version failed"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!("cargo-progenitor --help failed:\n{stderr}"));
     }
-    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(version)
+    Ok(format!(
+        "cargo-progenitor available; expected {PINNED_VERSION}"
+    ))
 }

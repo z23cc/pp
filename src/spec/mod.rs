@@ -75,7 +75,16 @@ fn count_operations(spec: &OpenAPI) -> usize {
     let mut n = 0;
     for (_, path_item) in spec.paths.iter() {
         if let ReferenceOr::Item(item) = path_item {
-            for op in [&item.get, &item.put, &item.post, &item.delete, &item.options, &item.head, &item.patch, &item.trace] {
+            for op in [
+                &item.get,
+                &item.put,
+                &item.post,
+                &item.delete,
+                &item.options,
+                &item.head,
+                &item.patch,
+                &item.trace,
+            ] {
                 if op.is_some() {
                     n += 1;
                 }
