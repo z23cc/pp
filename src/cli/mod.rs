@@ -64,6 +64,7 @@ impl Cli {
                     facts.base_url,
                     facts.base_url_is_relative,
                     facts.auth_kind,
+                    facts.operations,
                     api_name.clone(),
                 );
 

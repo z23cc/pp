@@ -1,6 +1,6 @@
 //! Render the wrapper crate around progenitor's generated API crate.
 
-use crate::spec::AuthKind;
+use crate::spec::{AuthKind, OperationFacts};
 use anyhow::{Context, Result};
 use heck::ToShoutySnakeCase;
 use minijinja::Environment;
@@ -22,6 +22,7 @@ pub struct WrapperManifest {
     pub base_url: String,
     pub base_url_is_relative: bool,
     pub auth_kind: AuthKind,
+    pub operations: Vec<OperationFacts>,
     pub progenitor_lib_name: String,
     pub progenitor_crate_name: String,
     pub token_env_var: String,
@@ -35,6 +36,7 @@ impl WrapperManifest {
         base_url: Option<String>,
         base_url_is_relative: bool,
         auth_kind: AuthKind,
+        operations: Vec<OperationFacts>,
         progenitor_lib_name: String,
     ) -> Self {
         let env_prefix = bin_name.to_shouty_snake_case();
@@ -44,6 +46,7 @@ impl WrapperManifest {
             base_url: base_url.unwrap_or_else(|| "http://localhost".to_string()),
             base_url_is_relative,
             auth_kind,
+            operations,
             progenitor_lib_name,
             progenitor_crate_name,
             token_env_var: format!("{env_prefix}_TOKEN"),
@@ -118,6 +121,7 @@ mod tests {
             Some("https://example.test".to_string()),
             false,
             AuthKind::None,
+            vec![],
             "petstore-api".to_string(),
         );
 
