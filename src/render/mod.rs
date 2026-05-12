@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 const CARGO_TEMPLATE: &str = include_str!("templates/Cargo.toml.j2");
+const API_CARGO_TEMPLATE: &str = include_str!("templates/api_cargo.toml.j2");
 const MAIN_TEMPLATE: &str = include_str!("templates/main.rs.j2");
 const CLI_BUILDER_TEMPLATE: &str = include_str!("templates/cli_builder.rs.j2");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/context.rs.j2");
@@ -65,6 +66,12 @@ pub fn render(manifest: &WrapperManifest, out_dir: &Path) -> Result<()> {
         CARGO_TEMPLATE,
         manifest,
         &out_dir.join("Cargo.toml"),
+    )?;
+    write_template(
+        "api/Cargo.toml",
+        API_CARGO_TEMPLATE,
+        manifest,
+        &out_dir.join("api/Cargo.toml"),
     )?;
     write_template(
         "main.rs",

@@ -32,7 +32,7 @@ pub async fn dispatch(context: &Context, matches: &ArgMatches) -> Result<()> {
     match name {
 {% for operation in operations %}
         "{{ operation.command_name }}" => {
-            let value = client.{{ operation.method_name }}().await;
+            let value = client.{{ operation.method_name }}().send().await;
             crate::print::print_result(value)
         }
 {% endfor %}

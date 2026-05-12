@@ -68,13 +68,6 @@ impl Cli {
                     api_name.clone(),
                 );
 
-                let progenitor_version = crate::progenitor_driver::check_available()?;
-                if !progenitor_version.contains(crate::progenitor_driver::PINNED_VERSION) {
-                    eprintln!(
-                        "warning: expected cargo-progenitor {}, found {progenitor_version}",
-                        crate::progenitor_driver::PINNED_VERSION
-                    );
-                }
                 crate::progenitor_driver::generate(&spec, &output.join("api"), &api_name)?;
                 crate::render::render(&manifest, &output)?;
 

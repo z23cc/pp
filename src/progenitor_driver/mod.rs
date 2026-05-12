@@ -1,53 +1,54 @@
-//! Thin subprocess driver around `cargo-progenitor`. We shell out rather than
-//! linking the progenitor library to keep version drift contained (KTD-2).
+//! In-process driver around the `progenitor` library.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
+use openapiv3::OpenAPI;
+use progenitor::{GenerationSettings, Generator, InterfaceStyle};
+use quote::{format_ident, quote};
+use std::fs;
 use std::path::Path;
-use std::process::Command;
 
-/// Pinned cargo-progenitor version. Bump deliberately + smoke-test petstore.
-pub const PINNED_VERSION: &str = "0.10";
+/// Generate a complete API crate containing progenitor's client and CLI tokens.
+pub fn generate(spec: &Path, out_dir: &Path, crate_name: &str) -> Result<()> {
+    let raw = fs::read_to_string(spec)
+        .with_context(|| format!("failed to read spec: {}", spec.display()))?;
+    let api: OpenAPI = parse_openapi(&raw)
+        .with_context(|| format!("failed to parse spec: {}", spec.display()))?;
 
-/// Run `cargo-progenitor progenitor -i <spec> -o <out_dir> -n <name> -v 0.1.0`.
-/// On failure, returns the captured stderr verbatim.
-pub fn generate(spec: &Path, out_dir: &Path, name: &str) -> Result<()> {
-    let status = Command::new("cargo-progenitor")
-        .arg("progenitor")
-        .arg("-i")
-        .arg(spec)
-        .arg("-o")
-        .arg(out_dir)
-        .arg("-n")
-        .arg(name)
-        .arg("-v")
-        .arg("0.1.0")
-        .output()
-        .with_context(|| {
-            "failed to spawn cargo-progenitor; install with `cargo install cargo-progenitor`"
-        })?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(anyhow!(
-            "cargo-progenitor failed (exit {}):\n{stderr}",
-            status.status.code().unwrap_or(-1)
-        ));
-    }
-    Ok(())
+    let mut settings = GenerationSettings::default();
+    settings
+        .with_interface(InterfaceStyle::Builder)
+        .with_derive("schemars::JsonSchema")
+        .with_cli_bounds("schemars::JsonSchema")
+        .with_cli_bounds("serde::Serialize")
+        .with_cli_bounds("std::fmt::Debug");
+    let mut generator = Generator::new(&settings);
+    let client_tokens = generator.generate_tokens(&api)?;
+    let crate_ident = format_ident!("{}", crate_name.replace('-', "_"));
+    let cli_tokens = generator.cli(&api, &crate_ident.to_string())?;
+
+    let file_tokens = quote! {
+        extern crate self as #crate_ident;
+
+        #client_tokens
+
+        pub mod cli {
+            #cli_tokens
+        }
+    };
+    let syntax = syn::parse2(file_tokens)?;
+    let formatted = prettyplease::unparse(&syntax);
+
+    fs::create_dir_all(out_dir.join("src"))
+        .with_context(|| format!("failed to create API src dir: {}", out_dir.display()))?;
+    fs::write(out_dir.join("src/lib.rs"), formatted)
+        .with_context(|| format!("failed to write {}", out_dir.join("src/lib.rs").display()))
 }
 
-/// Check that `cargo-progenitor` is available.
-pub fn check_available() -> Result<String> {
-    let out = Command::new("cargo-progenitor")
-        .arg("--help")
-        .output()
-        .with_context(|| {
-            "cargo-progenitor not found; install with `cargo install cargo-progenitor`"
-        })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!("cargo-progenitor --help failed:\n{stderr}"));
+fn parse_openapi(raw: &str) -> Result<OpenAPI> {
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('{') {
+        Ok(serde_json::from_str(raw)?)
+    } else {
+        Ok(serde_yaml::from_str(raw)?)
     }
-    Ok(format!(
-        "cargo-progenitor available; expected {PINNED_VERSION}"
-    ))
 }
