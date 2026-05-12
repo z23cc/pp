@@ -8,12 +8,7 @@ use std::fs;
 use std::path::Path;
 
 /// Generate a complete API crate containing progenitor's client and CLI tokens.
-pub fn generate(spec: &Path, out_dir: &Path, crate_name: &str) -> Result<()> {
-    let raw = fs::read_to_string(spec)
-        .with_context(|| format!("failed to read spec: {}", spec.display()))?;
-    let api: OpenAPI =
-        parse_openapi(&raw).with_context(|| format!("failed to parse spec: {}", spec.display()))?;
-
+pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<()> {
     let mut settings = GenerationSettings::default();
     settings
         .with_interface(InterfaceStyle::Builder)
@@ -22,9 +17,9 @@ pub fn generate(spec: &Path, out_dir: &Path, crate_name: &str) -> Result<()> {
         .with_cli_bounds("serde::Serialize")
         .with_cli_bounds("std::fmt::Debug");
     let mut generator = Generator::new(&settings);
-    let client_tokens = generator.generate_tokens(&api)?;
+    let client_tokens = generator.generate_tokens(api)?;
     let crate_ident = format_ident!("{}", crate_name.replace('-', "_"));
-    let cli_tokens = generator.cli(&api, &crate_ident.to_string())?;
+    let cli_tokens = generator.cli(api, &crate_ident.to_string())?;
 
     let file_tokens = quote! {
         extern crate self as #crate_ident;
@@ -36,19 +31,18 @@ pub fn generate(spec: &Path, out_dir: &Path, crate_name: &str) -> Result<()> {
         }
     };
     let syntax = syn::parse2(file_tokens)?;
-    let formatted = prettyplease::unparse(&syntax);
+    let formatted = prettyplease::unparse(&syntax)
+        .replace(
+            "::clap::value_parser!(::std::vec::Vec<::std::string::String>)",
+            "::clap::builder::ValueParser::new(|s: &str| -> Result<::std::vec::Vec<::std::string::String>, ::std::string::String> { Ok(s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()) })",
+        )
+        .replace(
+            "::clap::value_parser!(\n                                ::std::vec::Vec < ::std::string::String >\n                            )",
+            "::clap::builder::ValueParser::new(|s: &str| -> Result<::std::vec::Vec<::std::string::String>, ::std::string::String> { Ok(s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()) })",
+        );
 
     fs::create_dir_all(out_dir.join("src"))
         .with_context(|| format!("failed to create API src dir: {}", out_dir.display()))?;
     fs::write(out_dir.join("src/lib.rs"), formatted)
         .with_context(|| format!("failed to write {}", out_dir.join("src/lib.rs").display()))
-}
-
-fn parse_openapi(raw: &str) -> Result<OpenAPI> {
-    let trimmed = raw.trim_start();
-    if trimmed.starts_with('{') {
-        Ok(serde_json::from_str(raw)?)
-    } else {
-        Ok(serde_yaml::from_str(raw)?)
-    }
 }

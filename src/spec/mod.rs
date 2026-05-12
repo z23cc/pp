@@ -1,6 +1,8 @@
 //! OpenAPI spec inspection: parse a 3.0 spec and derive the facts pp needs
 //! to drive progenitor + wrapper templates.
 
+pub mod normalize;
+
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
 use openapiv3::{OpenAPI, ReferenceOr, SecurityScheme};
@@ -29,13 +31,36 @@ pub struct SpecFacts {
     pub auth_kind: AuthKind,
 }
 
+pub struct LoadedSpec {
+    pub api: OpenAPI,
+    pub facts: SpecFacts,
+    pub normalization_warnings: Vec<String>,
+}
+
+/// Parse the spec at `path` (YAML or JSON, detected by extension and content),
+/// normalize it for progenitor, and derive [`SpecFacts`].
+pub fn load(path: &Path) -> Result<LoadedSpec> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read spec: {}", path.display()))?;
+    let mut spec =
+        parse(&raw).with_context(|| format!("failed to parse spec: {}", path.display()))?;
+    let normalization_warnings = normalize::normalize(&mut spec);
+    let facts = inspect_openapi(&spec)?;
+
+    Ok(LoadedSpec {
+        api: spec,
+        facts,
+        normalization_warnings,
+    })
+}
+
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content)
 /// and derive [`SpecFacts`].
 pub fn inspect(path: &Path) -> Result<SpecFacts> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read spec: {}", path.display()))?;
-    let spec = parse(&raw).with_context(|| format!("failed to parse spec: {}", path.display()))?;
+    Ok(load(path)?.facts)
+}
 
+fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
     let title = spec.info.title.clone();
     let bin_name = title.to_kebab_case();
 
@@ -102,42 +127,46 @@ fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
         return Ok(AuthKind::None);
     }
 
-    // MVP: pick the first scheme. Multi-scheme / per-operation override is Phase 2+.
-    let (_name, scheme_ref) = components
-        .security_schemes
-        .iter()
-        .next()
-        .expect("non-empty checked above");
-    let scheme = match scheme_ref {
-        ReferenceOr::Item(s) => s,
-        ReferenceOr::Reference { reference } => {
-            return Ok(AuthKind::Unsupported {
-                reason: format!("$ref security scheme not supported in MVP: {reference}"),
-            })
-        }
-    };
+    let mut unsupported = Vec::new();
+    for (_name, scheme_ref) in &components.security_schemes {
+        let scheme = match scheme_ref {
+            ReferenceOr::Item(s) => s,
+            ReferenceOr::Reference { reference } => {
+                unsupported.push(format!(
+                    "$ref security scheme not supported in MVP: {reference}"
+                ));
+                continue;
+            }
+        };
 
-    Ok(match scheme {
-        SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("bearer") => {
-            AuthKind::Bearer
+        match scheme {
+            SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("bearer") => {
+                return Ok(AuthKind::Bearer);
+            }
+            SecurityScheme::HTTP { scheme, .. } => unsupported.push(format!(
+                "http auth scheme '{scheme}' not supported in MVP (only bearer)"
+            )),
+            SecurityScheme::APIKey { location, name, .. } => match location {
+                openapiv3::APIKeyLocation::Header => {
+                    return Ok(AuthKind::ApiKey {
+                        header_name: name.clone(),
+                    });
+                }
+                other => unsupported.push(format!(
+                    "apiKey in '{other:?}' not supported in MVP (only header)"
+                )),
+            },
+            SecurityScheme::OAuth2 { .. } => {
+                unsupported.push("OAuth2 not supported in MVP".into());
+            }
+            SecurityScheme::OpenIDConnect { .. } => {
+                unsupported.push("OpenID Connect not supported in MVP".into());
+            }
         }
-        SecurityScheme::HTTP { scheme, .. } => AuthKind::Unsupported {
-            reason: format!("http auth scheme '{scheme}' not supported in MVP (only bearer)"),
-        },
-        SecurityScheme::APIKey { location, name, .. } => match location {
-            openapiv3::APIKeyLocation::Header => AuthKind::ApiKey {
-                header_name: name.clone(),
-            },
-            other => AuthKind::Unsupported {
-                reason: format!("apiKey in '{other:?}' not supported in MVP (only header)"),
-            },
-        },
-        SecurityScheme::OAuth2 { .. } => AuthKind::Unsupported {
-            reason: "OAuth2 not supported in MVP".into(),
-        },
-        SecurityScheme::OpenIDConnect { .. } => AuthKind::Unsupported {
-            reason: "OpenID Connect not supported in MVP".into(),
-        },
+    }
+
+    Ok(AuthKind::Unsupported {
+        reason: unsupported.join("; "),
     })
 }
 

@@ -27,8 +27,25 @@ cargo run -- generate testdata/petstore.yaml -o ./out/petstore --build
 Run the generated binary help:
 
 ```bash
-./out/petstore/target/release/swagger-petstore-openapi-30 --help
+./out/petstore/target/release/swagger-petstore-open-api-3-0 --help
 ```
+
+## Spec normalization
+
+When an operation declares multiple request body media types, `pp` keeps
+`application/json` if present, otherwise the first available media type. It
+prints each normalization to stderr before generation. Progenitor 0.14 doesn't
+yet support multi-media-type endpoints, so `pp` normalizes ahead of generation to
+keep behavior predictable.
+
+The same media-type rule applies to response content: `application/json` wins,
+then the first available media type. This preserves the most useful CLI output
+shape for typical APIs while avoiding progenitor's multi-content assertion.
+
+When an operation declares multiple response variants, `pp` keeps one: `200`,
+else the first 2xx code, else the first available entry such as `default`. This
+trades away progenitor-side typed error handling for MVP compatibility; printed
+CLIs still surface API errors through the generated error path.
 
 ## Auth
 

@@ -56,7 +56,11 @@ impl Cli {
                 name,
                 build,
             } => {
-                let facts = crate::spec::inspect(&spec)?;
+                let loaded = crate::spec::load(&spec)?;
+                for warning in &loaded.normalization_warnings {
+                    eprintln!("pp: {warning}");
+                }
+                let facts = loaded.facts;
                 let bin_name = name.unwrap_or(facts.bin_name);
                 let api_name = format!("{bin_name}-api");
                 let manifest = crate::render::WrapperManifest::new(
@@ -67,7 +71,7 @@ impl Cli {
                     api_name.clone(),
                 );
 
-                crate::progenitor_driver::generate(&spec, &output.join("api"), &api_name)?;
+                crate::progenitor_driver::generate(&loaded.api, &output.join("api"), &api_name)?;
                 crate::render::render(&manifest, &output)?;
 
                 if build {

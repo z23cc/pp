@@ -43,6 +43,7 @@ pub fn disable_proxy(command: &mut Command) -> &mut Command {
         .env_remove("all_proxy")
 }
 
+#[allow(dead_code)]
 pub fn write_spec(dir: &Path, name: &str, spec: &str) -> std::path::PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, spec).expect("failed to write spec");
