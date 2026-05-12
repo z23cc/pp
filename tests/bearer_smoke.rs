@@ -3,15 +3,8 @@ mod common;
 use std::process::Command;
 
 #[test]
-#[ignore = "expensive smoke test: runs cargo-progenitor and cargo build --release; run with `cargo test -- --ignored`"]
+#[ignore = "expensive smoke test: generates and builds a wrapper CLI; run with `cargo test -- --ignored`"]
 fn bearer_token_is_sent() {
-    if !common::cargo_progenitor_available() {
-        eprintln!(
-            "skipping: cargo-progenitor is not installed; run `cargo install cargo-progenitor`"
-        );
-        return;
-    }
-
     let mut server = mockito::Server::new();
     let mock = server
         .mock("GET", "/ping")
@@ -72,7 +65,7 @@ components:
 
     let mut command = Command::new(common::generated_bin(&out_dir, "my-api"));
     let output = common::disable_proxy(&mut command)
-        .arg("get-ping")
+        .arg("get_ping")
         .env("MY_API_TOKEN", "foo")
         .output()
         .expect("failed to run generated command");

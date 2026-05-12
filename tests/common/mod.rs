@@ -1,14 +1,6 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-pub fn cargo_progenitor_available() -> bool {
-    Command::new("cargo-progenitor")
-        .arg("--help")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
 pub fn pp_bin() -> &'static str {
     env!("CARGO_BIN_EXE_pp")
 }
