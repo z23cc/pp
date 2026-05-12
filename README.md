@@ -1,14 +1,12 @@
 # pp — Printing Press (Rust)
 
 `pp` turns one OpenAPI 3.0 YAML/JSON spec into a buildable Rust CLI workspace.
-It inspects the spec, delegates API client + command generation to
-`cargo-progenitor`, then renders the wrapper files that make the generated CLI
-runnable.
+It inspects the spec, links `progenitor` as a library for API client + command
+generation, then renders the wrapper files that make the generated CLI runnable.
 
 ## Prerequisites
 
 ```bash
-cargo install cargo-progenitor
 cargo build
 ```
 
@@ -52,11 +50,11 @@ cargo test
 ```
 
 Smoke tests generate real CLIs and run `cargo build --release`, so they are
-ignored by default. Run them explicitly when `cargo-progenitor` is installed:
+ignored by default. Run them explicitly when needed:
 
 ```bash
 cargo test -- --ignored
 ```
 
-The smoke suite covers petstore generation/build/help plus bearer and API-key
-headers against a local `mockito` server.
+The smoke suite covers petstore generation/build plus parameterized dispatcher
+commands and bearer/API-key headers against a local `mockito` server.
