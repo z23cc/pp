@@ -1,41 +1,32 @@
 use crate::context::Context;
-use anyhow::{anyhow, Result};
-use clap::{ArgMatches, Parser};
+use anyhow::Result;
 
-#[derive(Parser, Debug)]
-#[command(name = "{{ bin_name }}", about = "Generated API CLI")]
-pub struct Cli {}
-
-impl Cli {
-    pub fn command() -> clap::Command {
-        let mut command = <Self as clap::CommandFactory>::command();
-{% for operation in operations %}
-        command = command.subcommand(clap::Command::new("{{ operation.command_name }}"));
-{% endfor %}
-        command
-    }
-}
-
-pub async fn dispatch(context: &Context, matches: &ArgMatches) -> Result<()> {
-    let Some((name, _submatches)) = matches.subcommand() else {
-        let mut command = Cli::command();
-        command.print_help()?;
-        println!();
-        return Ok(());
-    };
-
+pub async fn run(context: Context) -> Result<()> {
     let client = {{ progenitor_crate_name }}::Client::new_with_client(
         &context.base_url,
         context.client.clone(),
     );
-
-    match name {
-{% for operation in operations %}
-        "{{ operation.command_name }}" => {
-            let value = client.{{ operation.method_name }}().send().await;
-            crate::print::print_result(value)
+    let cli = {{ progenitor_crate_name }}::cli::Cli::new(client, context);
+    let matches = build_command().get_matches();
+    if let Some((name, matches)) = matches.subcommand() {
+        if let Some(cmd) = {{ progenitor_crate_name }}::cli::CliCommand::iter()
+            .find(|cmd| cmd.operation_id() == name)
+        {
+            cli.execute(cmd, matches).await
+        } else {
+            unreachable!("clap returned an unknown generated command: {name}")
         }
-{% endfor %}
-        _ => Err(anyhow!("unknown generated command: {name}")),
+    } else {
+        build_command().print_help()?;
+        println!();
+        Ok(())
     }
+}
+
+fn build_command() -> clap::Command {
+    let mut command = clap::Command::new("{{ bin_name }}").about("Generated API CLI");
+    for cmd in {{ progenitor_crate_name }}::cli::CliCommand::iter() {
+        command = command.subcommand({{ progenitor_crate_name }}::cli::Cli::<Context>::get_command(cmd).name(cmd.operation_id()));
+    }
+    command
 }

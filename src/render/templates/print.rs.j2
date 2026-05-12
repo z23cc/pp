@@ -1,15 +1,48 @@
-use anyhow::{anyhow, Result};
+use crate::context::Context;
 use progenitor_client::{Error, ResponseValue};
 
-pub fn print_result<T>(value: Result<ResponseValue<T>, Error<()>>) -> Result<()>
-where
-    T: std::fmt::Debug,
-{
-    match value {
-        Ok(value) => {
-            println!("{:#?}", value.into_inner());
-            Ok(())
-        }
-        Err(error) => Err(anyhow!("API request failed: {error:?}")),
+impl {{ progenitor_crate_name }}::cli::CliConfig for Context {
+    fn success_item<T>(&self, value: &ResponseValue<T>)
+    where
+        T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
+    {
+        println!("{value:#?}");
+    }
+
+    fn success_no_item(&self, _value: &ResponseValue<()>) {
+        println!("OK");
+    }
+
+    fn error<T>(&self, value: &Error<T>)
+    where
+        T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
+    {
+        eprintln!("API request failed: {value:?}");
+    }
+
+    fn list_start<T>(&self)
+    where
+        T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
+    {
+    }
+
+    fn list_item<T>(&self, value: &T)
+    where
+        T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
+    {
+        println!("{value:#?}");
+    }
+
+    fn list_end_success<T>(&self)
+    where
+        T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
+    {
+    }
+
+    fn list_end_error<T>(&self, value: &Error<T>)
+    where
+        T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
+    {
+        eprintln!("API request failed: {value:?}");
     }
 }

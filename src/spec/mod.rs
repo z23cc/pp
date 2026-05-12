@@ -2,7 +2,7 @@
 //! to drive progenitor + wrapper templates.
 
 use anyhow::{anyhow, Context, Result};
-use heck::{ToKebabCase, ToSnakeCase};
+use heck::ToKebabCase;
 use openapiv3::{OpenAPI, ReferenceOr, SecurityScheme};
 use serde::Serialize;
 use std::path::Path;
@@ -27,13 +27,6 @@ pub struct SpecFacts {
     pub base_url_is_relative: bool,
     pub operation_count: usize,
     pub auth_kind: AuthKind,
-    pub operations: Vec<OperationFacts>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OperationFacts {
-    pub command_name: String,
-    pub method_name: String,
 }
 
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content)
@@ -55,7 +48,6 @@ pub fn inspect(path: &Path) -> Result<SpecFacts> {
     };
 
     let operation_count = count_operations(&spec);
-    let operations = collect_get_operations(&spec);
     let auth_kind = derive_auth_kind(&spec)?;
 
     Ok(SpecFacts {
@@ -65,7 +57,6 @@ pub fn inspect(path: &Path) -> Result<SpecFacts> {
         base_url_is_relative,
         operation_count,
         auth_kind,
-        operations,
     })
 }
 
@@ -101,29 +92,6 @@ fn count_operations(spec: &OpenAPI) -> usize {
         }
     }
     n
-}
-
-fn collect_get_operations(spec: &OpenAPI) -> Vec<OperationFacts> {
-    let mut operations = Vec::new();
-    for (_, path_item) in spec.paths.iter() {
-        let ReferenceOr::Item(item) = path_item else {
-            continue;
-        };
-        let Some(operation) = &item.get else {
-            continue;
-        };
-        if !item.parameters.is_empty() || !operation.parameters.is_empty() {
-            continue;
-        }
-        let Some(operation_id) = &operation.operation_id else {
-            continue;
-        };
-        operations.push(OperationFacts {
-            command_name: operation_id.to_kebab_case(),
-            method_name: operation_id.to_snake_case(),
-        });
-    }
-    operations
 }
 
 fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
@@ -232,14 +200,11 @@ components:
                     base_url_is_relative: false,
                     operation_count: count_operations(&spec),
                     auth_kind: derive_auth_kind(&spec).unwrap(),
-                    operations: collect_get_operations(&spec),
                 }
             })
             .unwrap();
         assert_eq!(facts.bin_name, "swagger-petstore");
         assert_eq!(facts.operation_count, 1);
-        assert_eq!(facts.operations.len(), 1);
-        assert_eq!(facts.operations[0].command_name, "find-pets-by-status");
         assert_eq!(facts.auth_kind, AuthKind::None);
         assert_eq!(
             facts.base_url.as_deref(),

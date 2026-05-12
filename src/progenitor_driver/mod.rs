@@ -11,8 +11,8 @@ use std::path::Path;
 pub fn generate(spec: &Path, out_dir: &Path, crate_name: &str) -> Result<()> {
     let raw = fs::read_to_string(spec)
         .with_context(|| format!("failed to read spec: {}", spec.display()))?;
-    let api: OpenAPI = parse_openapi(&raw)
-        .with_context(|| format!("failed to parse spec: {}", spec.display()))?;
+    let api: OpenAPI =
+        parse_openapi(&raw).with_context(|| format!("failed to parse spec: {}", spec.display()))?;
 
     let mut settings = GenerationSettings::default();
     settings
