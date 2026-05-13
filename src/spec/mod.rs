@@ -92,7 +92,13 @@ fn bin_name_from_title(title: &str) -> String {
     let version_noise = Regex::new(r"(?i)\b(v\d+|v?\d+\.\d+(\.\d+)?)\b").expect("valid regex");
     let stripped = openapi_noise.replace_all(title, "");
     let stripped = version_noise.replace_all(&stripped, "");
-    stripped
+    // Cargo crate names must be ASCII [a-zA-Z0-9_-]; transliterate / strip non-ASCII
+    // so specs with Unicode titles (e.g. PokéAPI's "é") still produce valid crates.
+    let ascii_only: String = stripped
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { ' ' })
+        .collect();
+    ascii_only
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -421,6 +427,8 @@ components:
         );
         assert_eq!(bin_name_from_title("My API v1.2.3"), "my-api");
         assert_eq!(bin_name_from_title("Cool API"), "cool-api");
+        assert_eq!(bin_name_from_title("PokéAPI"), "pok-api");
+        assert_eq!(bin_name_from_title("Über API"), "ber-api");
     }
 
     #[test]
