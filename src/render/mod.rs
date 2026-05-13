@@ -375,7 +375,8 @@ fn add_body(
                     properties.insert(name.clone(), property_schema.clone());
                     let cli_name = name.to_kebab_case();
                     args.push(McpArg {
-                        json_name_literal: serde_json::to_string(name).expect("arg name serializes"),
+                        json_name_literal: serde_json::to_string(name)
+                            .expect("arg name serializes"),
                         json_name: name.clone(),
                         cli_name_literal: serde_json::to_string(&cli_name)
                             .expect("arg name serializes"),
@@ -472,7 +473,10 @@ fn schema_kind_json(kind: &SchemaKind, api: &OpenAPI, stack: &mut BTreeSet<Strin
         SchemaKind::Type(Type::Object(object)) => {
             let mut properties = Map::new();
             for (name, schema) in &object.properties {
-                properties.insert(name.clone(), boxed_schema_json_with_stack(schema, api, stack));
+                properties.insert(
+                    name.clone(),
+                    boxed_schema_json_with_stack(schema, api, stack),
+                );
             }
             json!({ "type": "object", "properties": properties, "required": object.required })
         }
@@ -496,7 +500,10 @@ mod tests {
         assert!(properties.contains_key("name"));
         assert!(properties.contains_key("photoUrls"));
         assert!(properties.contains_key("tags"));
-        assert_eq!(properties["tags"]["items"]["properties"]["name"]["type"], "string");
+        assert_eq!(
+            properties["tags"]["items"]["properties"]["name"]["type"],
+            "string"
+        );
         assert!(serde_json::to_string(&schema).unwrap().contains("$ref") == false);
     }
 
@@ -536,10 +543,16 @@ components:
 "##;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
         let tools = mcp_tools(&api, None);
-        let tool = tools.iter().find(|tool| tool.name == "create_cycle").unwrap();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "create_cycle")
+            .unwrap();
         let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
 
-        assert_eq!(schema["properties"]["b"]["properties"]["a"]["type"], "object");
+        assert_eq!(
+            schema["properties"]["b"]["properties"]["a"]["type"],
+            "object"
+        );
         assert_eq!(
             schema["properties"]["b"]["properties"]["a"]["description"],
             "<recursive reference to A>"

@@ -39,6 +39,11 @@ impl Context {
     where
         T: serde::Serialize + std::fmt::Debug,
     {
+        let headers = match value {
+            Error::ErrorResponse(response) => headers_json(response.headers()),
+            Error::UnexpectedResponse(response) => headers_json(response.headers()),
+            _ => json!({}),
+        };
         let (kind, body) = match value {
             Error::InvalidRequest(message) => ("invalid_request", Some(json!(message))),
             Error::CommunicationError(error) => ("communication_error", Some(json!(error.to_string()))),
@@ -56,8 +61,19 @@ impl Context {
             "kind": kind,
             "status": value.status().map(|status| status.as_u16()),
             "body": body,
+            "headers": headers,
         })
     }
+}
+
+fn headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in headers {
+        if let Ok(value) = value.to_str() {
+            object.insert(name.as_str().to_string(), json!(value));
+        }
+    }
+    serde_json::Value::Object(object)
 }
 
 impl {{ progenitor_crate_name }}::cli::CliConfig for Context {

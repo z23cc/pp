@@ -56,13 +56,23 @@ pub async fn serve(context: Context) -> anyhow::Result<()> {
 }
 
 impl ApiMcpServer {
-    async fn dispatch(&self, tool: &'static ToolDef, arguments: rmcp::model::JsonObject) -> Result<Value, McpError> {
+    async fn dispatch(&self, tool: &'static ToolDef, arguments: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
         let captured = Arc::new(Mutex::new(crate::context::CapturedOutput::default()));
         let mut context = self.context.clone();
         context.output = crate::context::OutputMode::Capture(captured.clone());
         let mut argv = vec![tool.name.to_string()];
         let mut temp_files = Vec::new();
 
+{% if auth_env_var %}
+        if context.auth.is_none() {
+            return Ok(CallToolResult::structured_error(json!({
+                "kind": "auth_missing",
+                "message": "missing required auth env var",
+                "env": "{{ auth_env_var }}"
+            })));
+        }
+
+{% endif %}
         let mut body = serde_json::Map::new();
         for arg in tool.args {
             if let Some(value) = arguments.get(arg.json_name) {
@@ -102,10 +112,49 @@ impl ApiMcpServer {
         let captured = captured.lock().expect("capture lock");
         let value = captured.value.clone().unwrap_or_else(|| json!({ "ok": true }));
         if result.is_err() {
-            return Err(McpError::internal_error("API request failed", Some(value)));
+            return Ok(CallToolResult::structured_error(classify_tool_error(value)));
         }
-        Ok(value)
+        Ok(CallToolResult::structured(value))
     }
+}
+
+fn classify_tool_error(value: Value) -> Value {
+    let error = value.get("error").cloned().unwrap_or(value);
+    let kind = error.get("kind").and_then(Value::as_str).unwrap_or("tool_error");
+    let body = error.get("body").cloned().unwrap_or(error.clone());
+    let status = error
+        .get("status")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .or_else(|| status_from_body(&body).map(|status| json!(status)))
+        .unwrap_or(Value::Null);
+    let mapped_kind = match kind {
+        "communication_error" | "invalid_upgrade" | "response_body_error" | "invalid_response_payload" => "transport_error",
+        "error_response" | "unexpected_response" => "upstream_http_error",
+        "custom" if !status.is_null() => "upstream_http_error",
+        "invalid_request" => "invalid_request",
+        other => other,
+    };
+    json!({
+        "kind": mapped_kind,
+        "status": status,
+        "body": body,
+        "headers": error.get("headers").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+fn status_from_body(body: &Value) -> Option<u16> {
+    let text = body.as_str()?;
+    for token in text.split(|ch: char| !ch.is_ascii_digit()) {
+        if token.len() == 3 {
+            if let Ok(status) = token.parse::<u16>() {
+                if (400..=599).contains(&status) {
+                    return Some(status);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
@@ -170,7 +219,6 @@ impl ServerHandler for ApiMcpServer {
             .iter()
             .find(|tool| tool.name == name)
             .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {name}"), None))?;
-        let value = self.dispatch(tool, request.arguments.unwrap_or_default()).await?;
-        Ok(CallToolResult::structured(value))
+        self.dispatch(tool, request.arguments.unwrap_or_default()).await
     }
 }
