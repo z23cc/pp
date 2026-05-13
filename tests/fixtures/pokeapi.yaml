@@ -1,0 +1,44 @@
+# Source: https://github.com/PokeAPI/pokeapi/blob/master/openapi.yml
+# Trim date: 2026-05-13. Trimmed to one OpenAPI 3.1 endpoint to exercise pp's 3.1 downgrade path.
+openapi: 3.1.0
+info:
+  title: PokeAPI
+  version: 2.0.0
+servers:
+  - url: https://pokeapi.co/api/v2
+paths:
+  /pokemon/{id-or-name}/:
+    get:
+      operationId: pokemonRetrieve
+      parameters:
+        - name: id-or-name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pokemon detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name]
+                properties:
+                  id:
+                    type: integer
+                  name:
+                    type: string
+                  base_experience:
+                    type:
+                      - integer
+                      - 'null'
+                  abilities:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        is_hidden:
+                          type: boolean
+                        slot:
+                          type: integer

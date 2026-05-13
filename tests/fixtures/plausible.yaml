@@ -1,0 +1,52 @@
+# Source: https://plausible.io/docs/stats-api#openapi-specification
+# Trim date: 2026-05-13. Trimmed to a stats endpoint and bearer auth used by pp dogfood.
+openapi: 3.0.3
+info:
+  title: Plausible API
+  version: 1.0.0
+servers:
+  - url: https://plausible.io/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /stats/aggregate:
+    get:
+      operationId: plausible_web_plugins_api_controllers_stats__aggregate
+      summary: Aggregate stats
+      parameters:
+        - name: site_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [day, 7d, 30d, month, 6mo, 12mo, custom]
+        - name: metrics
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Aggregate stats response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: object
+                    properties:
+                      visitors:
+                        type: integer
+                      pageviews:
+                        type: integer
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

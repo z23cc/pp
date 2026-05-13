@@ -1,0 +1,43 @@
+# Source: https://api.apis.guru/v2/specs/interzoid.com/getweathercity/1.0.0/openapi.yaml
+# Trim date: 2026-05-13. Trimmed to the query-API-key weather endpoint used by pp dogfood.
+openapi: 3.0.0
+info:
+  title: Interzoid Get Weather City API
+  version: 1.0.0
+servers:
+  - url: https://api.interzoid.com
+paths:
+  /getweather:
+    get:
+      operationId: getweather
+      parameters:
+        - name: license
+          in: query
+          required: true
+          schema:
+            type: string
+          description: API license key.
+        - name: city
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Weather lookup response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  City:
+                    type: string
+                  State:
+                    type: string
+                  Weather:
+                    type: string
