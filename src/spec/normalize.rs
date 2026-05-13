@@ -190,6 +190,26 @@ fn normalize_maybe_operation(
 fn normalize_operation(operation: &mut Operation, op_name: &str, warnings: &mut Vec<String>) {
     normalize_response_variants(operation, op_name, warnings);
 
+    for (i, param) in operation.parameters.iter_mut().enumerate() {
+        if let ReferenceOr::Item(param) = param {
+            let param_data = match param {
+                openapiv3::Parameter::Query { parameter_data, .. }
+                | openapiv3::Parameter::Header { parameter_data, .. }
+                | openapiv3::Parameter::Path { parameter_data, .. }
+                | openapiv3::Parameter::Cookie { parameter_data, .. } => parameter_data,
+            };
+            if let openapiv3::ParameterSchemaOrContent::Schema(ReferenceOr::Item(schema)) =
+                &mut param_data.format
+            {
+                let _ = normalize_schema(
+                    schema,
+                    &format!("{op_name}.parameters[{i}].{}", param_data.name),
+                    warnings,
+                );
+            }
+        }
+    }
+
     if let Some(ReferenceOr::Item(request_body)) = operation.request_body.as_mut() {
         normalize_request_body(request_body, op_name, warnings);
         if request_body_has_schemaless_content(request_body) {
@@ -270,6 +290,11 @@ fn normalize_request_body(
             dropped.join(", ")
         ));
     }
+    for (mime, media_type) in request_body.content.iter_mut() {
+        if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
+            let _ = normalize_schema(schema, &format!("{op_name}.requestBody.{mime}"), warnings);
+        }
+    }
 }
 
 fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec<String>) {
@@ -278,6 +303,11 @@ fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec
             "normalized {op_name} — kept {kept}, dropped {}",
             dropped.join(", ")
         ));
+    }
+    for (mime, media_type) in response.content.iter_mut() {
+        if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
+            let _ = normalize_schema(schema, &format!("{op_name}.response.{mime}"), warnings);
+        }
     }
 }
 
@@ -320,6 +350,7 @@ fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>)
                 ));
                 any.enumeration.clear();
             }
+            drop_colliding_properties(&mut any.properties, &mut any.required, path, warnings);
             for (name, property) in any.properties.iter_mut() {
                 normalize_boxed_schema_ref(
                     property,
@@ -350,6 +381,7 @@ fn normalize_object_schema(
     path: &str,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    drop_colliding_properties(&mut object.properties, &mut object.required, path, warnings);
     for (name, property) in object.properties.iter_mut() {
         normalize_boxed_schema_ref(property, &format!("{path}.properties.{name}"), warnings)?;
     }
@@ -422,6 +454,37 @@ fn is_supported_schema_type(typ: &str) -> bool {
         typ,
         "string" | "number" | "integer" | "boolean" | "array" | "object"
     )
+}
+
+fn drop_colliding_properties<V>(
+    properties: &mut indexmap::IndexMap<String, V>,
+    required: &mut Vec<String>,
+    path: &str,
+    warnings: &mut Vec<String>,
+) {
+    let mut by_ident: HashMap<String, Vec<String>> = HashMap::new();
+    for name in properties.keys() {
+        by_ident
+            .entry(enum_identifier_form(name))
+            .or_default()
+            .push(name.clone());
+    }
+    let mut to_drop: Vec<String> = Vec::new();
+    for (_ident, names) in by_ident {
+        if names.len() > 1 {
+            let kept = &names[0];
+            let dropped: Vec<String> = names.iter().skip(1).cloned().collect();
+            warnings.push(format!(
+                "normalized {path} — kept property '{kept}', dropped colliding [{}] (Rust identifier sanitization collision); wire format preserved for kept field",
+                dropped.join(", ")
+            ));
+            to_drop.extend(dropped);
+        }
+    }
+    for name in &to_drop {
+        properties.shift_remove(name);
+    }
+    required.retain(|name| !to_drop.contains(name));
 }
 
 fn string_enum_collision(values: &[Option<String>]) -> Option<String> {
