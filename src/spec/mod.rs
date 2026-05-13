@@ -39,6 +39,8 @@ pub struct LoadedSpec {
     pub normalization_warnings: Vec<String>,
 }
 
+type DowngradeReport = Option<(String, usize)>;
+
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content),
 /// normalize it for progenitor, and derive [`SpecFacts`].
 pub fn load(path: &Path) -> Result<LoadedSpec> {
@@ -74,8 +76,8 @@ fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
         }
     };
 
-    let operation_count = count_operations(&spec);
-    let auth_kind = derive_auth_kind(&spec)?;
+    let operation_count = count_operations(spec);
+    let auth_kind = derive_auth_kind(spec)?;
 
     Ok(SpecFacts {
         title,
@@ -125,7 +127,7 @@ fn parse(raw: &str, _path: &Path) -> Result<OpenAPI> {
     }
 }
 
-fn downgrade_openapi_31(raw: &str) -> Result<(Option<String>, Option<(String, usize)>)> {
+fn downgrade_openapi_31(raw: &str) -> Result<(Option<String>, DowngradeReport)> {
     let Some(version) = detect_openapi_31(raw) else {
         return Ok((None, None));
     };
@@ -245,9 +247,9 @@ fn detect_openapi_31(raw: &str) -> Option<String> {
     }
 
     let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    let Some(after_key) = compact.split_once("\"openapi\":\"").map(|(_, value)| value) else {
-        return None;
-    };
+    let after_key = compact
+        .split_once("\"openapi\":\"")
+        .map(|(_, value)| value)?;
     let version = after_key.split('"').next().unwrap_or_default();
     version.starts_with("3.1").then(|| version.to_string())
 }

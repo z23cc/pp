@@ -806,7 +806,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pp"
+name = "pp-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
