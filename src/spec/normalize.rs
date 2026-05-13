@@ -13,6 +13,8 @@ const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
 ];
 
 const JSON_MIME: &str = "application/json";
+const FORM_MIME: &str = "application/x-www-form-urlencoded";
+const OCTET_STREAM_MIME: &str = "application/octet-stream";
 
 pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
@@ -79,6 +81,13 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             stats.dropped_defaults
         ));
     }
+    if !stats.dropped_unsupported_request_body_ops.is_empty() {
+        warnings.push(format!(
+            "dropped {} operations with progenitor-unsupported request body: {}",
+            stats.dropped_unsupported_request_body_ops.len(),
+            stats.dropped_unsupported_request_body_ops.join(", ")
+        ));
+    }
 
     Ok(warnings)
 }
@@ -86,6 +95,7 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
 #[derive(Default)]
 struct NormalizeStats {
     dropped_defaults: usize,
+    dropped_unsupported_request_body_ops: Vec<String>,
 }
 
 fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
@@ -207,11 +217,14 @@ fn normalize_maybe_operation(
     warnings: &mut Vec<String>,
     stats: &mut NormalizeStats,
 ) {
-    let Some(operation) = operation else {
+    let Some(operation_ref) = operation.as_mut() else {
         return;
     };
-    let op_name = operation_name(method, path, operation);
-    normalize_operation(operation, &op_name, warnings, stats);
+    let op_name = operation_name(method, path, operation_ref);
+    if normalize_operation(operation_ref, &op_name, warnings, stats) {
+        stats.dropped_unsupported_request_body_ops.push(op_name);
+        *operation = None;
+    }
 }
 
 fn normalize_operation(
@@ -219,7 +232,7 @@ fn normalize_operation(
     op_name: &str,
     warnings: &mut Vec<String>,
     stats: &mut NormalizeStats,
-) {
+) -> bool {
     normalize_response_variants(operation, op_name, warnings);
 
     for (i, param) in operation.parameters.iter_mut().enumerate() {
@@ -244,7 +257,9 @@ fn normalize_operation(
     }
 
     if let Some(ReferenceOr::Item(request_body)) = operation.request_body.as_mut() {
-        normalize_request_body(request_body, op_name, warnings, stats);
+        if normalize_request_body(request_body, op_name, warnings, stats) {
+            return true;
+        }
         if request_body_has_schemaless_content(request_body) {
             operation.request_body = None;
             warnings.push(format!(
@@ -261,6 +276,7 @@ fn normalize_operation(
     if let Some(ReferenceOr::Item(response)) = operation.responses.default.as_mut() {
         normalize_response(response, op_name, warnings, stats);
     }
+    false
 }
 
 fn normalize_response_variants(
@@ -317,12 +333,15 @@ fn normalize_request_body(
     op_name: &str,
     warnings: &mut Vec<String>,
     stats: &mut NormalizeStats,
-) {
-    if let Some((kept, dropped)) = normalize_content(&mut request_body.content) {
+) -> bool {
+    if let Some((kept, dropped)) = normalize_request_content(&mut request_body.content) {
         warnings.push(format!(
             "normalized {op_name} — kept {kept}, dropped {}",
             dropped.join(", ")
         ));
+    }
+    if request_body.content.is_empty() {
+        return true;
     }
     for (mime, media_type) in request_body.content.iter_mut() {
         if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
@@ -334,6 +353,7 @@ fn normalize_request_body(
             );
         }
     }
+    false
 }
 
 fn normalize_response(
@@ -642,6 +662,46 @@ fn normalize_content(
     Some((kept, dropped))
 }
 
+fn normalize_request_content(
+    content: &mut indexmap::IndexMap<String, MediaType>,
+) -> Option<(String, Vec<String>)> {
+    let supported: Vec<String> = content
+        .keys()
+        .filter(|mime| is_supported_request_mime(mime))
+        .cloned()
+        .collect();
+    if supported.is_empty() {
+        content.clear();
+        return None;
+    }
+    if supported.len() == content.len() && content.len() <= 1 {
+        return None;
+    }
+
+    let kept = if content.contains_key(JSON_MIME) {
+        JSON_MIME.to_string()
+    } else {
+        supported
+            .into_iter()
+            .min()
+            .expect("supported content exists")
+    };
+    let dropped: Vec<String> = content
+        .keys()
+        .filter(|mime| *mime != &kept)
+        .cloned()
+        .collect();
+    let media_type = content.get(&kept).expect("kept media type exists").clone();
+    content.clear();
+    content.insert(kept.clone(), media_type);
+
+    Some((kept, dropped))
+}
+
+fn is_supported_request_mime(mime: &str) -> bool {
+    matches!(mime, JSON_MIME | FORM_MIME | OCTET_STREAM_MIME)
+}
+
 fn operation_name(method: &str, path: &str, operation: &Operation) -> String {
     operation
         .operation_id
@@ -896,6 +956,90 @@ paths:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("kept application/json"));
         assert!(warnings[0].contains("dropped application/xml"));
+    }
+
+    #[test]
+    fn unsupported_only_request_body_drops_operation_and_warns_once() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Multipart Body
+  version: "1.0.0"
+paths:
+  /files:
+    post:
+      operationId: uploadFile
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let path = spec.paths.paths.get("/files").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+
+        assert!(path.post.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            "dropped 1 operations with progenitor-unsupported request body: uploadFile"
+        );
+    }
+
+    #[test]
+    fn request_body_keeps_supported_form_media_type() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Form Body
+  version: "1.0.0"
+paths:
+  /tokens:
+    post:
+      operationId: createToken
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+          multipart/form-data:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let path = spec.paths.paths.get("/tokens").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let request_body = path.post.as_ref().unwrap().request_body.as_ref().unwrap();
+        let ReferenceOr::Item(request_body) = request_body else {
+            panic!("expected inline request body");
+        };
+
+        assert_eq!(
+            request_body.content.keys().cloned().collect::<Vec<_>>(),
+            vec![FORM_MIME]
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("kept application/x-www-form-urlencoded"));
+        assert!(warnings[0].contains("dropped multipart/form-data"));
     }
 
     #[test]
