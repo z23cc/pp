@@ -33,6 +33,58 @@ pp generate testdata/petstore.yaml -o ./out/petstore --build
 ./out/petstore/target/release/swagger-petstore-open-api-3-0 --help
 ```
 
+## What pp is good for
+
+| User type | Use pp for |
+| --- | --- |
+| Scripters | Install one typed binary from an OpenAPI spec and call endpoints from shell scripts. |
+| Agents | Expose the same generated binary as an MCP stdio server with one tool per operation. |
+| DevOps | Generate reproducible Rust CLIs that share auth, base URL, and request handling. |
+
+## Agent users
+
+Every generated binary supports human CLI commands and an MCP stdio server:
+
+```bash
+pp generate stripe.yaml -o ./stripe --build
+cargo install --path ./stripe
+stripe charges_retrieve --id ch_123
+stripe mcp
+```
+
+Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "stripe": {
+      "command": "stripe",
+      "args": ["mcp"],
+      "env": {
+        "STRIPE_TOKEN": "sk_test_..."
+      }
+    }
+  }
+}
+```
+
+Example `tools/list` entry:
+
+```json
+{
+  "name": "find_pets_by_status",
+  "description": "Finds Pets by status. [auth: SWAGGER_PETSTORE_API_KEY env var]",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "status": { "type": "string" } },
+    "required": ["status"]
+  }
+}
+```
+
+Use `--json` with normal CLI commands to get one structured JSON value on stdout.
+Human-readable progress and diagnostics stay on stderr.
+
 ## Spec normalization
 
 `pp` normalizes specs before handing them to `progenitor`. It prints each

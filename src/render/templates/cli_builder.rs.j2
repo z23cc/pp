@@ -1,14 +1,46 @@
 use crate::context::Context;
 use anyhow::Result;
 
-pub async fn run(context: Context) -> Result<()> {
+pub async fn run() -> Result<()> {
+    let matches = build_command().get_matches();
+    if matches.subcommand_name() == Some("mcp") {
+        let context = Context::new_mcp()?;
+        return crate::mcp::serve(context).await;
+    }
+
+    let context = if matches.get_flag("json") {
+        match Context::new_json() {
+            Ok(context) => context,
+            Err(error) => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": {
+                            "kind": "context",
+                            "status": null,
+                            "body": error.to_string(),
+                        }
+                    })
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        Context::new()?
+    };
+    run_with_matches(context, &matches).await
+}
+
+pub async fn run_with_matches(context: Context, matches: &clap::ArgMatches) -> Result<()> {
     let client = {{ progenitor_crate_name }}::Client::new_with_client(
         &context.base_url,
         context.client.clone(),
     );
     let cli = {{ progenitor_crate_name }}::cli::Cli::new(client, context);
-    let matches = build_command().get_matches();
     if let Some((name, matches)) = matches.subcommand() {
+        if name == "mcp" {
+            unreachable!("mcp is handled before generated dispatch")
+        }
         if let Some(cmd) = {{ progenitor_crate_name }}::cli::CliCommand::iter()
             .find(|cmd| cmd.operation_id() == name)
         {
@@ -23,8 +55,35 @@ pub async fn run(context: Context) -> Result<()> {
     }
 }
 
+pub async fn execute_operation(context: Context, name: &str, matches: &clap::ArgMatches) -> Result<()> {
+    let client = {{ progenitor_crate_name }}::Client::new_with_client(
+        &context.base_url,
+        context.client.clone(),
+    );
+    let cli = {{ progenitor_crate_name }}::cli::Cli::new(client, context);
+    let cmd = {{ progenitor_crate_name }}::cli::CliCommand::iter()
+        .find(|cmd| cmd.operation_id() == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown operation: {name}"))?;
+    cli.execute(cmd, matches).await
+}
+
+pub fn command_for_operation(name: &str) -> Option<clap::Command> {
+    {{ progenitor_crate_name }}::cli::CliCommand::iter()
+        .find(|cmd| cmd.operation_id() == name)
+        .map(|cmd| {{ progenitor_crate_name }}::cli::Cli::<Context>::get_command(cmd).name(cmd.operation_id()))
+}
+
 fn build_command() -> clap::Command {
-    let mut command = clap::Command::new("{{ bin_name }}").about("Generated API CLI");
+    let mut command = clap::Command::new("{{ bin_name }}")
+        .about("Generated API CLI")
+        .arg(
+            clap::Arg::new("json")
+                .long("json")
+                .help("Print one structured JSON value to stdout")
+                .global(true)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .subcommand(clap::Command::new("mcp").about("Run an MCP server over stdio"));
     for cmd in {{ progenitor_crate_name }}::cli::CliCommand::iter() {
         command = command.subcommand({{ progenitor_crate_name }}::cli::Cli::<Context>::get_command(cmd).name(cmd.operation_id()));
     }

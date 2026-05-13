@@ -1,15 +1,53 @@
 use anyhow::Result;
+use std::sync::{Arc, Mutex};
 
 /// Runtime context shared by generated CLI command handlers.
+#[derive(Clone)]
 pub struct Context {
     pub client: reqwest::Client,
     pub base_url: String,
     pub auth: Option<(String, String)>,
+    pub output: OutputMode,
+}
+
+#[derive(Clone)]
+pub enum OutputMode {
+    Human,
+    Json(Arc<Mutex<CapturedOutput>>),
+    Capture(Arc<Mutex<CapturedOutput>>),
+}
+
+#[derive(Default)]
+pub struct CapturedOutput {
+    pub value: Option<serde_json::Value>,
+    pub list: Option<Vec<serde_json::Value>>,
 }
 
 impl Context {
     pub fn new() -> Result<Self> {
+        Self::new_with_output(OutputMode::Human)
+    }
+
+    pub fn new_json() -> Result<Self> {
+        Self::new_with_output(OutputMode::Json(Arc::new(Mutex::new(CapturedOutput::default()))))
+    }
+
+    pub fn new_capture() -> Result<(Self, Arc<Mutex<CapturedOutput>>)> {
+        let captured = Arc::new(Mutex::new(CapturedOutput::default()));
+        let context = Self::new_with_output(OutputMode::Capture(captured.clone()))?;
+        Ok((context, captured))
+    }
+
+    pub fn new_mcp() -> Result<Self> {
+        Self::new_with_output_and_auth(OutputMode::Human, Self::auth_header().ok().flatten())
+    }
+
+    fn new_with_output(output: OutputMode) -> Result<Self> {
         let auth = Self::auth_header()?;
+        Self::new_with_output_and_auth(output, auth)
+    }
+
+    fn new_with_output_and_auth(output: OutputMode, auth: Option<(String, String)>) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some((name, value)) = &auth {
             headers.insert(
@@ -25,6 +63,7 @@ impl Context {
             client,
             base_url: "{{ base_url }}".to_string(),
             auth,
+            output,
         })
     }
 }

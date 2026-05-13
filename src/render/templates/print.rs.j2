@@ -1,48 +1,151 @@
-use crate::context::Context;
+use crate::context::{Context, OutputMode};
 use progenitor_client::{Error, ResponseValue};
+use serde_json::json;
+
+impl Context {
+    fn emit_value(&self, value: serde_json::Value) {
+        match &self.output {
+            OutputMode::Human => println!("{value:#?}"),
+            OutputMode::Json(captured) => {
+                let mut captured = captured.lock().expect("capture lock");
+                if captured.list.is_some() {
+                    captured
+                        .list
+                        .as_mut()
+                        .expect("list exists")
+                        .push(value);
+                } else {
+                    println!("{}", serde_json::to_string(&value).expect("JSON output serializes"));
+                    captured.value = Some(value);
+                }
+            }
+            OutputMode::Capture(captured) => {
+                captured.lock().expect("capture lock").value = Some(value);
+            }
+        }
+    }
+
+    fn emit_error_value(&self, value: serde_json::Value) {
+        match &self.output {
+            OutputMode::Human => eprintln!("API request failed: {value:#?}"),
+            OutputMode::Json(_) => println!("{}", serde_json::to_string(&json!({ "error": value })).expect("JSON error serializes")),
+            OutputMode::Capture(captured) => {
+                captured.lock().expect("capture lock").value = Some(json!({ "error": value }));
+            }
+        }
+    }
+
+    fn error_json<T>(&self, value: &Error<T>) -> serde_json::Value
+    where
+        T: serde::Serialize + std::fmt::Debug,
+    {
+        let (kind, body) = match value {
+            Error::InvalidRequest(message) => ("invalid_request", Some(json!(message))),
+            Error::CommunicationError(error) => ("communication_error", Some(json!(error.to_string()))),
+            Error::InvalidUpgrade(error) => ("invalid_upgrade", Some(json!(error.to_string()))),
+            Error::ErrorResponse(response) => ("error_response", serde_json::to_value(response.as_ref()).ok()),
+            Error::ResponseBodyError(error) => ("response_body_error", Some(json!(error.to_string()))),
+            Error::InvalidResponsePayload(bytes, error) => {
+                let body = String::from_utf8_lossy(bytes).to_string();
+                ("invalid_response_payload", Some(json!(format!("{error}: {body}"))))
+            }
+            Error::UnexpectedResponse(response) => ("unexpected_response", Some(json!(response.status().to_string()))),
+            Error::Custom(message) => ("custom", Some(json!(message))),
+        };
+        json!({
+            "kind": kind,
+            "status": value.status().map(|status| status.as_u16()),
+            "body": body,
+        })
+    }
+}
 
 impl {{ progenitor_crate_name }}::cli::CliConfig for Context {
     fn success_item<T>(&self, value: &ResponseValue<T>)
     where
         T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
     {
-        println!("{value:#?}");
+        match &self.output {
+            OutputMode::Human => println!("{value:#?}"),
+            _ => self.emit_value(serde_json::to_value(value.as_ref()).expect("response serializes")),
+        }
     }
 
     fn success_no_item(&self, _value: &ResponseValue<()>) {
-        println!("OK");
+        match &self.output {
+            OutputMode::Human => println!("OK"),
+            _ => self.emit_value(json!({ "ok": true })),
+        }
     }
 
     fn error<T>(&self, value: &Error<T>)
     where
         T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
     {
-        eprintln!("API request failed: {value:?}");
+        match &self.output {
+            OutputMode::Human => eprintln!("API request failed: {value:?}"),
+            _ => self.emit_error_value(self.error_json(value)),
+        }
     }
 
     fn list_start<T>(&self)
     where
         T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
     {
+        match &self.output {
+            OutputMode::Json(captured) | OutputMode::Capture(captured) => {
+                captured.lock().expect("capture lock").list = Some(Vec::new());
+            }
+            OutputMode::Human => {}
+        }
     }
 
     fn list_item<T>(&self, value: &T)
     where
         T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
     {
-        println!("{value:#?}");
+        match &self.output {
+            OutputMode::Human => println!("{value:#?}"),
+            OutputMode::Json(captured) | OutputMode::Capture(captured) => {
+                let mut captured = captured.lock().expect("capture lock");
+                captured
+                    .list
+                    .get_or_insert_with(Vec::new)
+                    .push(serde_json::to_value(value).expect("list item serializes"));
+            }
+        }
     }
 
     fn list_end_success<T>(&self)
     where
         T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
     {
+        match &self.output {
+            OutputMode::Json(captured) => {
+                let mut captured = captured.lock().expect("capture lock");
+                if let Some(list) = captured.list.take() {
+                    let value = serde_json::Value::Array(list);
+                    println!("{}", serde_json::to_string(&value).expect("JSON list serializes"));
+                    captured.value = Some(value);
+                }
+            }
+            OutputMode::Capture(captured) => {
+                let mut captured = captured.lock().expect("capture lock");
+                if let Some(list) = captured.list.take() {
+                    captured.value = Some(serde_json::Value::Array(list));
+                }
+            }
+            OutputMode::Human => {}
+        }
     }
 
     fn list_end_error<T>(&self, value: &Error<T>)
     where
         T: schemars::JsonSchema + serde::Serialize + std::fmt::Debug,
     {
-        eprintln!("API request failed: {value:?}");
+        match &self.output {
+            OutputMode::Human => eprintln!("API request failed: {value:?}"),
+            _ => self.emit_error_value(self.error_json(value)),
+        }
     }
 }

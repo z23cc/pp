@@ -74,7 +74,8 @@ impl Cli {
                     facts.base_url_is_relative,
                     facts.auth_kind,
                     api_name.clone(),
-                );
+                )
+                .with_openapi(&loaded.api);
                 if let crate::spec::AuthKind::QueryApiKey { param_name } = &manifest.auth_kind {
                     eprintln!(
                         "pp: query API key '{param_name}' auto-injection is limited — users may still need --{param_name} on the command line"

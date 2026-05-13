@@ -1,0 +1,159 @@
+use crate::context::Context;
+use rmcp::model::{CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool, ToolsCapability};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, transport::stdio};
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+pub struct ApiMcpServer {
+    context: Context,
+}
+
+struct ToolDef {
+    name: &'static str,
+    description: &'static str,
+    input_schema: fn() -> rmcp::model::JsonObject,
+    args: &'static [ArgDef],
+}
+
+struct ArgDef {
+    json_name: &'static str,
+    cli_name: &'static str,
+}
+
+{% for tool in mcp_tools %}
+fn schema_{{ loop.index }}() -> rmcp::model::JsonObject {
+    match json!({{ tool.input_schema }}) {
+        Value::Object(object) => object,
+        _ => rmcp::model::JsonObject::new(),
+    }
+}
+
+static ARGS_{{ loop.index }}: &[ArgDef] = &[
+{% for arg in tool.args %}
+    ArgDef { json_name: {{ arg.json_name_literal }}, cli_name: {{ arg.cli_name_literal }} },
+{% endfor %}
+];
+{% endfor %}
+
+static TOOLS: &[ToolDef] = &[
+{% for tool in mcp_tools %}
+    ToolDef {
+        name: "{{ tool.name }}",
+        description: {{ tool.description_literal }},
+        input_schema: schema_{{ loop.index }},
+        args: ARGS_{{ loop.index }},
+    },
+{% endfor %}
+];
+
+pub async fn serve(context: Context) -> anyhow::Result<()> {
+    let service = ApiMcpServer { context }.serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+impl ApiMcpServer {
+    async fn dispatch(&self, tool: &'static ToolDef, arguments: rmcp::model::JsonObject) -> Result<Value, McpError> {
+        let captured = Arc::new(Mutex::new(crate::context::CapturedOutput::default()));
+        let mut context = self.context.clone();
+        context.output = crate::context::OutputMode::Capture(captured.clone());
+        let mut argv = vec![tool.name.to_string()];
+        let mut temp_files = Vec::new();
+
+        for arg in tool.args {
+            if let Some(value) = arguments.get(arg.json_name) {
+                if value.is_null() {
+                    continue;
+                }
+                argv.push(format!("--{}", arg.cli_name));
+                if arg.cli_name == "json-body" {
+                    let path = std::env::temp_dir().join(format!(
+                        "{{ bin_name }}-mcp-{}-{}-body.json",
+                        tool.name,
+                        std::process::id()
+                    ));
+                    std::fs::write(&path, serde_json::to_vec(value).map_err(|error| {
+                        McpError::invalid_params(error.to_string(), None)
+                    })?)
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                    argv.push(path.display().to_string());
+                    temp_files.push(path);
+                } else {
+                    push_cli_value(&mut argv, value);
+                }
+            }
+        }
+
+        let command = crate::cli_builder::command_for_operation(tool.name)
+            .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {}", tool.name), None))?;
+        let matches = command
+            .try_get_matches_from(argv)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = crate::cli_builder::execute_operation(context, tool.name, &matches).await;
+        for path in temp_files {
+            let _ = std::fs::remove_file(path);
+        }
+        let captured = captured.lock().expect("capture lock");
+        let value = captured.value.clone().unwrap_or_else(|| json!({ "ok": true }));
+        if result.is_err() {
+            return Err(McpError::internal_error("API request failed", Some(value)));
+        }
+        Ok(value)
+    }
+}
+
+fn push_cli_value(argv: &mut Vec<String>, value: &Value) {
+    match value {
+        Value::String(value) => argv.push(value.clone()),
+        Value::Number(value) => argv.push(value.to_string()),
+        Value::Bool(value) => argv.push(value.to_string()),
+        Value::Array(values) => {
+            let flag = argv.pop().expect("flag exists");
+            for value in values {
+                argv.push(flag.clone());
+                push_cli_value(argv, value);
+            }
+        }
+        other => argv.push(other.to_string()),
+    }
+}
+
+impl ServerHandler for ApiMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        let mut info = ServerInfo::default();
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(ToolsCapability { list_changed: Some(false) });
+        info.capabilities = capabilities;
+        info.server_info = Implementation::new("{{ bin_name }}", env!("CARGO_PKG_VERSION"));
+        info
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut result = ListToolsResult::default();
+        result.tools = TOOLS
+            .iter()
+            .map(|tool| Tool::new(tool.name, tool.description, Arc::new((tool.input_schema)())))
+            .collect();
+        Ok(result)
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = request.name.to_string();
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == name)
+            .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {name}"), None))?;
+        let value = self.dispatch(tool, request.arguments.unwrap_or_default()).await?;
+        Ok(CallToolResult::structured(value))
+    }
+}

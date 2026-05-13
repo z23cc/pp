@@ -1,13 +1,12 @@
 mod auth;
 mod cli_builder;
 mod context;
+mod mcp;
 mod print;
 
 use anyhow::Result;
-use context::Context;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let context = Context::new()?;
-    cli_builder::run(context).await
+    cli_builder::run().await
 }
