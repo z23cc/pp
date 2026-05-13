@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use heck::ToSnakeCase;
 use openapiv3::{
     ArrayType, MediaType, ObjectType, OpenAPI, Operation, ReferenceOr, RequestBody, Response,
@@ -284,7 +284,12 @@ fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec
 fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>) -> Result<()> {
     match &mut schema.schema_kind {
         SchemaKind::Type(Type::String(string)) => {
-            detect_string_enum_collisions(&string.enumeration, path)?
+            if let Some(colliding) = string_enum_collision(&string.enumeration) {
+                warnings.push(format!(
+                    "normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"
+                ));
+                string.enumeration.clear();
+            }
         }
         SchemaKind::Type(Type::Object(object)) => normalize_object_schema(object, path, warnings)?,
         SchemaKind::Type(Type::Array(array)) => normalize_array_schema(array, path, warnings)?,
@@ -309,7 +314,12 @@ fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>)
                     ));
                 }
             }
-            detect_json_enum_collisions(&any.enumeration, path)?;
+            if let Some(colliding) = json_enum_collision(&any.enumeration) {
+                warnings.push(format!(
+                    "normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"
+                ));
+                any.enumeration.clear();
+            }
             for (name, property) in any.properties.iter_mut() {
                 normalize_boxed_schema_ref(
                     property,
@@ -414,20 +424,20 @@ fn is_supported_schema_type(typ: &str) -> bool {
     )
 }
 
-fn detect_string_enum_collisions(values: &[Option<String>], path: &str) -> Result<()> {
+fn string_enum_collision(values: &[Option<String>]) -> Option<String> {
     let strings: Vec<&str> = values.iter().filter_map(Option::as_deref).collect();
-    detect_enum_collisions(strings, path)
+    find_enum_collision(strings)
 }
 
-fn detect_json_enum_collisions(values: &[serde_json::Value], path: &str) -> Result<()> {
+fn json_enum_collision(values: &[serde_json::Value]) -> Option<String> {
     let strings: Vec<&str> = values
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect();
-    detect_enum_collisions(strings, path)
+    find_enum_collision(strings)
 }
 
-fn detect_enum_collisions(strings: Vec<&str>, path: &str) -> Result<()> {
+fn find_enum_collision(strings: Vec<&str>) -> Option<String> {
     let mut by_ident: HashMap<String, Vec<&str>> = HashMap::new();
     for value in strings {
         by_ident
@@ -435,13 +445,10 @@ fn detect_enum_collisions(strings: Vec<&str>, path: &str) -> Result<()> {
             .or_default()
             .push(value);
     }
-    if let Some((ident, values)) = by_ident.iter().find(|(_, values)| values.len() > 1) {
-        bail!(
-            "pp: enum collision in {path}: values [{}] all sanitize to '{ident}' — cannot generate; TODO: teach typify/progenitor rename rules to preserve wire values",
-            values.join(", ")
-        );
-    }
-    Ok(())
+    by_ident
+        .into_values()
+        .find(|values| values.len() > 1)
+        .map(|values| values.join(", "))
 }
 
 fn enum_identifier_form(value: &str) -> String {
@@ -592,7 +599,7 @@ components:
     }
 
     #[test]
-    fn enum_sanitization_collision_fails_clearly() {
+    fn enum_sanitization_collision_drops_enum_and_warns() {
         let mut spec: OpenAPI = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
@@ -611,11 +618,21 @@ components:
         )
         .unwrap();
 
-        let err = normalize(&mut spec).unwrap_err().to_string();
+        let warnings = normalize(&mut spec).unwrap();
+        let components = spec.components.unwrap();
+        let ReferenceOr::Item(schema) = components.schemas.get("Reaction").unwrap() else {
+            panic!("expected inline schema");
+        };
+        let SchemaKind::Type(Type::String(string)) = &schema.schema_kind else {
+            panic!("expected string schema");
+        };
 
-        assert!(err.contains("pp: enum collision in component schema Reaction"));
-        assert!(err.contains("values [+1, -1] all sanitize to '_1'"));
-        assert!(err.contains("cannot generate"));
+        assert!(string.enumeration.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("component schema Reaction"));
+        assert!(warnings[0].contains("dropped enum constraint"));
+        assert!(warnings[0].contains("+1, -1"));
+        assert!(warnings[0].contains("preserving wire format"));
     }
 
     #[test]

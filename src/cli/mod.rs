@@ -56,6 +56,7 @@ impl Cli {
                 name,
                 build,
             } => {
+                eprintln!("pp: inspecting {}...", spec.display());
                 let loaded = crate::spec::load(&spec)?;
                 for warning in &loaded.normalization_warnings {
                     eprintln!("pp: {warning}");
@@ -63,6 +64,10 @@ impl Cli {
                 let facts = loaded.facts;
                 let bin_name = name.unwrap_or(facts.bin_name);
                 let api_name = format!("{bin_name}-api");
+                eprintln!(
+                    "pp: spec ok ({} operations, auth={:?}); target bin '{bin_name}'",
+                    facts.operation_count, facts.auth_kind
+                );
                 let manifest = crate::render::WrapperManifest::new(
                     bin_name,
                     facts.base_url,
@@ -71,10 +76,14 @@ impl Cli {
                     api_name.clone(),
                 );
 
+                eprintln!("pp: generating API crate via progenitor...");
                 crate::progenitor_driver::generate(&loaded.api, &output.join("api"), &api_name)?;
+                eprintln!("pp: rendering wrapper crate...");
                 crate::render::render(&manifest, &output)?;
+                eprintln!("pp: workspace written to {}", output.display());
 
                 if build {
+                    eprintln!("pp: running `cargo build --release` (this can take 1-2 minutes)...");
                     let out = ProcessCommand::new("cargo")
                         .arg("build")
                         .arg("--release")
@@ -90,6 +99,7 @@ impl Cli {
                             out.status.code().unwrap_or(-1)
                         ));
                     }
+                    eprintln!("pp: build succeeded");
                 }
 
                 Ok(())
