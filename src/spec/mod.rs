@@ -64,7 +64,7 @@ pub fn inspect(path: &Path) -> Result<SpecFacts> {
 
 fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
     let title = spec.info.title.clone();
-    let bin_name = title.to_kebab_case();
+    let bin_name = bin_name_from_title(&title);
 
     let (base_url, base_url_is_relative) = match spec.servers.first() {
         None => (None, false),
@@ -85,6 +85,14 @@ fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
         operation_count,
         auth_kind,
     })
+}
+
+fn bin_name_from_title(title: &str) -> String {
+    let openapi_noise = Regex::new(r"(?i)\bopen\s*api\s+\d+(\.\d+)?\b").expect("valid regex");
+    let version_noise = Regex::new(r"(?i)\b(v\d+|v?\d+\.\d+(\.\d+)?)\b").expect("valid regex");
+    let stripped = openapi_noise.replace_all(title, "");
+    let stripped = version_noise.replace_all(&stripped, "");
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ").to_kebab_case()
 }
 
 fn parse(raw: &str, _path: &Path) -> Result<OpenAPI> {
@@ -380,7 +388,7 @@ components:
                 // exercise the same derivations inspect() uses
                 SpecFacts {
                     title: spec.info.title.clone(),
-                    bin_name: spec.info.title.to_kebab_case(),
+                    bin_name: bin_name_from_title(&spec.info.title),
                     base_url: spec.servers.first().map(|s| s.url.clone()),
                     base_url_is_relative: false,
                     operation_count: count_operations(&spec),
@@ -395,6 +403,17 @@ components:
             facts.base_url.as_deref(),
             Some("https://petstore3.swagger.io/api/v3")
         );
+    }
+
+    #[test]
+    fn bin_name_strips_version_noise() {
+        assert_eq!(
+            bin_name_from_title("Swagger Petstore - OpenAPI 3.0"),
+            "swagger-petstore"
+        );
+        assert_eq!(bin_name_from_title("GitHub v3 REST API"), "git-hub-rest-api");
+        assert_eq!(bin_name_from_title("My API v1.2.3"), "my-api");
+        assert_eq!(bin_name_from_title("Cool API"), "cool-api");
     }
 
     #[test]

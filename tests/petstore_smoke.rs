@@ -14,10 +14,10 @@ fn petstore_generate_builds_and_lists_real_path_and_query_param_ops() {
         "pp generate --build",
     );
 
-    let bin = common::generated_bin(&out_dir, "swagger-petstore-open-api-3-0");
+    let bin = common::generated_bin(&out_dir, "swagger-petstore");
     let mut command = Command::new(&bin);
     let output = common::disable_proxy(&mut command)
-        .env("SWAGGER_PETSTORE_OPEN_API_3_0_API_KEY", "dummy")
+        .env("SWAGGER_PETSTORE_API_KEY", "dummy")
         .arg("--help")
         .output()
         .expect("failed to run generated help");
@@ -25,7 +25,7 @@ fn petstore_generate_builds_and_lists_real_path_and_query_param_ops() {
 
     let help = String::from_utf8_lossy(
         &Command::new(&bin)
-            .env("SWAGGER_PETSTORE_OPEN_API_3_0_API_KEY", "dummy")
+            .env("SWAGGER_PETSTORE_API_KEY", "dummy")
             .arg("--help")
             .output()
             .expect("failed to rerun generated help")
