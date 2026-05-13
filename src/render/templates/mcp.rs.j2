@@ -20,6 +20,7 @@ struct ToolDef {
 struct ArgDef {
     json_name: &'static str,
     cli_name: &'static str,
+    body_field: bool,
 }
 
 {% for tool in mcp_tools %}
@@ -32,7 +33,7 @@ fn schema_{{ loop.index }}() -> rmcp::model::JsonObject {
 
 static ARGS_{{ loop.index }}: &[ArgDef] = &[
 {% for arg in tool.args %}
-    ArgDef { json_name: {{ arg.json_name_literal }}, cli_name: {{ arg.cli_name_literal }} },
+    ArgDef { json_name: {{ arg.json_name_literal }}, cli_name: {{ arg.cli_name_literal }}, body_field: {{ arg.body_field }} },
 {% endfor %}
 ];
 {% endfor %}
@@ -62,28 +63,31 @@ impl ApiMcpServer {
         let mut argv = vec![tool.name.to_string()];
         let mut temp_files = Vec::new();
 
+        let mut body = serde_json::Map::new();
         for arg in tool.args {
             if let Some(value) = arguments.get(arg.json_name) {
                 if value.is_null() {
                     continue;
                 }
+                if arg.body_field {
+                    body.insert(arg.json_name.to_string(), value.clone());
+                    continue;
+                }
                 argv.push(format!("--{}", arg.cli_name));
                 if arg.cli_name == "json-body" {
-                    let path = std::env::temp_dir().join(format!(
-                        "{{ bin_name }}-mcp-{}-{}-body.json",
-                        tool.name,
-                        std::process::id()
-                    ));
-                    std::fs::write(&path, serde_json::to_vec(value).map_err(|error| {
-                        McpError::invalid_params(error.to_string(), None)
-                    })?)
-                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                    let path = write_json_body(tool.name, value)?;
                     argv.push(path.display().to_string());
                     temp_files.push(path);
                 } else {
                     push_cli_value(&mut argv, value);
                 }
             }
+        }
+        if !body.is_empty() {
+            argv.push("--json-body".to_string());
+            let path = write_json_body(tool.name, &Value::Object(body))?;
+            argv.push(path.display().to_string());
+            temp_files.push(path);
         }
 
         let command = crate::cli_builder::command_for_operation(tool.name)
@@ -102,6 +106,19 @@ impl ApiMcpServer {
         }
         Ok(value)
     }
+}
+
+fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
+    let path = std::env::temp_dir().join(format!(
+        "{{ bin_name }}-mcp-{}-{}-body.json",
+        tool_name,
+        std::process::id()
+    ));
+    std::fs::write(&path, serde_json::to_vec(value).map_err(|error| {
+        McpError::invalid_params(error.to_string(), None)
+    })?)
+    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+    Ok(path)
 }
 
 fn push_cli_value(argv: &mut Vec<String>, value: &Value) {

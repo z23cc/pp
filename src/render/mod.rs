@@ -10,6 +10,7 @@ use openapiv3::{
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -54,6 +55,7 @@ pub struct McpArg {
     pub json_name_literal: String,
     pub cli_name: String,
     pub cli_name_literal: String,
+    pub body_field: bool,
 }
 
 impl WrapperManifest {
@@ -179,6 +181,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.get.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -187,6 +190,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.put.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -195,6 +199,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.post.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -203,6 +208,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.delete.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -211,6 +217,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.options.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -219,6 +226,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.head.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -227,6 +235,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.patch.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
         push_operation(
             &mut tools,
@@ -235,6 +244,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             item.trace.as_ref(),
             &path_params,
             auth_env_var,
+            api,
         );
     }
     tools
@@ -247,6 +257,7 @@ fn push_operation(
     operation: Option<&Operation>,
     path_params: &[ReferenceOr<Parameter>],
     auth_env_var: Option<&str>,
+    api: &OpenAPI,
 ) {
     let Some(operation) = operation else {
         return;
@@ -273,13 +284,14 @@ fn push_operation(
     let mut args = Vec::new();
 
     for parameter in path_params.iter().chain(operation.parameters.iter()) {
-        add_parameter(parameter, &mut properties, &mut required, &mut args);
+        add_parameter(parameter, &mut properties, &mut required, &mut args, api);
     }
     add_body(
         operation.request_body.as_ref(),
         &mut properties,
         &mut required,
         &mut args,
+        api,
     );
 
     let schema = json!({
@@ -303,6 +315,7 @@ fn add_parameter(
     properties: &mut Map<String, Value>,
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
+    api: &OpenAPI,
 ) {
     let ReferenceOr::Item(parameter) = parameter else {
         return;
@@ -312,7 +325,7 @@ fn add_parameter(
         Parameter::Path { parameter_data, .. } => (parameter_data, true),
         _ => return,
     };
-    let schema = parameter_schema(data);
+    let schema = parameter_schema(data, api);
     properties.insert(data.name.clone(), schema);
     if is_path || data.required {
         required.push(data.name.clone());
@@ -323,12 +336,13 @@ fn add_parameter(
         json_name: data.name.clone(),
         cli_name_literal: serde_json::to_string(&cli_name).expect("arg name serializes"),
         cli_name,
+        body_field: false,
     });
 }
 
-fn parameter_schema(data: &ParameterData) -> Value {
+fn parameter_schema(data: &ParameterData, api: &OpenAPI) -> Value {
     match &data.format {
-        ParameterSchemaOrContent::Schema(schema) => schema_json(schema),
+        ParameterSchemaOrContent::Schema(schema) => schema_json(schema, api),
         ParameterSchemaOrContent::Content(_) => json!({ "type": "string" }),
     }
 }
@@ -338,6 +352,7 @@ fn add_body(
     properties: &mut Map<String, Value>,
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
+    api: &OpenAPI,
 ) {
     let Some(ReferenceOr::Item(body)) = request_body else {
         return;
@@ -352,26 +367,37 @@ fn add_body(
     let Some(schema) = media_type.schema.as_ref() else {
         return;
     };
-    if let ReferenceOr::Item(schema) = schema {
-        if let SchemaKind::Type(Type::Object(object)) = &schema.schema_kind {
-            for (name, property_schema) in &object.properties {
-                properties.insert(name.clone(), boxed_schema_json(property_schema));
-                let cli_name = name.to_kebab_case();
-                args.push(McpArg {
-                    json_name_literal: serde_json::to_string(name).expect("arg name serializes"),
-                    json_name: name.clone(),
-                    cli_name_literal: serde_json::to_string(&cli_name)
-                        .expect("arg name serializes"),
-                    cli_name,
-                });
+    let body_schema = schema_json(schema, api);
+    if let Some(object) = body_schema.as_object() {
+        if object.get("type").and_then(Value::as_str) == Some("object") {
+            if let Some(Value::Object(body_properties)) = object.get("properties") {
+                for (name, property_schema) in body_properties {
+                    properties.insert(name.clone(), property_schema.clone());
+                    let cli_name = name.to_kebab_case();
+                    args.push(McpArg {
+                        json_name_literal: serde_json::to_string(name).expect("arg name serializes"),
+                        json_name: name.clone(),
+                        cli_name_literal: serde_json::to_string(&cli_name)
+                            .expect("arg name serializes"),
+                        cli_name: "json-body".to_string(),
+                        body_field: true,
+                    });
+                }
+                if body.required {
+                    if let Some(Value::Array(body_required)) = object.get("required") {
+                        required.extend(
+                            body_required
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string),
+                        );
+                    }
+                }
+                return;
             }
-            if body.required {
-                required.extend(object.required.iter().cloned());
-            }
-            return;
         }
     }
-    properties.insert("body".to_string(), schema_json(schema));
+    properties.insert("body".to_string(), body_schema);
     if body.required {
         required.push("body".to_string());
     }
@@ -380,34 +406,73 @@ fn add_body(
         json_name: "body".to_string(),
         cli_name_literal: "\"json-body\"".to_string(),
         cli_name: "json-body".to_string(),
+        body_field: false,
     });
 }
 
-fn schema_json(schema: &ReferenceOr<Schema>) -> Value {
+fn schema_json(schema: &ReferenceOr<Schema>, api: &OpenAPI) -> Value {
+    schema_json_with_stack(schema, api, &mut BTreeSet::new())
+}
+
+fn schema_json_with_stack(
+    schema: &ReferenceOr<Schema>,
+    api: &OpenAPI,
+    stack: &mut BTreeSet<String>,
+) -> Value {
     match schema {
-        ReferenceOr::Reference { reference } => json!({ "$ref": reference }),
-        ReferenceOr::Item(schema) => schema_kind_json(&schema.schema_kind),
+        ReferenceOr::Reference { reference } => resolve_schema_reference(reference, api, stack),
+        ReferenceOr::Item(schema) => schema_kind_json(&schema.schema_kind, api, stack),
     }
 }
 
-fn boxed_schema_json(schema: &ReferenceOr<Box<Schema>>) -> Value {
+fn boxed_schema_json_with_stack(
+    schema: &ReferenceOr<Box<Schema>>,
+    api: &OpenAPI,
+    stack: &mut BTreeSet<String>,
+) -> Value {
     match schema {
-        ReferenceOr::Reference { reference } => json!({ "$ref": reference }),
-        ReferenceOr::Item(schema) => schema_kind_json(&schema.schema_kind),
+        ReferenceOr::Reference { reference } => resolve_schema_reference(reference, api, stack),
+        ReferenceOr::Item(schema) => schema_kind_json(&schema.schema_kind, api, stack),
     }
 }
 
-fn schema_kind_json(kind: &SchemaKind) -> Value {
+fn resolve_schema_reference(reference: &str, api: &OpenAPI, stack: &mut BTreeSet<String>) -> Value {
+    let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+        return json!({ "$ref": reference });
+    };
+    if !stack.insert(name.to_string()) {
+        return json!({
+            "type": "object",
+            "description": format!("<recursive reference to {name}>")
+        });
+    }
+    let value = api
+        .components
+        .as_ref()
+        .and_then(|components| components.schemas.get(name))
+        .map(|schema| schema_json_with_stack(schema, api, stack))
+        .unwrap_or_else(|| json!({ "$ref": reference }));
+    stack.remove(name);
+    value
+}
+
+fn schema_kind_json(kind: &SchemaKind, api: &OpenAPI, stack: &mut BTreeSet<String>) -> Value {
     match kind {
         SchemaKind::Type(Type::String(_)) => json!({ "type": "string" }),
         SchemaKind::Type(Type::Number(_)) => json!({ "type": "number" }),
         SchemaKind::Type(Type::Integer(_)) => json!({ "type": "integer" }),
         SchemaKind::Type(Type::Boolean(_)) => json!({ "type": "boolean" }),
-        SchemaKind::Type(Type::Array(_)) => json!({ "type": "array" }),
+        SchemaKind::Type(Type::Array(array)) => {
+            let mut value = json!({ "type": "array" });
+            if let Some(items) = &array.items {
+                value["items"] = boxed_schema_json_with_stack(items, api, stack);
+            }
+            value
+        }
         SchemaKind::Type(Type::Object(object)) => {
             let mut properties = Map::new();
             for (name, schema) in &object.properties {
-                properties.insert(name.clone(), boxed_schema_json(schema));
+                properties.insert(name.clone(), boxed_schema_json_with_stack(schema, api, stack));
             }
             json!({ "type": "object", "properties": properties, "required": object.required })
         }
@@ -418,6 +483,68 @@ fn schema_kind_json(kind: &SchemaKind) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_petstore_request_body_ref_is_flattened() {
+        let spec = std::fs::read_to_string("testdata/petstore.yaml").unwrap();
+        let api: OpenAPI = serde_yaml::from_str(&spec).unwrap();
+        let tools = mcp_tools(&api, Some("SWAGGER_PETSTORE_API_KEY"));
+        let add_pet = tools.iter().find(|tool| tool.name == "add_pet").unwrap();
+        let schema: Value = serde_json::from_str(&add_pet.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert!(properties.contains_key("name"));
+        assert!(properties.contains_key("photoUrls"));
+        assert!(properties.contains_key("tags"));
+        assert_eq!(properties["tags"]["items"]["properties"]["name"]["type"], "string");
+        assert!(serde_json::to_string(&schema).unwrap().contains("$ref") == false);
+    }
+
+    #[test]
+    fn mcp_request_body_ref_cycle_uses_sentinel() {
+        let spec = r##"
+openapi: 3.0.3
+info:
+  title: Cycle API
+  version: 1.0.0
+paths:
+  /cycles:
+    post:
+      operationId: createCycle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/A'
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    A:
+      type: object
+      required: [b]
+      properties:
+        b:
+          $ref: '#/components/schemas/B'
+    B:
+      type: object
+      properties:
+        a:
+          $ref: '#/components/schemas/A'
+"##;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let tools = mcp_tools(&api, None);
+        let tool = tools.iter().find(|tool| tool.name == "create_cycle").unwrap();
+        let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
+
+        assert_eq!(schema["properties"]["b"]["properties"]["a"]["type"], "object");
+        assert_eq!(
+            schema["properties"]["b"]["properties"]["a"]["description"],
+            "<recursive reference to A>"
+        );
+    }
 
     #[test]
     fn cargo_template_contains_workspace_and_api_dependency() {
