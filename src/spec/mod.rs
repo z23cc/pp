@@ -266,8 +266,14 @@ fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
     }
 
     let mut first_unsupported = None;
+    let mut oauth2_bearer = false;
     for (_name, scheme_ref) in &components.security_schemes {
         let auth_kind = match scheme_ref {
+            ReferenceOr::Item(SecurityScheme::OAuth2 { .. }) => {
+                // User supplies their own token via `<BIN>_TOKEN`; pp doesn't run the OAuth2 flow.
+                oauth2_bearer = true;
+                AuthKind::None
+            }
             ReferenceOr::Item(scheme) => auth_kind_for_scheme(scheme),
             ReferenceOr::Reference { reference } => AuthKind::Unsupported {
                 reason: format!("$ref security scheme not supported in MVP: {reference}"),
@@ -285,6 +291,10 @@ fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
             }
             AuthKind::None => {}
         }
+    }
+
+    if oauth2_bearer {
+        return Ok(AuthKind::Bearer);
     }
 
     Ok(first_unsupported.unwrap_or(AuthKind::None))
@@ -309,9 +319,7 @@ fn auth_kind_for_scheme(scheme: &SecurityScheme) -> AuthKind {
                 reason: format!("apiKey in '{other:?}' not supported in MVP (only header)"),
             },
         },
-        SecurityScheme::OAuth2 { .. } => AuthKind::Unsupported {
-            reason: "OAuth2 not supported in MVP".into(),
-        },
+        SecurityScheme::OAuth2 { .. } => AuthKind::Bearer,
         SecurityScheme::OpenIDConnect { .. } => AuthKind::Unsupported {
             reason: "OpenID Connect not supported in MVP".into(),
         },
@@ -475,6 +483,27 @@ components:
     }
 
     #[test]
+    fn oauth2_only_detects_bearer() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: My API
+  version: "1.0.0"
+paths: {}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
+    }
+
+    #[test]
     fn all_unsupported_auth_returns_first_unsupported() {
         let spec: OpenAPI = serde_yaml::from_str(
             r#"
@@ -488,9 +517,9 @@ components:
     digestAuth:
       type: http
       scheme: digest
-    oauth2:
-      type: oauth2
-      flows: {}
+    openId:
+      type: openIdConnect
+      openIdConnectUrl: https://example.com/.well-known/openid-configuration
 "#,
         )
         .unwrap();
