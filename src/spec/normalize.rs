@@ -16,12 +16,18 @@ const JSON_MIME: &str = "application/json";
 
 pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
+    let mut stats = NormalizeStats::default();
     shorten_verbose_operation_ids(spec);
 
     if let Some(components) = spec.components.as_mut() {
         for (name, schema) in components.schemas.iter_mut() {
             if let ReferenceOr::Item(schema) = schema {
-                normalize_schema(schema, &format!("component schema {name}"), &mut warnings)?;
+                normalize_schema(
+                    schema,
+                    &format!("component schema {name}"),
+                    &mut warnings,
+                    &mut stats,
+                )?;
             }
         }
         for (name, request_body) in components.request_bodies.iter_mut() {
@@ -30,6 +36,7 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
                     request_body,
                     &format!("component requestBody {name}"),
                     &mut warnings,
+                    &mut stats,
                 );
             }
         }
@@ -39,6 +46,7 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
                     response,
                     &format!("component response {name}"),
                     &mut warnings,
+                    &mut stats,
                 );
             }
         }
@@ -49,17 +57,35 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             continue;
         };
 
-        normalize_maybe_operation("get", path, &mut item.get, &mut warnings);
-        normalize_maybe_operation("put", path, &mut item.put, &mut warnings);
-        normalize_maybe_operation("post", path, &mut item.post, &mut warnings);
-        normalize_maybe_operation("delete", path, &mut item.delete, &mut warnings);
-        normalize_maybe_operation("options", path, &mut item.options, &mut warnings);
-        normalize_maybe_operation("head", path, &mut item.head, &mut warnings);
-        normalize_maybe_operation("patch", path, &mut item.patch, &mut warnings);
-        normalize_maybe_operation("trace", path, &mut item.trace, &mut warnings);
+        normalize_maybe_operation("get", path, &mut item.get, &mut warnings, &mut stats);
+        normalize_maybe_operation("put", path, &mut item.put, &mut warnings, &mut stats);
+        normalize_maybe_operation("post", path, &mut item.post, &mut warnings, &mut stats);
+        normalize_maybe_operation("delete", path, &mut item.delete, &mut warnings, &mut stats);
+        normalize_maybe_operation(
+            "options",
+            path,
+            &mut item.options,
+            &mut warnings,
+            &mut stats,
+        );
+        normalize_maybe_operation("head", path, &mut item.head, &mut warnings, &mut stats);
+        normalize_maybe_operation("patch", path, &mut item.patch, &mut warnings, &mut stats);
+        normalize_maybe_operation("trace", path, &mut item.trace, &mut warnings, &mut stats);
+    }
+
+    if stats.dropped_defaults > 0 {
+        warnings.push(format!(
+            "normalized {} schemas — dropped default values",
+            stats.dropped_defaults
+        ));
     }
 
     Ok(warnings)
+}
+
+#[derive(Default)]
+struct NormalizeStats {
+    dropped_defaults: usize,
 }
 
 fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
@@ -179,15 +205,21 @@ fn normalize_maybe_operation(
     path: &str,
     operation: &mut Option<Operation>,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) {
     let Some(operation) = operation else {
         return;
     };
     let op_name = operation_name(method, path, operation);
-    normalize_operation(operation, &op_name, warnings);
+    normalize_operation(operation, &op_name, warnings, stats);
 }
 
-fn normalize_operation(operation: &mut Operation, op_name: &str, warnings: &mut Vec<String>) {
+fn normalize_operation(
+    operation: &mut Operation,
+    op_name: &str,
+    warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
+) {
     normalize_response_variants(operation, op_name, warnings);
 
     for (i, param) in operation.parameters.iter_mut().enumerate() {
@@ -205,13 +237,14 @@ fn normalize_operation(operation: &mut Operation, op_name: &str, warnings: &mut 
                     schema,
                     &format!("{op_name}.parameters[{i}].{}", param_data.name),
                     warnings,
+                    stats,
                 );
             }
         }
     }
 
     if let Some(ReferenceOr::Item(request_body)) = operation.request_body.as_mut() {
-        normalize_request_body(request_body, op_name, warnings);
+        normalize_request_body(request_body, op_name, warnings, stats);
         if request_body_has_schemaless_content(request_body) {
             operation.request_body = None;
             warnings.push(format!(
@@ -222,11 +255,11 @@ fn normalize_operation(operation: &mut Operation, op_name: &str, warnings: &mut 
 
     for response in operation.responses.responses.values_mut() {
         if let ReferenceOr::Item(response) = response {
-            normalize_response(response, op_name, warnings);
+            normalize_response(response, op_name, warnings, stats);
         }
     }
     if let Some(ReferenceOr::Item(response)) = operation.responses.default.as_mut() {
-        normalize_response(response, op_name, warnings);
+        normalize_response(response, op_name, warnings, stats);
     }
 }
 
@@ -283,6 +316,7 @@ fn normalize_request_body(
     request_body: &mut RequestBody,
     op_name: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) {
     if let Some((kept, dropped)) = normalize_content(&mut request_body.content) {
         warnings.push(format!(
@@ -292,12 +326,22 @@ fn normalize_request_body(
     }
     for (mime, media_type) in request_body.content.iter_mut() {
         if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
-            let _ = normalize_schema(schema, &format!("{op_name}.requestBody.{mime}"), warnings);
+            let _ = normalize_schema(
+                schema,
+                &format!("{op_name}.requestBody.{mime}"),
+                warnings,
+                stats,
+            );
         }
     }
 }
 
-fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec<String>) {
+fn normalize_response(
+    response: &mut Response,
+    op_name: &str,
+    warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
+) {
     if let Some((kept, dropped)) = normalize_content(&mut response.content) {
         warnings.push(format!(
             "normalized {op_name} — kept {kept}, dropped {}",
@@ -306,12 +350,26 @@ fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec
     }
     for (mime, media_type) in response.content.iter_mut() {
         if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
-            let _ = normalize_schema(schema, &format!("{op_name}.response.{mime}"), warnings);
+            let _ = normalize_schema(
+                schema,
+                &format!("{op_name}.response.{mime}"),
+                warnings,
+                stats,
+            );
         }
     }
 }
 
-fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>) -> Result<()> {
+fn normalize_schema(
+    schema: &mut Schema,
+    path: &str,
+    warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
+) -> Result<()> {
+    if schema.schema_data.default.take().is_some() {
+        stats.dropped_defaults += 1;
+    }
+
     match &mut schema.schema_kind {
         SchemaKind::Type(Type::String(string)) => {
             if let Some(colliding) = string_enum_collision(&string.enumeration) {
@@ -321,19 +379,23 @@ fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>)
                 string.enumeration.clear();
             }
         }
-        SchemaKind::Type(Type::Object(object)) => normalize_object_schema(object, path, warnings)?,
-        SchemaKind::Type(Type::Array(array)) => normalize_array_schema(array, path, warnings)?,
+        SchemaKind::Type(Type::Object(object)) => {
+            normalize_object_schema(object, path, warnings, stats)?
+        }
+        SchemaKind::Type(Type::Array(array)) => {
+            normalize_array_schema(array, path, warnings, stats)?
+        }
         SchemaKind::OneOf { one_of } => {
-            normalize_schema_refs(one_of, &format!("{path}.oneOf"), warnings)?
+            normalize_schema_refs(one_of, &format!("{path}.oneOf"), warnings, stats)?
         }
         SchemaKind::AllOf { all_of } => {
-            normalize_schema_refs(all_of, &format!("{path}.allOf"), warnings)?
+            normalize_schema_refs(all_of, &format!("{path}.allOf"), warnings, stats)?
         }
         SchemaKind::AnyOf { any_of } => {
-            normalize_schema_refs(any_of, &format!("{path}.anyOf"), warnings)?
+            normalize_schema_refs(any_of, &format!("{path}.anyOf"), warnings, stats)?
         }
         SchemaKind::Not { not } => {
-            normalize_boxed_reference_or_schema(not, &format!("{path}.not"), warnings)?
+            normalize_boxed_reference_or_schema(not, &format!("{path}.not"), warnings, stats)?
         }
         SchemaKind::Any(any) => {
             if let Some(typ) = any.typ.clone() {
@@ -356,10 +418,11 @@ fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>)
                     property,
                     &format!("{path}.properties.{name}"),
                     warnings,
+                    stats,
                 )?;
             }
             if let Some(items) = any.items.as_mut() {
-                normalize_boxed_schema_ref(items, &format!("{path}.items"), warnings)?;
+                normalize_boxed_schema_ref(items, &format!("{path}.items"), warnings, stats)?;
             }
             if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
                 any.additional_properties.as_mut()
@@ -368,6 +431,7 @@ fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>)
                     schema,
                     &format!("{path}.additionalProperties"),
                     warnings,
+                    stats,
                 )?;
             }
         }
@@ -380,10 +444,16 @@ fn normalize_object_schema(
     object: &mut ObjectType,
     path: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) -> Result<()> {
     drop_colliding_properties(&mut object.properties, &mut object.required, path, warnings);
     for (name, property) in object.properties.iter_mut() {
-        normalize_boxed_schema_ref(property, &format!("{path}.properties.{name}"), warnings)?;
+        normalize_boxed_schema_ref(
+            property,
+            &format!("{path}.properties.{name}"),
+            warnings,
+            stats,
+        )?;
     }
     if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
         object.additional_properties.as_mut()
@@ -392,6 +462,7 @@ fn normalize_object_schema(
             schema,
             &format!("{path}.additionalProperties"),
             warnings,
+            stats,
         )?;
     }
     Ok(())
@@ -401,9 +472,10 @@ fn normalize_array_schema(
     array: &mut ArrayType,
     path: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) -> Result<()> {
     if let Some(items) = array.items.as_mut() {
-        normalize_boxed_schema_ref(items, &format!("{path}.items"), warnings)?;
+        normalize_boxed_schema_ref(items, &format!("{path}.items"), warnings, stats)?;
     }
     Ok(())
 }
@@ -412,9 +484,10 @@ fn normalize_schema_refs(
     refs: &mut [ReferenceOr<Schema>],
     path: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) -> Result<()> {
     for (i, schema) in refs.iter_mut().enumerate() {
-        normalize_schema_ref(schema, &format!("{path}[{i}]"), warnings)?;
+        normalize_schema_ref(schema, &format!("{path}[{i}]"), warnings, stats)?;
     }
     Ok(())
 }
@@ -423,9 +496,10 @@ fn normalize_schema_ref(
     schema: &mut ReferenceOr<Schema>,
     path: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) -> Result<()> {
     if let ReferenceOr::Item(schema) = schema {
-        normalize_schema(schema, path, warnings)?;
+        normalize_schema(schema, path, warnings, stats)?;
     }
     Ok(())
 }
@@ -434,9 +508,10 @@ fn normalize_boxed_schema_ref(
     schema: &mut ReferenceOr<Box<Schema>>,
     path: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) -> Result<()> {
     if let ReferenceOr::Item(schema) = schema {
-        normalize_schema(schema.as_mut(), path, warnings)?;
+        normalize_schema(schema.as_mut(), path, warnings, stats)?;
     }
     Ok(())
 }
@@ -445,8 +520,9 @@ fn normalize_boxed_reference_or_schema(
     schema: &mut Box<ReferenceOr<Schema>>,
     path: &str,
     warnings: &mut Vec<String>,
+    stats: &mut NormalizeStats,
 ) -> Result<()> {
-    normalize_schema_ref(schema.as_mut(), path, warnings)
+    normalize_schema_ref(schema.as_mut(), path, warnings, stats)
 }
 
 fn is_supported_schema_type(typ: &str) -> bool {
@@ -659,6 +735,84 @@ components:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("component schema Mystery"));
         assert!(warnings[0].contains("replaced unsupported type '' with fallback"));
+    }
+
+    #[test]
+    fn schema_defaults_are_dropped_recursively_and_warn_once() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Defaults
+  version: "1.0.0"
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: "bad"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  default: cat
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                  default: dog
+components:
+  schemas:
+    Pet:
+      type: object
+      default:
+        name: fish
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0], "normalized 4 schemas — dropped default values");
+
+        let components = spec.components.as_ref().unwrap();
+        let ReferenceOr::Item(schema) = components.schemas.get("Pet").unwrap() else {
+            panic!("expected inline schema");
+        };
+        assert!(schema.schema_data.default.is_none());
+
+        let path = spec.paths.paths.get("/pets").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let operation = path.post.as_ref().unwrap();
+        let ReferenceOr::Item(request_body) = operation.request_body.as_ref().unwrap() else {
+            panic!("expected inline request body");
+        };
+        let request_schema = request_body
+            .content
+            .get(JSON_MIME)
+            .unwrap()
+            .schema
+            .as_ref()
+            .unwrap();
+        let ReferenceOr::Item(request_schema) = request_schema else {
+            panic!("expected inline request schema");
+        };
+        assert!(request_schema.schema_data.default.is_none());
     }
 
     #[test]
