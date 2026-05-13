@@ -2,7 +2,7 @@ use anyhow::Result;
 use heck::ToSnakeCase;
 use openapiv3::{
     ArrayType, MediaType, ObjectType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody,
-    Response, Schema, SchemaKind, StatusCode, Type,
+    Response, Schema, SchemaData, SchemaKind, StatusCode, Type,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -146,6 +146,13 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             stats.normalized_deep_object_query_params.join(", ")
         ));
     }
+    let relaxed_responses = relax_response_schemas(spec);
+    if relaxed_responses > 0 {
+        warnings.push(format!(
+            "normalized {relaxed_responses} response schemas — relaxed output fields for tolerant deserialization"
+        ));
+    }
+
     if !stats.dropped_optional_object_query_params.is_empty() {
         warnings.push(format!(
             "dropped {} optional object query parameters with progenitor-unsupported builder shape: {}",
@@ -689,6 +696,360 @@ fn normalize_boxed_reference_or_schema(
     normalize_schema_ref(schema.as_mut(), path, warnings, stats)
 }
 
+type ReplaceCount = usize;
+
+fn relax_response_schemas(spec: &mut OpenAPI) -> ReplaceCount {
+    let request_refs = collect_request_schema_refs(spec);
+    let response_refs = collect_response_schema_refs(spec);
+    let mut count = 0;
+
+    count += relax_inline_response_schemas(spec);
+
+    let Some(components) = spec.components.as_mut() else {
+        return count;
+    };
+    for reference in response_refs.difference(&request_refs) {
+        let Some(name) = schema_component_name(reference) else {
+            continue;
+        };
+        let Some(ReferenceOr::Item(schema)) = components.schemas.get_mut(name) else {
+            continue;
+        };
+        count += relax_schema_for_response(schema);
+    }
+
+    count
+}
+
+fn collect_request_schema_refs(spec: &OpenAPI) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    for operation in operations(spec) {
+        for parameter in &operation.parameters {
+            if let ReferenceOr::Item(parameter) = parameter {
+                let data = match parameter {
+                    openapiv3::Parameter::Query { parameter_data, .. }
+                    | openapiv3::Parameter::Header { parameter_data, .. }
+                    | openapiv3::Parameter::Path { parameter_data, .. }
+                    | openapiv3::Parameter::Cookie { parameter_data, .. } => parameter_data,
+                };
+                if let openapiv3::ParameterSchemaOrContent::Schema(schema) = &data.format {
+                    collect_schema_refs(schema, &mut refs);
+                }
+            }
+        }
+        if let Some(ReferenceOr::Item(request_body)) = &operation.request_body {
+            collect_content_schema_refs(&request_body.content, &mut refs);
+        }
+    }
+    if let Some(components) = spec.components.as_ref() {
+        for request_body in components.request_bodies.values() {
+            if let ReferenceOr::Item(request_body) = request_body {
+                collect_content_schema_refs(&request_body.content, &mut refs);
+            }
+        }
+    }
+    expand_component_schema_refs(spec, &mut refs);
+    refs
+}
+
+fn collect_response_schema_refs(spec: &OpenAPI) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    for response in responses(spec) {
+        collect_content_schema_refs(&response.content, &mut refs);
+    }
+    expand_component_schema_refs(spec, &mut refs);
+    refs
+}
+
+fn expand_component_schema_refs(spec: &OpenAPI, refs: &mut HashSet<String>) {
+    let Some(components) = spec.components.as_ref() else {
+        return;
+    };
+    let mut queue: Vec<String> = refs.iter().cloned().collect();
+    while let Some(reference) = queue.pop() {
+        let Some(name) = schema_component_name(&reference) else {
+            continue;
+        };
+        let Some(ReferenceOr::Item(schema)) = components.schemas.get(name) else {
+            continue;
+        };
+        let before = refs.len();
+        collect_schema_refs_in_schema(schema, refs);
+        if refs.len() > before {
+            queue = refs.iter().cloned().collect();
+        }
+    }
+}
+
+fn collect_content_schema_refs(
+    content: &indexmap::IndexMap<String, MediaType>,
+    refs: &mut HashSet<String>,
+) {
+    for media_type in content.values() {
+        if let Some(schema) = media_type.schema.as_ref() {
+            collect_schema_refs(schema, refs);
+        }
+    }
+}
+
+fn collect_schema_refs(schema: &ReferenceOr<Schema>, refs: &mut HashSet<String>) {
+    match schema {
+        ReferenceOr::Reference { reference } => {
+            refs.insert(reference.clone());
+        }
+        ReferenceOr::Item(schema) => collect_schema_refs_in_schema(schema, refs),
+    }
+}
+
+fn collect_boxed_schema_refs(schema: &ReferenceOr<Box<Schema>>, refs: &mut HashSet<String>) {
+    match schema {
+        ReferenceOr::Reference { reference } => {
+            refs.insert(reference.clone());
+        }
+        ReferenceOr::Item(schema) => collect_schema_refs_in_schema(schema, refs),
+    }
+}
+
+fn collect_schema_refs_in_schema(schema: &Schema, refs: &mut HashSet<String>) {
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::Object(object)) => {
+            for property in object.properties.values() {
+                collect_boxed_schema_refs(property, refs);
+            }
+            if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
+                object.additional_properties.as_ref()
+            {
+                collect_schema_refs(schema.as_ref(), refs);
+            }
+        }
+        SchemaKind::Type(Type::Array(array)) => {
+            if let Some(items) = array.items.as_ref() {
+                collect_boxed_schema_refs(items, refs);
+            }
+        }
+        SchemaKind::OneOf { one_of } => {
+            for schema in one_of {
+                collect_schema_refs(schema, refs);
+            }
+        }
+        SchemaKind::AllOf { all_of } => {
+            for schema in all_of {
+                collect_schema_refs(schema, refs);
+            }
+        }
+        SchemaKind::AnyOf { any_of } => {
+            for schema in any_of {
+                collect_schema_refs(schema, refs);
+            }
+        }
+        SchemaKind::Not { not } => collect_schema_refs(not.as_ref(), refs),
+        SchemaKind::Any(any) => {
+            for property in any.properties.values() {
+                collect_boxed_schema_refs(property, refs);
+            }
+            if let Some(items) = any.items.as_ref() {
+                collect_boxed_schema_refs(items, refs);
+            }
+            if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
+                any.additional_properties.as_ref()
+            {
+                collect_schema_refs(schema.as_ref(), refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn responses(spec: &OpenAPI) -> Vec<&Response> {
+    let mut responses = Vec::new();
+    if let Some(components) = spec.components.as_ref() {
+        for response in components.responses.values() {
+            if let ReferenceOr::Item(response) = response {
+                responses.push(response);
+            }
+        }
+    }
+    for operation in operations(spec) {
+        for response in operation.responses.responses.values() {
+            if let ReferenceOr::Item(response) = response {
+                responses.push(response);
+            }
+        }
+        if let Some(ReferenceOr::Item(response)) = operation.responses.default.as_ref() {
+            responses.push(response);
+        }
+    }
+    responses
+}
+
+fn relax_inline_response_schemas(spec: &mut OpenAPI) -> ReplaceCount {
+    let mut count = 0;
+    if let Some(components) = spec.components.as_mut() {
+        for response in components.responses.values_mut() {
+            if let ReferenceOr::Item(response) = response {
+                count += relax_response(response);
+            }
+        }
+    }
+    for operation in operations_mut(spec) {
+        for response in operation.responses.responses.values_mut() {
+            if let ReferenceOr::Item(response) = response {
+                count += relax_response(response);
+            }
+        }
+        if let Some(ReferenceOr::Item(response)) = operation.responses.default.as_mut() {
+            count += relax_response(response);
+        }
+    }
+    count
+}
+
+fn operations(spec: &OpenAPI) -> Vec<&Operation> {
+    spec.paths
+        .iter()
+        .filter_map(|(_, path_item)| match path_item {
+            ReferenceOr::Item(item) => Some(item),
+            ReferenceOr::Reference { .. } => None,
+        })
+        .flat_map(|item| {
+            [
+                &item.get,
+                &item.put,
+                &item.post,
+                &item.delete,
+                &item.options,
+                &item.head,
+                &item.patch,
+                &item.trace,
+            ]
+        })
+        .flatten()
+        .collect()
+}
+
+fn schema_component_name(reference: &str) -> Option<&str> {
+    reference.strip_prefix("#/components/schemas/")
+}
+
+fn relax_response(response: &mut Response) -> ReplaceCount {
+    response
+        .content
+        .values_mut()
+        .filter_map(|media_type| media_type.schema.as_mut())
+        .map(relax_schema_ref_for_response)
+        .sum()
+}
+
+fn relax_schema_ref_for_response(schema: &mut ReferenceOr<Schema>) -> ReplaceCount {
+    match schema {
+        ReferenceOr::Item(schema) => relax_schema_for_response(schema),
+        ReferenceOr::Reference { .. } => 0,
+    }
+}
+
+fn relax_boxed_schema_ref_for_response(schema: &mut ReferenceOr<Box<Schema>>) -> ReplaceCount {
+    match schema {
+        ReferenceOr::Item(schema) => relax_schema_for_response(schema.as_mut()),
+        ReferenceOr::Reference { .. } => 0,
+    }
+}
+
+fn relax_schema_for_response(schema: &mut Schema) -> ReplaceCount {
+    let mut count = 0;
+    match &mut schema.schema_kind {
+        SchemaKind::Type(Type::Object(object)) => {
+            count += relax_object_for_response(object);
+        }
+        SchemaKind::Type(Type::Array(array)) => {
+            if let Some(items) = array.items.as_mut() {
+                count += relax_boxed_schema_ref_for_response(items);
+            }
+        }
+        SchemaKind::OneOf { one_of } => {
+            count += one_of
+                .iter_mut()
+                .map(relax_schema_ref_for_response)
+                .sum::<usize>();
+        }
+        SchemaKind::AllOf { all_of } => {
+            count += all_of
+                .iter_mut()
+                .map(relax_schema_ref_for_response)
+                .sum::<usize>();
+        }
+        SchemaKind::AnyOf { any_of } => {
+            count += any_of
+                .iter_mut()
+                .map(relax_schema_ref_for_response)
+                .sum::<usize>();
+        }
+        SchemaKind::Not { not } => {
+            count += relax_schema_ref_for_response(not.as_mut());
+        }
+        SchemaKind::Any(any) => {
+            let had_shape = !any.properties.is_empty() || !any.required.is_empty();
+            if !any.required.is_empty() {
+                any.required.clear();
+            }
+            for property in any.properties.values_mut() {
+                count += relax_property_for_response(property);
+            }
+            if let Some(items) = any.items.as_mut() {
+                count += relax_boxed_schema_ref_for_response(items);
+            }
+            if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
+                any.additional_properties.as_mut()
+            {
+                count += relax_schema_ref_for_response(schema.as_mut());
+            }
+            if had_shape {
+                count += 1;
+            }
+        }
+        _ => {}
+    }
+    count
+}
+
+fn relax_object_for_response(object: &mut ObjectType) -> ReplaceCount {
+    let had_shape = !object.properties.is_empty() || !object.required.is_empty();
+    if !object.required.is_empty() {
+        object.required.clear();
+    }
+    let mut count = 0;
+    for property in object.properties.values_mut() {
+        count += relax_property_for_response(property);
+    }
+    if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
+        object.additional_properties.as_mut()
+    {
+        count += relax_schema_ref_for_response(schema.as_mut());
+    }
+    if had_shape {
+        count += 1;
+    }
+    count
+}
+
+fn relax_property_for_response(property: &mut ReferenceOr<Box<Schema>>) -> ReplaceCount {
+    match property {
+        ReferenceOr::Item(schema) => {
+            schema.schema_data.nullable = true;
+            schema.schema_kind = SchemaKind::Any(Default::default());
+        }
+        ReferenceOr::Reference { .. } => {
+            *property = ReferenceOr::Item(Box::new(Schema {
+                schema_data: SchemaData {
+                    nullable: true,
+                    ..SchemaData::default()
+                },
+                schema_kind: SchemaKind::Any(Default::default()),
+            }));
+        }
+    }
+    1
+}
+
 fn is_supported_schema_type(typ: &str) -> bool {
     matches!(
         typ,
@@ -1054,6 +1415,161 @@ components:
         assert!(warnings[0].contains("dropped enum constraint"));
         assert!(warnings[0].contains("+1, -1"));
         assert!(warnings[0].contains("preserving wire format"));
+    }
+
+    #[test]
+    fn response_schemas_are_relaxed_without_touching_request_body() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Relax Responses
+  version: "1.0.0"
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let path = spec.paths.paths.get("/pets").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let operation = path.post.as_ref().unwrap();
+        let ReferenceOr::Item(request_body) = operation.request_body.as_ref().unwrap() else {
+            panic!("expected inline request body");
+        };
+        let ReferenceOr::Item(request_schema) = request_body
+            .content
+            .get(JSON_MIME)
+            .unwrap()
+            .schema
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected inline request schema");
+        };
+        let SchemaKind::Type(Type::Object(request_object)) = &request_schema.schema_kind else {
+            panic!("expected request object");
+        };
+        assert_eq!(request_object.required, vec!["name"]);
+
+        let response = operation
+            .responses
+            .responses
+            .get(&StatusCode::Code(200))
+            .unwrap();
+        let ReferenceOr::Item(response) = response else {
+            panic!("expected inline response");
+        };
+        let ReferenceOr::Item(response_schema) = response
+            .content
+            .get(JSON_MIME)
+            .unwrap()
+            .schema
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected inline response schema");
+        };
+        let SchemaKind::Type(Type::Object(response_object)) = &response_schema.schema_kind else {
+            panic!("expected response object");
+        };
+        assert!(response_object.required.is_empty());
+        let ReferenceOr::Item(name_schema) = response_object.properties.get("name").unwrap() else {
+            panic!("expected inline property schema");
+        };
+        assert!(name_schema.schema_data.nullable);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("response schemas")
+                && warning.contains("tolerant deserialization")));
+    }
+
+    #[test]
+    fn response_only_component_schema_refs_are_relaxed() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r##"
+openapi: 3.0.0
+info:
+  title: Relax Component Responses
+  version: "1.0.0"
+paths:
+  /pets:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+components:
+  schemas:
+    Named:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+    Pet:
+      type: object
+      required: [name, ability]
+      properties:
+        name:
+          type: string
+        ability:
+          $ref: "#/components/schemas/Named"
+"##,
+        )
+        .unwrap();
+
+        normalize(&mut spec).unwrap();
+        let components = spec.components.unwrap();
+        let ReferenceOr::Item(schema) = components.schemas.get("Pet").unwrap() else {
+            panic!("expected inline schema");
+        };
+        let SchemaKind::Type(Type::Object(object)) = &schema.schema_kind else {
+            panic!("expected object schema");
+        };
+        assert!(object.required.is_empty());
+        let ReferenceOr::Item(ability) = object.properties.get("ability").unwrap() else {
+            panic!("expected wrapped reference schema");
+        };
+        assert!(ability.schema_data.nullable);
+        assert!(matches!(ability.schema_kind, SchemaKind::Any(_)));
+
+        let ReferenceOr::Item(named) = components.schemas.get("Named").unwrap() else {
+            panic!("expected nested component schema");
+        };
+        let SchemaKind::Type(Type::Object(named_object)) = &named.schema_kind else {
+            panic!("expected nested object schema");
+        };
+        assert!(named_object.required.is_empty());
     }
 
     #[test]
