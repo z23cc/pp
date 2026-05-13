@@ -85,6 +85,16 @@ Example `tools/list` entry:
 Use `--json` with normal CLI commands to get one structured JSON value on stdout.
 Human-readable progress and diagnostics stay on stderr.
 
+MCP `tools/list` uses standard cursor pagination with a server-defined page size.
+Clients should follow `nextCursor` until it is absent to discover every generated tool.
+
+MCP tool calls return the full structured JSON response by default. Agent clients can opt into response shaping with reserved MCP-only parameters:
+
+- `_pp_fields`: array of object dot paths to keep, for example `["name", "types", "stats"]`.
+- `_pp_compact`: boolean that removes `null`, empty arrays, and empty objects from successful structured results.
+
+These `_pp_` controls only apply to successful MCP tool results. CLI `--json` output and MCP error diagnostics are unchanged. OpenAPI parameters using the `_pp_` prefix are rejected during generation because that namespace is reserved by the wrapper.
+
 ## Spec normalization
 
 `pp` normalizes specs before handing them to `progenitor`. It prints each

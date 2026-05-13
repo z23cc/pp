@@ -85,9 +85,9 @@ impl WrapperManifest {
         }
     }
 
-    pub fn with_openapi(mut self, api: &OpenAPI) -> Self {
-        self.mcp_tools = mcp_tools(api, self.auth_env_var.as_deref());
-        self
+    pub fn with_openapi(mut self, api: &OpenAPI) -> Result<Self> {
+        self.mcp_tools = mcp_tools(api, self.auth_env_var.as_deref())?;
+        Ok(self)
     }
 }
 
@@ -167,7 +167,9 @@ fn auth_env_var(auth_kind: &AuthKind, env_prefix: &str) -> Option<String> {
     }
 }
 
-fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
+const MCP_RESERVED_ARG_PREFIX: &str = "_pp_";
+
+fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
     let mut tools = Vec::new();
     for (path, item) in &api.paths.paths {
         let ReferenceOr::Item(item) = item else {
@@ -182,7 +184,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "PUT",
@@ -191,7 +193,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "POST",
@@ -200,7 +202,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "DELETE",
@@ -209,7 +211,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "OPTIONS",
@@ -218,7 +220,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "HEAD",
@@ -227,7 +229,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "PATCH",
@@ -236,7 +238,7 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
         push_operation(
             &mut tools,
             "TRACE",
@@ -245,9 +247,9 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Vec<McpTool> {
             &path_params,
             auth_env_var,
             api,
-        );
+        )?;
     }
-    tools
+    Ok(tools)
 }
 
 fn push_operation(
@@ -258,12 +260,12 @@ fn push_operation(
     path_params: &[ReferenceOr<Parameter>],
     auth_env_var: Option<&str>,
     api: &OpenAPI,
-) {
+) -> Result<()> {
     let Some(operation) = operation else {
-        return;
+        return Ok(());
     };
     let Some(raw_name) = operation.operation_id.clone() else {
-        return;
+        return Ok(());
     };
     let name = raw_name.to_snake_case();
     let fallback_description = format!("{method} {path}");
@@ -284,7 +286,14 @@ fn push_operation(
     let mut args = Vec::new();
 
     for parameter in path_params.iter().chain(operation.parameters.iter()) {
-        add_parameter(parameter, &mut properties, &mut required, &mut args, api);
+        add_parameter(
+            parameter,
+            &mut properties,
+            &mut required,
+            &mut args,
+            api,
+            &name,
+        )?;
     }
     add_body(
         operation.request_body.as_ref(),
@@ -292,7 +301,9 @@ fn push_operation(
         &mut required,
         &mut args,
         api,
-    );
+        &name,
+    )?;
+    add_mcp_reserved_properties(&mut properties);
 
     let schema = json!({
         "type": "object",
@@ -308,6 +319,34 @@ fn push_operation(
         input_schema: serde_json::to_string(&schema).expect("schema serializes"),
         args,
     });
+    Ok(())
+}
+
+fn add_mcp_reserved_properties(properties: &mut Map<String, Value>) {
+    properties.insert(
+        "_pp_fields".to_string(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "MCP-only response shaping: keep only these object dot paths."
+        }),
+    );
+    properties.insert(
+        "_pp_compact".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "MCP-only response shaping: remove nulls and empty arrays/objects from successful structured results."
+        }),
+    );
+}
+
+fn reject_reserved_arg(name: &str, tool_name: &str) -> Result<()> {
+    if name.starts_with(MCP_RESERVED_ARG_PREFIX) {
+        anyhow::bail!(
+            "OpenAPI parameter '{name}' for MCP tool '{tool_name}' uses reserved pp namespace '{MCP_RESERVED_ARG_PREFIX}'"
+        );
+    }
+    Ok(())
 }
 
 fn add_parameter(
@@ -316,15 +355,17 @@ fn add_parameter(
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
     api: &OpenAPI,
-) {
+    tool_name: &str,
+) -> Result<()> {
     let ReferenceOr::Item(parameter) = parameter else {
-        return;
+        return Ok(());
     };
     let (data, is_path) = match parameter {
         Parameter::Query { parameter_data, .. } => (parameter_data, false),
         Parameter::Path { parameter_data, .. } => (parameter_data, true),
-        _ => return,
+        _ => return Ok(()),
     };
+    reject_reserved_arg(&data.name, tool_name)?;
     let schema = parameter_schema(data, api);
     properties.insert(data.name.clone(), schema);
     if is_path || data.required {
@@ -338,6 +379,7 @@ fn add_parameter(
         cli_name,
         body_field: false,
     });
+    Ok(())
 }
 
 fn parameter_schema(data: &ParameterData, api: &OpenAPI) -> Value {
@@ -353,25 +395,27 @@ fn add_body(
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
     api: &OpenAPI,
-) {
+    tool_name: &str,
+) -> Result<()> {
     let Some(ReferenceOr::Item(body)) = request_body else {
-        return;
+        return Ok(());
     };
     let Some(media_type) = body
         .content
         .get("application/json")
         .or_else(|| body.content.values().next())
     else {
-        return;
+        return Ok(());
     };
     let Some(schema) = media_type.schema.as_ref() else {
-        return;
+        return Ok(());
     };
     let body_schema = schema_json(schema, api);
     if let Some(object) = body_schema.as_object() {
         if object.get("type").and_then(Value::as_str) == Some("object") {
             if let Some(Value::Object(body_properties)) = object.get("properties") {
                 for (name, property_schema) in body_properties {
+                    reject_reserved_arg(name, tool_name)?;
                     properties.insert(name.clone(), property_schema.clone());
                     let cli_name = name.to_kebab_case();
                     args.push(McpArg {
@@ -394,10 +438,11 @@ fn add_body(
                         );
                     }
                 }
-                return;
+                return Ok(());
             }
         }
     }
+    reject_reserved_arg("body", tool_name)?;
     properties.insert("body".to_string(), body_schema);
     if body.required {
         required.push("body".to_string());
@@ -409,6 +454,7 @@ fn add_body(
         cli_name: "json-body".to_string(),
         body_field: false,
     });
+    Ok(())
 }
 
 fn schema_json(schema: &ReferenceOr<Schema>, api: &OpenAPI) -> Value {
@@ -492,7 +538,7 @@ mod tests {
     fn mcp_petstore_request_body_ref_is_flattened() {
         let spec = std::fs::read_to_string("testdata/petstore.yaml").unwrap();
         let api: OpenAPI = serde_yaml::from_str(&spec).unwrap();
-        let tools = mcp_tools(&api, Some("SWAGGER_PETSTORE_API_KEY"));
+        let tools = mcp_tools(&api, Some("SWAGGER_PETSTORE_API_KEY")).unwrap();
         let add_pet = tools.iter().find(|tool| tool.name == "add_pet").unwrap();
         let schema: Value = serde_json::from_str(&add_pet.input_schema).unwrap();
         let properties = schema["properties"].as_object().unwrap();
@@ -542,7 +588,7 @@ components:
           $ref: '#/components/schemas/A'
 "##;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let tools = mcp_tools(&api, None);
+        let tools = mcp_tools(&api, None).unwrap();
         let tool = tools
             .iter()
             .find(|tool| tool.name == "create_cycle")
@@ -557,6 +603,81 @@ components:
             schema["properties"]["b"]["properties"]["a"]["description"],
             "<recursive reference to A>"
         );
+    }
+
+    #[test]
+    fn mcp_schema_includes_reserved_response_shaping_args() {
+        let spec = std::fs::read_to_string("testdata/petstore.yaml").unwrap();
+        let api: OpenAPI = serde_yaml::from_str(&spec).unwrap();
+        let tools = mcp_tools(&api, None).unwrap();
+        let add_pet = tools.iter().find(|tool| tool.name == "add_pet").unwrap();
+        let schema: Value = serde_json::from_str(&add_pet.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert_eq!(properties["_pp_fields"]["type"], "array");
+        assert_eq!(properties["_pp_compact"]["type"], "boolean");
+        assert!(!add_pet
+            .args
+            .iter()
+            .any(|arg| arg.json_name.starts_with("_pp_")));
+    }
+
+    #[test]
+    fn mcp_reserved_query_parameter_is_generation_error() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Reserved API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: _pp_fields
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let error = mcp_tools(&api, None).unwrap_err();
+
+        assert!(error.to_string().contains("reserved pp namespace"));
+        assert!(error.to_string().contains("_pp_fields"));
+    }
+
+    #[test]
+    fn mcp_reserved_body_property_is_generation_error() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Reserved Body API
+  version: "1.0.0"
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                _pp_compact:
+                  type: boolean
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let error = mcp_tools(&api, None).unwrap_err();
+
+        assert!(error.to_string().contains("reserved pp namespace"));
+        assert!(error.to_string().contains("_pp_compact"));
     }
 
     #[test]
