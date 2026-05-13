@@ -819,6 +819,7 @@ dependencies = [
  "prettyplease",
  "progenitor",
  "quote",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

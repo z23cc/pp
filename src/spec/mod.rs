@@ -6,6 +6,7 @@ pub mod normalize;
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
 use openapiv3::{OpenAPI, ReferenceOr, SecurityScheme};
+use regex::Regex;
 use serde::Serialize;
 use std::path::Path;
 
@@ -86,22 +87,131 @@ fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
     })
 }
 
-fn parse(raw: &str, path: &Path) -> Result<OpenAPI> {
-    if let Some(version) = detect_openapi_31(raw) {
-        return Err(anyhow!(
-            "OpenAPI 3.1 is not yet supported by pp (uses openapiv3 crate which targets 3.0). Found 'openapi: {version}' in {}. See plan: docs/plans/2026-05-12-001-feat-rust-printing-press-mvp-plan.md scope boundaries.",
-            path.display()
-        ));
+fn parse(raw: &str, _path: &Path) -> Result<OpenAPI> {
+    let (owned, downgraded) = downgrade_openapi_31(raw)?;
+    let parse_raw = owned.as_deref().unwrap_or(raw);
+
+    if let Some((version, transforms)) = downgraded {
+        eprintln!(
+            "pp: downgraded OpenAPI {version} → 3.0.3 for parsing ({transforms} transforms applied)"
+        );
     }
 
     // Try JSON first if it looks like JSON, otherwise YAML. serde_yaml accepts
     // JSON too, so YAML is a safe fallback.
-    let trimmed = raw.trim_start();
+    let trimmed = parse_raw.trim_start();
     if trimmed.starts_with('{') {
-        serde_json::from_str(raw).map_err(|e| anyhow!("JSON parse error: {e}"))
+        serde_json::from_str(parse_raw).map_err(|e| anyhow!("JSON parse error: {e}"))
     } else {
-        serde_yaml::from_str(raw).map_err(|e| anyhow!("YAML parse error: {e}"))
+        serde_yaml::from_str(parse_raw).map_err(|e| anyhow!("YAML parse error: {e}"))
     }
+}
+
+fn downgrade_openapi_31(raw: &str) -> Result<(Option<String>, Option<(String, usize)>)> {
+    let Some(version) = detect_openapi_31(raw) else {
+        return Ok((None, None));
+    };
+
+    let mut transforms = 0;
+    let mut out = raw.to_string();
+
+    out = replace_count(
+        &out,
+        &Regex::new(r#"(?m)^(\s*openapi:\s*)['\"]?3\.1(?:\.\d+)?['\"]?\s*$"#)?,
+        "${1}3.0.3",
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(r#"\"openapi\"\s*:\s*\"3\.1(?:\.\d+)?\""#)?,
+        r#""openapi":"3.0.3""#,
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(
+            r#"(?m)^(\s*)type:\s*\[\s*['\"]?(string|integer|number|boolean|array|object)['\"]?\s*,\s*['\"]?null['\"]?\s*\]\s*$"#,
+        )?,
+        "${1}type: $2\n${1}nullable: true",
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(
+            r#"(?m)^(\s*)type:\s*\[\s*['\"]?null['\"]?\s*,\s*['\"]?(string|integer|number|boolean|array|object)['\"]?\s*\]\s*$"#,
+        )?,
+        "${1}type: $2\n${1}nullable: true",
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(
+            r#"(?m)^(\s*)type:\s*\n\s*-\s*['\"]?(string|integer|number|boolean|array|object)['\"]?\s*\n\s*-\s*['\"]?null['\"]?\s*$"#,
+        )?,
+        "${1}type: $2\n${1}nullable: true",
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(
+            r#"(?m)^(\s*)type:\s*\n\s*-\s*['\"]?null['\"]?\s*\n\s*-\s*['\"]?(string|integer|number|boolean|array|object)['\"]?\s*$"#,
+        )?,
+        "${1}type: $2\n${1}nullable: true",
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(r#"\"exclusiveMinimum\"\s*:\s*(-?\d+(?:\.\d+)?)"#)?,
+        r#""exclusiveMinimum": true, "minimum": $1"#,
+        &mut transforms,
+    );
+    out = replace_count(
+        &out,
+        &Regex::new(r#"\"exclusiveMaximum\"\s*:\s*(-?\d+(?:\.\d+)?)"#)?,
+        r#""exclusiveMaximum": true, "maximum": $1"#,
+        &mut transforms,
+    );
+    out = strip_top_level_block(&out, "webhooks", &mut transforms);
+    out = strip_top_level_block(&out, "$defs", &mut transforms);
+
+    Ok((Some(out), Some((version, transforms))))
+}
+
+fn replace_count(input: &str, re: &Regex, replacement: &str, transforms: &mut usize) -> String {
+    let count = re.find_iter(input).count();
+    if count > 0 {
+        *transforms += count;
+        re.replace_all(input, replacement).into_owned()
+    } else {
+        input.to_string()
+    }
+}
+
+fn strip_top_level_block(input: &str, key: &str, transforms: &mut usize) -> String {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    let header = format!("{key}:");
+
+    for line in input.lines() {
+        let is_top_level = !line.starts_with(char::is_whitespace);
+        if is_top_level && line.trim_end() == header {
+            skipping = true;
+            *transforms += 1;
+            continue;
+        }
+        if skipping && is_top_level && !line.trim().is_empty() {
+            skipping = false;
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+
+    let mut joined = out.join("\n");
+    if input.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
 }
 
 fn detect_openapi_31(raw: &str) -> Option<String> {
@@ -280,20 +390,37 @@ components:
     }
 
     #[test]
-    fn openapi_31_yaml_errors_before_parse() {
-        let err = parse(
+    fn openapi_31_json_is_detected() {
+        assert_eq!(detect_openapi_31(r#"{"openapi":"3.1.1","paths":{}}"#).as_deref(), Some("3.1.1"));
+    }
+
+    #[test]
+    fn openapi_31_yaml_downgrades_nullable_type_before_parse() {
+        let spec = parse(
             r#"
 openapi: 3.1.0
 info:
   title: Future API
   version: "1.0.0"
 paths: {}
+components:
+  schemas:
+    MaybeName:
+      type: [string, null]
 "#,
             Path::new("future.yaml"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("3.1"));
+        let components = spec.components.unwrap();
+        let ReferenceOr::Item(schema) = components.schemas.get("MaybeName").unwrap() else {
+            panic!("expected inline schema");
+        };
+        assert!(schema.schema_data.nullable);
+        assert!(matches!(
+            schema.schema_kind,
+            openapiv3::SchemaKind::Type(openapiv3::Type::String(_))
+        ));
     }
 
     #[test]
