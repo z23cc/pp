@@ -4,7 +4,7 @@ use openapiv3::{
     ArrayType, MediaType, ObjectType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody,
     Response, Schema, SchemaKind, StatusCode, Type,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
     "plausible_web_plugins_api_controllers_",
@@ -19,6 +19,7 @@ const OCTET_STREAM_MIME: &str = "application/octet-stream";
 pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     let mut stats = NormalizeStats::default();
+    let object_schema_refs = component_object_schema_refs(spec);
     shorten_verbose_operation_ids(spec);
 
     if let Some(components) = spec.components.as_mut() {
@@ -59,20 +60,70 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             continue;
         };
 
-        normalize_maybe_operation("get", path, &mut item.get, &mut warnings, &mut stats);
-        normalize_maybe_operation("put", path, &mut item.put, &mut warnings, &mut stats);
-        normalize_maybe_operation("post", path, &mut item.post, &mut warnings, &mut stats);
-        normalize_maybe_operation("delete", path, &mut item.delete, &mut warnings, &mut stats);
+        normalize_maybe_operation(
+            "get",
+            path,
+            &mut item.get,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
+        normalize_maybe_operation(
+            "put",
+            path,
+            &mut item.put,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
+        normalize_maybe_operation(
+            "post",
+            path,
+            &mut item.post,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
+        normalize_maybe_operation(
+            "delete",
+            path,
+            &mut item.delete,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
         normalize_maybe_operation(
             "options",
             path,
             &mut item.options,
             &mut warnings,
             &mut stats,
+            &object_schema_refs,
         );
-        normalize_maybe_operation("head", path, &mut item.head, &mut warnings, &mut stats);
-        normalize_maybe_operation("patch", path, &mut item.patch, &mut warnings, &mut stats);
-        normalize_maybe_operation("trace", path, &mut item.trace, &mut warnings, &mut stats);
+        normalize_maybe_operation(
+            "head",
+            path,
+            &mut item.head,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
+        normalize_maybe_operation(
+            "patch",
+            path,
+            &mut item.patch,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
+        normalize_maybe_operation(
+            "trace",
+            path,
+            &mut item.trace,
+            &mut warnings,
+            &mut stats,
+            &object_schema_refs,
+        );
     }
 
     if stats.dropped_defaults > 0 {
@@ -95,6 +146,13 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             stats.normalized_deep_object_query_params.join(", ")
         ));
     }
+    if !stats.dropped_optional_object_query_params.is_empty() {
+        warnings.push(format!(
+            "dropped {} optional object query parameters with progenitor-unsupported builder shape: {}",
+            stats.dropped_optional_object_query_params.len(),
+            stats.dropped_optional_object_query_params.join(", ")
+        ));
+    }
 
     Ok(warnings)
 }
@@ -104,6 +162,58 @@ struct NormalizeStats {
     dropped_defaults: usize,
     dropped_unsupported_request_body_ops: Vec<String>,
     normalized_deep_object_query_params: Vec<String>,
+    dropped_optional_object_query_params: Vec<String>,
+}
+
+fn component_object_schema_refs(spec: &OpenAPI) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    let Some(components) = spec.components.as_ref() else {
+        return refs;
+    };
+
+    for (name, schema) in &components.schemas {
+        if let ReferenceOr::Item(schema) = schema {
+            if schema_is_object_shaped(schema) {
+                refs.insert(format!("#/components/schemas/{name}"));
+            }
+        }
+    }
+    refs
+}
+
+fn schema_is_object_shaped(schema: &Schema) -> bool {
+    match &schema.schema_kind {
+        SchemaKind::Type(Type::Object(_)) => true,
+        SchemaKind::Any(any) => !any.properties.is_empty(),
+        SchemaKind::AllOf { all_of } | SchemaKind::OneOf { one_of: all_of } => all_of.iter().any(
+            |schema| matches!(schema, ReferenceOr::Item(schema) if schema_is_object_shaped(schema)),
+        ),
+        SchemaKind::AnyOf { any_of } => any_of.iter().any(
+            |schema| matches!(schema, ReferenceOr::Item(schema) if schema_is_object_shaped(schema)),
+        ),
+        _ => false,
+    }
+}
+
+fn optional_object_query_param_name(
+    param: &openapiv3::Parameter,
+    object_schema_refs: &HashSet<String>,
+) -> Option<String> {
+    let openapiv3::Parameter::Query { parameter_data, .. } = param else {
+        return None;
+    };
+    if parameter_data.required {
+        return None;
+    }
+    let openapiv3::ParameterSchemaOrContent::Schema(schema) = &parameter_data.format else {
+        return None;
+    };
+
+    let is_object = match schema {
+        ReferenceOr::Item(schema) => schema_is_object_shaped(schema),
+        ReferenceOr::Reference { reference } => object_schema_refs.contains(reference),
+    };
+    is_object.then(|| parameter_data.name.clone())
 }
 
 fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
@@ -224,12 +334,13 @@ fn normalize_maybe_operation(
     operation: &mut Option<Operation>,
     warnings: &mut Vec<String>,
     stats: &mut NormalizeStats,
+    object_schema_refs: &HashSet<String>,
 ) {
     let Some(operation_ref) = operation.as_mut() else {
         return;
     };
     let op_name = operation_name(method, path, operation_ref);
-    if normalize_operation(operation_ref, &op_name, warnings, stats) {
+    if normalize_operation(operation_ref, &op_name, warnings, stats, object_schema_refs) {
         stats.dropped_unsupported_request_body_ops.push(op_name);
         *operation = None;
     }
@@ -240,11 +351,21 @@ fn normalize_operation(
     op_name: &str,
     warnings: &mut Vec<String>,
     stats: &mut NormalizeStats,
+    object_schema_refs: &HashSet<String>,
 ) -> bool {
     normalize_response_variants(operation, op_name, warnings);
 
+    let mut dropped_param_indices = Vec::new();
     for (i, param) in operation.parameters.iter_mut().enumerate() {
         if let ReferenceOr::Item(param) = param {
+            if let Some(param_name) = optional_object_query_param_name(param, object_schema_refs) {
+                stats
+                    .dropped_optional_object_query_params
+                    .push(format!("{op_name}.{param_name}"));
+                dropped_param_indices.push(i);
+                continue;
+            }
+
             let param_data = match param {
                 openapiv3::Parameter::Query {
                     parameter_data,
@@ -274,6 +395,9 @@ fn normalize_operation(
                 );
             }
         }
+    }
+    for i in dropped_param_indices.into_iter().rev() {
+        operation.parameters.remove(i);
     }
 
     if let Some(ReferenceOr::Item(request_body)) = operation.request_body.as_mut() {
@@ -979,6 +1103,63 @@ paths:
     }
 
     #[test]
+    fn optional_object_query_parameter_is_dropped_and_warns_once() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r##"
+openapi: 3.0.0
+info:
+  title: Object Query
+  version: "1.0.0"
+paths:
+  /search:
+    get:
+      operationId: searchPets
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            $ref: "#/components/schemas/Filter"
+        - name: required_filter
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/Filter"
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Filter:
+      type: object
+      properties:
+        color:
+          type: string
+"##,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let path = spec.paths.paths.get("/search").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let operation = path.get.as_ref().unwrap();
+
+        assert_eq!(operation.parameters.len(), 1);
+        let ReferenceOr::Item(openapiv3::Parameter::Query { parameter_data, .. }) =
+            operation.parameters.first().unwrap()
+        else {
+            panic!("expected inline query parameter");
+        };
+        assert_eq!(parameter_data.name, "required_filter");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            "dropped 1 optional object query parameters with progenitor-unsupported builder shape: searchPets.filter"
+        );
+    }
+
+    #[test]
     fn deep_object_query_style_is_replaced_with_form_and_warns_once() {
         let mut spec: OpenAPI = serde_yaml::from_str(
             r#"
@@ -993,6 +1174,7 @@ paths:
       parameters:
         - name: filter
           in: query
+          required: true
           style: deepObject
           schema:
             type: object
