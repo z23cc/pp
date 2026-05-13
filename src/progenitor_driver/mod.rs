@@ -39,6 +39,21 @@ pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<()> {
         .replace(
             "::clap::value_parser!(\n                                ::std::vec::Vec < ::std::string::String >\n                            )",
             "::clap::builder::ValueParser::new(|s: &str| -> Result<::std::vec::Vec<::std::string::String>, ::std::string::String> { Ok(s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()) })",
+        )
+        .replace(
+            "_ => Err(Error::UnexpectedResponse(response)),",
+            r#"_ => {
+                let status = response.status();
+                let url = response.url().clone();
+                let headers = response.headers().clone();
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|err| format!("<failed to read response body: {err}>"));
+                Err(Error::Custom(format!(
+                    "Unexpected Response: status={status}, url={url}, headers={headers:?}, body={body}"
+                )))
+            }"#,
         );
 
     fs::create_dir_all(out_dir.join("src"))
