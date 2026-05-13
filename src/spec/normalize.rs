@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use heck::ToSnakeCase;
 use openapiv3::{
     ArrayType, MediaType, ObjectType, OpenAPI, Operation, ReferenceOr, RequestBody, Response,
@@ -283,7 +283,9 @@ fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec
 
 fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>) -> Result<()> {
     match &mut schema.schema_kind {
-        SchemaKind::Type(Type::String(_)) => {}
+        SchemaKind::Type(Type::String(string)) => {
+            detect_string_enum_collisions(&string.enumeration, path)?
+        }
         SchemaKind::Type(Type::Object(object)) => normalize_object_schema(object, path, warnings)?,
         SchemaKind::Type(Type::Array(array)) => normalize_array_schema(array, path, warnings)?,
         SchemaKind::OneOf { one_of } => {
@@ -307,6 +309,7 @@ fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>)
                     ));
                 }
             }
+            detect_json_enum_collisions(&any.enumeration, path)?;
             for (name, property) in any.properties.iter_mut() {
                 normalize_boxed_schema_ref(
                     property,
@@ -409,6 +412,57 @@ fn is_supported_schema_type(typ: &str) -> bool {
         typ,
         "string" | "number" | "integer" | "boolean" | "array" | "object"
     )
+}
+
+fn detect_string_enum_collisions(values: &[Option<String>], path: &str) -> Result<()> {
+    let strings: Vec<&str> = values.iter().filter_map(Option::as_deref).collect();
+    detect_enum_collisions(strings, path)
+}
+
+fn detect_json_enum_collisions(values: &[serde_json::Value], path: &str) -> Result<()> {
+    let strings: Vec<&str> = values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    detect_enum_collisions(strings, path)
+}
+
+fn detect_enum_collisions(strings: Vec<&str>, path: &str) -> Result<()> {
+    let mut by_ident: HashMap<String, Vec<&str>> = HashMap::new();
+    for value in strings {
+        by_ident
+            .entry(enum_identifier_form(value))
+            .or_default()
+            .push(value);
+    }
+    if let Some((ident, values)) = by_ident.iter().find(|(_, values)| values.len() > 1) {
+        bail!(
+            "pp: enum collision in {path}: values [{}] all sanitize to '{ident}' — cannot generate; TODO: teach typify/progenitor rename rules to preserve wire values",
+            values.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn enum_identifier_form(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_underscore = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            previous_underscore = false;
+        } else if !previous_underscore {
+            out.push('_');
+            previous_underscore = true;
+        }
+    }
+    if out.is_empty() {
+        return "_".to_string();
+    }
+    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        out.insert_str(0, "n_");
+    }
+    out
 }
 
 fn request_body_has_schemaless_content(request_body: &RequestBody) -> bool {
@@ -535,6 +589,33 @@ components:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("component schema Mystery"));
         assert!(warnings[0].contains("replaced unsupported type '' with fallback"));
+    }
+
+    #[test]
+    fn enum_sanitization_collision_fails_clearly() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Enum Collision
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    Reaction:
+      type: string
+      enum:
+        - "+1"
+        - "-1"
+"#,
+        )
+        .unwrap();
+
+        let err = normalize(&mut spec).unwrap_err().to_string();
+
+        assert!(err.contains("pp: enum collision in component schema Reaction"));
+        assert!(err.contains("values [+1, -1] all sanitize to '_1'"));
+        assert!(err.contains("cannot generate"));
     }
 
     #[test]
