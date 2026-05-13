@@ -1,4 +1,5 @@
 use anyhow::Result;
+use base64::Engine;
 use crate::context::Context;
 
 impl Context {
@@ -11,6 +12,15 @@ impl Context {
 {% elif auth_kind.kind == "api_key" %}
         let key = std::env::var("{{ api_key_env_var }}")?;
         Ok(Some(("{{ auth_kind.header_name }}".to_string(), key)))
+{% elif auth_kind.kind == "http_basic" %}
+        let Ok(user) = std::env::var("{{ basic_user_env_var }}") else {
+            return Ok(None);
+        };
+        let Ok(password) = std::env::var("{{ basic_password_env_var }}") else {
+            return Ok(None);
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+        Ok(Some(("authorization".to_string(), format!("Basic {encoded}"))))
 {% elif auth_kind.kind == "unsupported" %}
         compile_error!("unsupported auth for generated wrapper: {{ auth_kind.reason }} (KTD-5: OAuth2/basic/cookie/composed auth are Phase 2+)");
 {% endif %}

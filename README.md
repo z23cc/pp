@@ -61,6 +61,9 @@ MY_API_TOKEN=foo ./out/my-api/target/release/my-api get-ping
 For header `apiKey` auth, it reads `<BIN>_API_KEY` and sends the configured
 header name, for example `X-API-Key`.
 
+For `http` basic auth, it reads `<BIN>_USER` and `<BIN>_PASSWORD` and sends an
+`Authorization: Basic ...` header when both are set.
+
 ## Tests
 
 Default tests stay fast:

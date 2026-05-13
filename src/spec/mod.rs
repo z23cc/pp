@@ -16,6 +16,7 @@ use std::path::Path;
 pub enum AuthKind {
     None,
     Bearer,
+    HttpBasic,
     ApiKey { header_name: String },
     Unsupported { reason: String },
 }
@@ -164,7 +165,9 @@ fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
         };
 
         match auth_kind {
-            AuthKind::Bearer | AuthKind::ApiKey { .. } => return Ok(auth_kind),
+            AuthKind::Bearer | AuthKind::HttpBasic | AuthKind::ApiKey { .. } => {
+                return Ok(auth_kind)
+            }
             AuthKind::Unsupported { .. } => {
                 if first_unsupported.is_none() {
                     first_unsupported = Some(auth_kind);
@@ -182,8 +185,11 @@ fn auth_kind_for_scheme(scheme: &SecurityScheme) -> AuthKind {
         SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("bearer") => {
             AuthKind::Bearer
         }
+        SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("basic") => {
+            AuthKind::HttpBasic
+        }
         SecurityScheme::HTTP { scheme, .. } => AuthKind::Unsupported {
-            reason: format!("http auth scheme '{scheme}' not supported in MVP (only bearer)"),
+            reason: format!("http auth scheme '{scheme}' not supported in MVP (only bearer/basic)"),
         },
         SecurityScheme::APIKey { location, name, .. } => match location {
             openapiv3::APIKeyLocation::Header => AuthKind::ApiKey {
@@ -297,6 +303,27 @@ paths: {}
     }
 
     #[test]
+    fn http_basic_auth_detected() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: My API
+  version: "1.0.0"
+paths: {}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::HttpBasic);
+    }
+
+    #[test]
     fn oauth2_first_bearer_second_detects_bearer() {
         let spec: OpenAPI = serde_yaml::from_str(
             r#"
@@ -331,9 +358,9 @@ info:
 paths: {}
 components:
   securitySchemes:
-    basicAuth:
+    digestAuth:
       type: http
-      scheme: basic
+      scheme: digest
     oauth2:
       type: oauth2
       flows: {}
@@ -344,7 +371,7 @@ components:
         assert_eq!(
             derive_auth_kind(&spec).unwrap(),
             AuthKind::Unsupported {
-                reason: "http auth scheme 'basic' not supported in MVP (only bearer)".into()
+                reason: "http auth scheme 'digest' not supported in MVP (only bearer/basic)".into()
             }
         );
     }

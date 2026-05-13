@@ -27,6 +27,8 @@ pub struct WrapperManifest {
     pub progenitor_crate_name: String,
     pub token_env_var: String,
     pub api_key_env_var: String,
+    pub basic_user_env_var: String,
+    pub basic_password_env_var: String,
 }
 
 impl WrapperManifest {
@@ -49,6 +51,8 @@ impl WrapperManifest {
             progenitor_crate_name,
             token_env_var: format!("{env_prefix}_TOKEN"),
             api_key_env_var: format!("{env_prefix}_API_KEY"),
+            basic_user_env_var: format!("{env_prefix}_USER"),
+            basic_password_env_var: format!("{env_prefix}_PASSWORD"),
         }
     }
 }
