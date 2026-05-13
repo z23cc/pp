@@ -1,8 +1,8 @@
 use anyhow::Result;
 use heck::ToSnakeCase;
 use openapiv3::{
-    ArrayType, MediaType, ObjectType, OpenAPI, Operation, ReferenceOr, RequestBody, Response,
-    Schema, SchemaKind, StatusCode, Type,
+    ArrayType, MediaType, ObjectType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody,
+    Response, Schema, SchemaKind, StatusCode, Type,
 };
 use std::collections::HashMap;
 
@@ -88,6 +88,13 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             stats.dropped_unsupported_request_body_ops.join(", ")
         ));
     }
+    if !stats.normalized_deep_object_query_params.is_empty() {
+        warnings.push(format!(
+            "normalized {} query parameters — replaced unsupported deepObject style with form: {}",
+            stats.normalized_deep_object_query_params.len(),
+            stats.normalized_deep_object_query_params.join(", ")
+        ));
+    }
 
     Ok(warnings)
 }
@@ -96,6 +103,7 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
 struct NormalizeStats {
     dropped_defaults: usize,
     dropped_unsupported_request_body_ops: Vec<String>,
+    normalized_deep_object_query_params: Vec<String>,
 }
 
 fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
@@ -238,8 +246,20 @@ fn normalize_operation(
     for (i, param) in operation.parameters.iter_mut().enumerate() {
         if let ReferenceOr::Item(param) = param {
             let param_data = match param {
-                openapiv3::Parameter::Query { parameter_data, .. }
-                | openapiv3::Parameter::Header { parameter_data, .. }
+                openapiv3::Parameter::Query {
+                    parameter_data,
+                    style,
+                    ..
+                } => {
+                    if *style == QueryStyle::DeepObject {
+                        *style = QueryStyle::Form;
+                        stats
+                            .normalized_deep_object_query_params
+                            .push(format!("{op_name}.{}", parameter_data.name));
+                    }
+                    parameter_data
+                }
+                openapiv3::Parameter::Header { parameter_data, .. }
                 | openapiv3::Parameter::Path { parameter_data, .. }
                 | openapiv3::Parameter::Cookie { parameter_data, .. } => parameter_data,
             };
@@ -956,6 +976,50 @@ paths:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("kept application/json"));
         assert!(warnings[0].contains("dropped application/xml"));
+    }
+
+    #[test]
+    fn deep_object_query_style_is_replaced_with_form_and_warns_once() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Deep Object Query
+  version: "1.0.0"
+paths:
+  /search:
+    get:
+      operationId: searchPets
+      parameters:
+        - name: filter
+          in: query
+          style: deepObject
+          schema:
+            type: object
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let path = spec.paths.paths.get("/search").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let ReferenceOr::Item(openapiv3::Parameter::Query { style, .. }) =
+            path.get.as_ref().unwrap().parameters.first().unwrap()
+        else {
+            panic!("expected inline query parameter");
+        };
+
+        assert_eq!(*style, QueryStyle::Form);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            "normalized 1 query parameters — replaced unsupported deepObject style with form: searchPets.filter"
+        );
     }
 
     #[test]
