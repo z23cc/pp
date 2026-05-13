@@ -83,5 +83,6 @@ fn list_tools(bin: &std::path::Path, env: Option<(&str, &str)>) -> Vec<Value> {
         line.clear();
     }
     let _ = child.kill();
+    let _ = child.wait();
     tools
 }

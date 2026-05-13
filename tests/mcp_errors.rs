@@ -209,5 +209,6 @@ fn call_named_tool(
         line.clear();
     }
     let _ = child.kill();
+    let _ = child.wait();
     response
 }

@@ -504,7 +504,7 @@ mod tests {
             properties["tags"]["items"]["properties"]["name"]["type"],
             "string"
         );
-        assert!(serde_json::to_string(&schema).unwrap().contains("$ref") == false);
+        assert!(!serde_json::to_string(&schema).unwrap().contains("$ref"));
     }
 
     #[test]
