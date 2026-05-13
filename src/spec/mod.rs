@@ -46,7 +46,7 @@ pub fn load(path: &Path) -> Result<LoadedSpec> {
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let mut spec =
         parse(&raw, path).with_context(|| format!("failed to parse spec: {}", path.display()))?;
-    let normalization_warnings = normalize::normalize(&mut spec);
+    let normalization_warnings = normalize::normalize(&mut spec)?;
     let facts = inspect_openapi(&spec)?;
 
     Ok(LoadedSpec {
@@ -92,7 +92,11 @@ fn bin_name_from_title(title: &str) -> String {
     let version_noise = Regex::new(r"(?i)\b(v\d+|v?\d+\.\d+(\.\d+)?)\b").expect("valid regex");
     let stripped = openapi_noise.replace_all(title, "");
     let stripped = version_noise.replace_all(&stripped, "");
-    stripped.split_whitespace().collect::<Vec<_>>().join(" ").to_kebab_case()
+    stripped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_kebab_case()
 }
 
 fn parse(raw: &str, _path: &Path) -> Result<OpenAPI> {
@@ -411,14 +415,20 @@ components:
             bin_name_from_title("Swagger Petstore - OpenAPI 3.0"),
             "swagger-petstore"
         );
-        assert_eq!(bin_name_from_title("GitHub v3 REST API"), "git-hub-rest-api");
+        assert_eq!(
+            bin_name_from_title("GitHub v3 REST API"),
+            "git-hub-rest-api"
+        );
         assert_eq!(bin_name_from_title("My API v1.2.3"), "my-api");
         assert_eq!(bin_name_from_title("Cool API"), "cool-api");
     }
 
     #[test]
     fn openapi_31_json_is_detected() {
-        assert_eq!(detect_openapi_31(r#"{"openapi":"3.1.1","paths":{}}"#).as_deref(), Some("3.1.1"));
+        assert_eq!(
+            detect_openapi_31(r#"{"openapi":"3.1.1","paths":{}}"#).as_deref(),
+            Some("3.1.1")
+        );
     }
 
     #[test]

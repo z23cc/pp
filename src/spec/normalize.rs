@@ -1,5 +1,9 @@
+use anyhow::Result;
 use heck::ToSnakeCase;
-use openapiv3::{MediaType, OpenAPI, Operation, ReferenceOr, RequestBody, Response, StatusCode};
+use openapiv3::{
+    ArrayType, MediaType, ObjectType, OpenAPI, Operation, ReferenceOr, RequestBody, Response,
+    Schema, SchemaKind, StatusCode, Type,
+};
 use std::collections::HashMap;
 
 const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
@@ -10,11 +14,16 @@ const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
 
 const JSON_MIME: &str = "application/json";
 
-pub fn normalize(spec: &mut OpenAPI) -> Vec<String> {
+pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     shorten_verbose_operation_ids(spec);
 
     if let Some(components) = spec.components.as_mut() {
+        for (name, schema) in components.schemas.iter_mut() {
+            if let ReferenceOr::Item(schema) = schema {
+                normalize_schema(schema, &format!("component schema {name}"), &mut warnings)?;
+            }
+        }
         for (name, request_body) in components.request_bodies.iter_mut() {
             if let ReferenceOr::Item(request_body) = request_body {
                 normalize_request_body(
@@ -50,14 +59,16 @@ pub fn normalize(spec: &mut OpenAPI) -> Vec<String> {
         normalize_maybe_operation("trace", path, &mut item.trace, &mut warnings);
     }
 
-    warnings
+    Ok(warnings)
 }
 
 fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
     let ids = operation_ids(spec);
     let candidates: Vec<_> = ids
         .iter()
-        .filter_map(|old| shorten_candidate(old).map(|new| (old.clone(), new, last_segments(old, 2))))
+        .filter_map(|old| {
+            shorten_candidate(old).map(|new| (old.clone(), new, last_segments(old, 2)))
+        })
         .collect();
     let last_three_counts = count_by(candidates.iter().map(|(_, new, _)| new.clone()));
     let chosen: Vec<_> = candidates
@@ -93,7 +104,18 @@ fn operation_ids(spec: &OpenAPI) -> Vec<String> {
             ReferenceOr::Item(item) => Some(item),
             ReferenceOr::Reference { .. } => None,
         })
-        .flat_map(|item| [&item.get, &item.put, &item.post, &item.delete, &item.options, &item.head, &item.patch, &item.trace])
+        .flat_map(|item| {
+            [
+                &item.get,
+                &item.put,
+                &item.post,
+                &item.delete,
+                &item.options,
+                &item.head,
+                &item.patch,
+                &item.trace,
+            ]
+        })
         .flatten()
         .filter_map(|op| op.operation_id.clone())
         .collect()
@@ -107,19 +129,39 @@ fn operations_mut(spec: &mut OpenAPI) -> Vec<&mut Operation> {
             ReferenceOr::Item(item) => Some(item),
             ReferenceOr::Reference { .. } => None,
         })
-        .flat_map(|item| [&mut item.get, &mut item.put, &mut item.post, &mut item.delete, &mut item.options, &mut item.head, &mut item.patch, &mut item.trace])
+        .flat_map(|item| {
+            [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.options,
+                &mut item.head,
+                &mut item.patch,
+                &mut item.trace,
+            ]
+        })
         .flatten()
         .collect()
 }
 
 fn shorten_candidate(operation_id: &str) -> Option<String> {
-    VERBOSE_OPERATION_PREFIXES.iter()
-        .find_map(|prefix| operation_id.strip_prefix(prefix).map(|stripped| stripped.to_snake_case()))
-        .or_else(|| (operation_segments(operation_id).len() > 4).then(|| last_segments(operation_id, 3)))
+    VERBOSE_OPERATION_PREFIXES
+        .iter()
+        .find_map(|prefix| {
+            operation_id
+                .strip_prefix(prefix)
+                .map(|stripped| stripped.to_snake_case())
+        })
+        .or_else(|| {
+            (operation_segments(operation_id).len() > 4).then(|| last_segments(operation_id, 3))
+        })
 }
 fn last_segments(operation_id: &str, count: usize) -> String {
     let segments = operation_segments(operation_id);
-    segments[segments.len().saturating_sub(count)..].join("_").to_snake_case()
+    segments[segments.len().saturating_sub(count)..]
+        .join("_")
+        .to_snake_case()
 }
 
 fn operation_segments(operation_id: &str) -> Vec<&str> {
@@ -239,6 +281,136 @@ fn normalize_response(response: &mut Response, op_name: &str, warnings: &mut Vec
     }
 }
 
+fn normalize_schema(schema: &mut Schema, path: &str, warnings: &mut Vec<String>) -> Result<()> {
+    match &mut schema.schema_kind {
+        SchemaKind::Type(Type::String(_)) => {}
+        SchemaKind::Type(Type::Object(object)) => normalize_object_schema(object, path, warnings)?,
+        SchemaKind::Type(Type::Array(array)) => normalize_array_schema(array, path, warnings)?,
+        SchemaKind::OneOf { one_of } => {
+            normalize_schema_refs(one_of, &format!("{path}.oneOf"), warnings)?
+        }
+        SchemaKind::AllOf { all_of } => {
+            normalize_schema_refs(all_of, &format!("{path}.allOf"), warnings)?
+        }
+        SchemaKind::AnyOf { any_of } => {
+            normalize_schema_refs(any_of, &format!("{path}.anyOf"), warnings)?
+        }
+        SchemaKind::Not { not } => {
+            normalize_boxed_reference_or_schema(not, &format!("{path}.not"), warnings)?
+        }
+        SchemaKind::Any(any) => {
+            if let Some(typ) = any.typ.clone() {
+                if !is_supported_schema_type(&typ) {
+                    any.typ = None;
+                    warnings.push(format!(
+                        "normalized {path} — replaced unsupported type '{typ}' with fallback"
+                    ));
+                }
+            }
+            for (name, property) in any.properties.iter_mut() {
+                normalize_boxed_schema_ref(
+                    property,
+                    &format!("{path}.properties.{name}"),
+                    warnings,
+                )?;
+            }
+            if let Some(items) = any.items.as_mut() {
+                normalize_boxed_schema_ref(items, &format!("{path}.items"), warnings)?;
+            }
+            if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
+                any.additional_properties.as_mut()
+            {
+                normalize_boxed_reference_or_schema(
+                    schema,
+                    &format!("{path}.additionalProperties"),
+                    warnings,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn normalize_object_schema(
+    object: &mut ObjectType,
+    path: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    for (name, property) in object.properties.iter_mut() {
+        normalize_boxed_schema_ref(property, &format!("{path}.properties.{name}"), warnings)?;
+    }
+    if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
+        object.additional_properties.as_mut()
+    {
+        normalize_boxed_reference_or_schema(
+            schema,
+            &format!("{path}.additionalProperties"),
+            warnings,
+        )?;
+    }
+    Ok(())
+}
+
+fn normalize_array_schema(
+    array: &mut ArrayType,
+    path: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(items) = array.items.as_mut() {
+        normalize_boxed_schema_ref(items, &format!("{path}.items"), warnings)?;
+    }
+    Ok(())
+}
+
+fn normalize_schema_refs(
+    refs: &mut [ReferenceOr<Schema>],
+    path: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    for (i, schema) in refs.iter_mut().enumerate() {
+        normalize_schema_ref(schema, &format!("{path}[{i}]"), warnings)?;
+    }
+    Ok(())
+}
+
+fn normalize_schema_ref(
+    schema: &mut ReferenceOr<Schema>,
+    path: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if let ReferenceOr::Item(schema) = schema {
+        normalize_schema(schema, path, warnings)?;
+    }
+    Ok(())
+}
+
+fn normalize_boxed_schema_ref(
+    schema: &mut ReferenceOr<Box<Schema>>,
+    path: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if let ReferenceOr::Item(schema) = schema {
+        normalize_schema(schema.as_mut(), path, warnings)?;
+    }
+    Ok(())
+}
+
+fn normalize_boxed_reference_or_schema(
+    schema: &mut Box<ReferenceOr<Schema>>,
+    path: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    normalize_schema_ref(schema.as_mut(), path, warnings)
+}
+
+fn is_supported_schema_type(typ: &str) -> bool {
+    matches!(
+        typ,
+        "string" | "number" | "integer" | "boolean" | "array" | "object"
+    )
+}
+
 fn request_body_has_schemaless_content(request_body: &RequestBody) -> bool {
     request_body
         .content
@@ -316,7 +488,7 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec);
+        let warnings = normalize(&mut spec).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -329,6 +501,40 @@ paths:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("responses — kept 200"));
         assert!(warnings[0].contains("dropped 404, default"));
+    }
+
+    #[test]
+    fn unsupported_any_schema_type_is_dropped_and_warns() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Unsupported Type
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    Mystery:
+      type: ""
+      enum:
+        - ok
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let components = spec.components.unwrap();
+        let ReferenceOr::Item(schema) = components.schemas.get("Mystery").unwrap() else {
+            panic!("expected inline schema");
+        };
+        let SchemaKind::Any(any) = &schema.schema_kind else {
+            panic!("expected any schema");
+        };
+
+        assert!(any.typ.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("component schema Mystery"));
+        assert!(warnings[0].contains("replaced unsupported type '' with fallback"));
     }
 
     #[test]
@@ -358,7 +564,7 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec);
+        let warnings = normalize(&mut spec).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -399,7 +605,7 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec);
+        let warnings = normalize(&mut spec).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
