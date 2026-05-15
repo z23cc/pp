@@ -20,6 +20,21 @@ pub enum Command {
     Inspect {
         /// Path to the OpenAPI 3.0 spec (YAML or JSON)
         spec: PathBuf,
+        /// Print stable JSONL rows for operations after any slice filters
+        #[arg(long)]
+        list_operations: bool,
+        /// Include an operation by operationId (repeatable)
+        #[arg(long = "include-operation")]
+        include_operations: Vec<String>,
+        /// Include operations with this tag (repeatable)
+        #[arg(long = "include-tag")]
+        include_tags: Vec<String>,
+        /// Include operations whose path starts with this prefix (repeatable)
+        #[arg(long = "include-path-prefix")]
+        include_path_prefixes: Vec<String>,
+        /// Exclude an operation by operationId after includes are applied (repeatable)
+        #[arg(long = "exclude-operation")]
+        exclude_operations: Vec<String>,
     },
     /// Generate a Rust CLI crate workspace from an OpenAPI spec
     Generate {
@@ -34,6 +49,18 @@ pub enum Command {
         /// Run `cargo build --release` after generation to validate
         #[arg(long)]
         build: bool,
+        /// Include an operation by operationId (repeatable)
+        #[arg(long = "include-operation")]
+        include_operations: Vec<String>,
+        /// Include operations with this tag (repeatable)
+        #[arg(long = "include-tag")]
+        include_tags: Vec<String>,
+        /// Include operations whose path starts with this prefix (repeatable)
+        #[arg(long = "include-path-prefix")]
+        include_path_prefixes: Vec<String>,
+        /// Exclude an operation by operationId after includes are applied (repeatable)
+        #[arg(long = "exclude-operation")]
+        exclude_operations: Vec<String>,
     },
     /// Run `cargo build` against an already-generated workspace
     Validate {
@@ -42,12 +69,55 @@ pub enum Command {
     },
 }
 
+fn load_options(
+    include_operations: Vec<String>,
+    include_tags: Vec<String>,
+    include_path_prefixes: Vec<String>,
+    exclude_operations: Vec<String>,
+) -> crate::spec::LoadOptions {
+    crate::spec::LoadOptions {
+        slice: crate::spec::slice::SliceOptions {
+            include_operations,
+            include_tags,
+            include_path_prefixes,
+            exclude_operations,
+        },
+    }
+}
+
 impl Cli {
     pub fn run(self) -> Result<()> {
         match self.command {
-            Command::Inspect { spec } => {
-                let facts = crate::spec::inspect(&spec)?;
-                println!("{}", serde_json::to_string_pretty(&facts)?);
+            Command::Inspect {
+                spec,
+                list_operations,
+                include_operations,
+                include_tags,
+                include_path_prefixes,
+                exclude_operations,
+            } => {
+                let options = load_options(
+                    include_operations,
+                    include_tags,
+                    include_path_prefixes,
+                    exclude_operations,
+                );
+                if list_operations {
+                    let loaded = crate::spec::load_with_options(&spec, &options)?;
+                    for warning in &loaded.normalization_warnings {
+                        eprintln!("pp: {warning}");
+                    }
+                    for operation in crate::spec::slice::list_operations(&loaded.api) {
+                        println!("{}", serde_json::to_string(&operation)?);
+                    }
+                } else {
+                    let facts = if options.slice.is_noop() {
+                        crate::spec::inspect(&spec)?
+                    } else {
+                        crate::spec::inspect_with_options(&spec, &options)?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&facts)?);
+                }
                 Ok(())
             }
             Command::Generate {
@@ -55,9 +125,23 @@ impl Cli {
                 output,
                 name,
                 build,
+                include_operations,
+                include_tags,
+                include_path_prefixes,
+                exclude_operations,
             } => {
                 eprintln!("pp: inspecting {}...", spec.display());
-                let loaded = crate::spec::load(&spec)?;
+                let options = load_options(
+                    include_operations,
+                    include_tags,
+                    include_path_prefixes,
+                    exclude_operations,
+                );
+                let loaded = if options.slice.is_noop() {
+                    crate::spec::load(&spec)?
+                } else {
+                    crate::spec::load_with_options(&spec, &options)?
+                };
                 for warning in &loaded.normalization_warnings {
                     eprintln!("pp: {warning}");
                 }

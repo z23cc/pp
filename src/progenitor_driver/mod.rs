@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use openapiv3::OpenAPI;
 use progenitor::{GenerationSettings, Generator, InterfaceStyle};
 use quote::{format_ident, quote};
+use regex::Regex;
 use std::fs;
 use std::path::Path;
 
@@ -55,9 +56,40 @@ pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<()> {
                 )))
             }"#,
         );
+    let formatted = patch_complex_clap_value_parsers(&formatted);
 
     fs::create_dir_all(out_dir.join("src"))
         .with_context(|| format!("failed to create API src dir: {}", out_dir.display()))?;
     fs::write(out_dir.join("src/lib.rs"), formatted)
         .with_context(|| format!("failed to write {}", out_dir.join("src/lib.rs").display()))
+}
+
+fn patch_complex_clap_value_parsers(source: &str) -> String {
+    let vec_re = Regex::new(
+        r"::clap::value_parser!\(\s*::std::vec::Vec\s*<\s*types::([A-Za-z][A-Za-z0-9_]*)\s*>\s*\)",
+    )
+    .expect("valid vec value parser regex");
+    let source = vec_re.replace_all(source, |caps: &regex::Captures<'_>| {
+        complex_vec_value_parser(&caps[1])
+    });
+
+    let single_re = Regex::new(r"::clap::value_parser!\(\s*types::([A-Za-z][A-Za-z0-9_]*)\s*\)")
+        .expect("valid single value parser regex");
+    single_re
+        .replace_all(&source, |caps: &regex::Captures<'_>| {
+            complex_single_value_parser(&caps[1])
+        })
+        .into_owned()
+}
+
+fn complex_single_value_parser(typ: &str) -> String {
+    format!(
+        "::clap::builder::ValueParser::new(|s: &str| -> Result<types::{typ}, ::std::string::String> {{ ::serde_json::from_value::<types::{typ}>(::serde_json::Value::String(s.to_string())).or_else(|_| ::serde_json::from_str::<types::{typ}>(s)).map_err(|err| err.to_string()) }})"
+    )
+}
+
+fn complex_vec_value_parser(typ: &str) -> String {
+    format!(
+        "::clap::builder::ValueParser::new(|s: &str| -> Result<::std::vec::Vec<types::{typ}>, ::std::string::String> {{ if let Ok(values) = ::serde_json::from_str::<::std::vec::Vec<types::{typ}>>(s) {{ return Ok(values); }} s.split(',').map(|part| {{ let part = part.trim(); ::serde_json::from_value::<types::{typ}>(::serde_json::Value::String(part.to_string())).or_else(|_| ::serde_json::from_str::<types::{typ}>(part)).map_err(|err| err.to_string()) }}).collect() }})"
+    )
 }

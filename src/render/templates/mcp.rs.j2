@@ -27,8 +27,8 @@ struct ArgDef {
 
 {% for tool in mcp_tools %}
 fn schema_{{ loop.index }}() -> rmcp::model::JsonObject {
-    match json!({{ tool.input_schema }}) {
-        Value::Object(object) => object,
+    match serde_json::from_str::<Value>({{ tool.input_schema_literal }}) {
+        Ok(Value::Object(object)) => object,
         _ => rmcp::model::JsonObject::new(),
     }
 }

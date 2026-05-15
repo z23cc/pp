@@ -46,6 +46,7 @@ pub struct McpTool {
     pub description: String,
     pub description_literal: String,
     pub input_schema: String,
+    pub input_schema_literal: String,
     pub args: Vec<McpArg>,
 }
 
@@ -312,11 +313,15 @@ fn push_operation(
         "additionalProperties": false,
     });
 
+    let input_schema = serde_json::to_string(&schema).expect("schema serializes");
+    let input_schema_literal =
+        serde_json::to_string(&input_schema).expect("schema literal serializes");
     tools.push(McpTool {
         name,
         description_literal: serde_json::to_string(&description).expect("description serializes"),
         description,
-        input_schema: serde_json::to_string(&schema).expect("schema serializes"),
+        input_schema,
+        input_schema_literal,
         args,
     });
     Ok(())

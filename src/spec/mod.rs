@@ -2,6 +2,7 @@
 //! to drive progenitor + wrapper templates.
 
 pub mod normalize;
+pub mod slice;
 
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
@@ -40,16 +41,47 @@ pub struct LoadedSpec {
     pub normalization_warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LoadOptions {
+    pub slice: slice::SliceOptions,
+}
+
 type DowngradeReport = Option<(String, usize)>;
 
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content),
 /// normalize it for progenitor, and derive [`SpecFacts`].
 pub fn load(path: &Path) -> Result<LoadedSpec> {
+    load_with_options(path, &LoadOptions::default())
+}
+
+pub fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let mut spec =
         parse(&raw, path).with_context(|| format!("failed to parse spec: {}", path.display()))?;
-    let normalization_warnings = normalize::normalize(&mut spec)?;
+    let mut normalization_warnings = normalize::normalize(&mut spec)?;
+    if !options.slice.is_noop() {
+        let report = slice::slice_openapi(&mut spec, &options.slice)?;
+        normalization_warnings.push(format!(
+            "sliced spec — kept {} operations, dropped {} operations",
+            report.kept_operations, report.dropped_operations
+        ));
+        normalization_warnings.push(format!(
+            "pruned components — schemas {} -> {}, responses {} -> {}, parameters {} -> {}, requestBodies {} -> {}, headers {} -> {}, securitySchemes {} -> {}",
+            report.pruned_components.schemas_before,
+            report.pruned_components.schemas_after,
+            report.pruned_components.responses_before,
+            report.pruned_components.responses_after,
+            report.pruned_components.parameters_before,
+            report.pruned_components.parameters_after,
+            report.pruned_components.request_bodies_before,
+            report.pruned_components.request_bodies_after,
+            report.pruned_components.headers_before,
+            report.pruned_components.headers_after,
+            report.pruned_components.security_schemes_before,
+            report.pruned_components.security_schemes_after,
+        ));
+    }
     let facts = inspect_openapi(&spec)?;
 
     Ok(LoadedSpec {
@@ -63,6 +95,10 @@ pub fn load(path: &Path) -> Result<LoadedSpec> {
 /// and derive [`SpecFacts`].
 pub fn inspect(path: &Path) -> Result<SpecFacts> {
     Ok(load(path)?.facts)
+}
+
+pub fn inspect_with_options(path: &Path, options: &LoadOptions) -> Result<SpecFacts> {
+    Ok(load_with_options(path, options)?.facts)
 }
 
 fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {
