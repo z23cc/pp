@@ -20,7 +20,7 @@ pub enum ReportSeverity {
     Warning,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportEffect {
     /// Deterministic repair that does not intentionally remove API surface.
@@ -57,6 +57,24 @@ impl ReportEffect {
 impl std::fmt::Display for ReportEffect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReportEffect {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "lossless_repair" => Ok(Self::LosslessRepair),
+            "explicit_selection" => Ok(Self::ExplicitSelection),
+            "lossy_rewrite" => Ok(Self::LossyRewrite),
+            "semantic_drop" => Ok(Self::SemanticDrop),
+            "backend_workaround" => Ok(Self::BackendWorkaround),
+            "unsafe_fallback" => Ok(Self::UnsafeFallback),
+            _ => Err(format!(
+                "unknown report effect '{value}' (expected one of: lossless_repair, explicit_selection, lossy_rewrite, semantic_drop, backend_workaround, unsafe_fallback)"
+            )),
+        }
     }
 }
 

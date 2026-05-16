@@ -7,7 +7,9 @@
 use crate::backend::{ApiBackend, ApiCrateRequest, BackendDiagnostic, ProgenitorBackend};
 use crate::model::ApiModel;
 use crate::render::WrapperManifest;
-use crate::spec::{report::ReportEntry, AuthKind, LoadOptions, SpecFacts};
+use crate::spec::{
+    report::ReportEntry, transform::TransformPlan, AuthKind, LoadOptions, SpecFacts,
+};
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -27,6 +29,7 @@ pub(crate) struct GenerateRequest {
 pub(crate) struct GenerateResult {
     pub facts: SpecFacts,
     pub reports: Vec<ReportEntry>,
+    pub transform_plan: TransformPlan,
     pub formatted_warnings: Vec<String>,
     pub backend_diagnostics: Vec<BackendDiagnostic>,
     pub output_path: PathBuf,
@@ -95,6 +98,8 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         });
     }
 
+    let transform_plan = loaded.transform_plan.clone();
+    write_transform_plan(&request.output_path, &transform_plan)?;
     let facts = loaded.facts;
     let target_bin_name = request.bin_name.unwrap_or_else(|| facts.bin_name.clone());
     let api_name = format!("{target_bin_name}-api");
@@ -155,12 +160,22 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
     Ok(GenerateResult {
         facts,
         reports: loaded.reports,
+        transform_plan,
         formatted_warnings: loaded.normalization_warnings,
         backend_diagnostics: api_output.diagnostics,
         output_path: request.output_path,
         target_bin_name,
         validation,
     })
+}
+
+fn write_transform_plan(output_path: &Path, transform_plan: &TransformPlan) -> Result<()> {
+    std::fs::create_dir_all(output_path)
+        .with_context(|| format!("failed to create output dir: {}", output_path.display()))?;
+    let path = output_path.join("pp-transform-plan.json");
+    let body =
+        serde_json::to_vec_pretty(transform_plan).context("failed to serialize transform plan")?;
+    std::fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn effective_base_url(
@@ -252,6 +267,7 @@ paths:
         );
         assert!(result.output_path.join("Cargo.toml").exists());
         assert!(result.output_path.join("api/src/lib.rs").exists());
+        assert!(result.output_path.join("pp-transform-plan.json").exists());
     }
 
     #[test]

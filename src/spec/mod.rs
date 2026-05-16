@@ -8,13 +8,14 @@ mod pre_parse;
 pub(crate) mod references;
 pub mod report;
 pub mod slice;
+pub(crate) mod transform;
 pub(crate) mod traversal;
 
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
 use openapiv3::OpenAPI;
 use regex::Regex;
-use report::{ReportEffect, ReportEntry, ReportStage};
+use report::{ReportEntry, ReportStage};
 use serde::Serialize;
 use std::path::Path;
 
@@ -42,58 +43,27 @@ pub struct SpecFacts {
     pub auth_kind: AuthKind,
 }
 
-pub struct LoadedSpec {
+pub(crate) struct LoadedSpec {
     pub api: OpenAPI,
     pub facts: SpecFacts,
     pub reports: Vec<ReportEntry>,
+    pub transform_plan: transform::TransformPlan,
     pub normalization_warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct LoadOptions {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LoadOptions {
     pub slice: slice::SliceOptions,
-    pub policy: NormalizationPolicy,
-}
-
-impl Default for LoadOptions {
-    fn default() -> Self {
-        Self {
-            slice: slice::SliceOptions::default(),
-            policy: NormalizationPolicy::strict(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NormalizationPolicy {
-    pub allow_compat_normalization: bool,
-}
-
-impl NormalizationPolicy {
-    pub fn strict() -> Self {
-        Self {
-            allow_compat_normalization: false,
-        }
-    }
-
-    pub fn compatibility() -> Self {
-        Self {
-            allow_compat_normalization: true,
-        }
-    }
-
-    fn allows(self, effect: ReportEffect) -> bool {
-        self.allow_compat_normalization || effect.allowed_without_compat_flag()
-    }
+    pub policy: transform::TransformPolicy,
 }
 
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content),
 /// normalize it for progenitor, and derive [`SpecFacts`].
-pub fn load(path: &Path) -> Result<LoadedSpec> {
+pub(crate) fn load(path: &Path) -> Result<LoadedSpec> {
     load_with_options(path, &LoadOptions::default())
 }
 
-pub fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
+pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let (mut spec, mut reports) =
@@ -103,7 +73,8 @@ pub fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpe
         reports.extend(slice_report.report_entries());
     }
     reports.extend(normalize::normalize(&mut spec)?);
-    enforce_normalization_policy(&reports, options.policy)?;
+    let mut transform_plan = transform::TransformPlan::from_reports(&reports);
+    transform_plan.approve(&options.policy)?;
     let facts = inspect_openapi(&spec)?;
     let normalization_reports = reports
         .iter()
@@ -116,6 +87,7 @@ pub fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpe
         api: spec,
         facts,
         reports,
+        transform_plan,
         normalization_warnings,
     })
 }
@@ -128,41 +100,8 @@ pub fn inspect(path: &Path) -> Result<SpecFacts> {
 }
 
 #[allow(dead_code)]
-pub fn inspect_with_options(path: &Path, options: &LoadOptions) -> Result<SpecFacts> {
+pub(crate) fn inspect_with_options(path: &Path, options: &LoadOptions) -> Result<SpecFacts> {
     Ok(load_with_options(path, options)?.facts)
-}
-
-fn enforce_normalization_policy(
-    reports: &[ReportEntry],
-    policy: NormalizationPolicy,
-) -> Result<()> {
-    let disallowed = reports
-        .iter()
-        .filter(|report| !policy.allows(report.effect))
-        .collect::<Vec<_>>();
-    if disallowed.is_empty() {
-        return Ok(());
-    }
-
-    let mut message = format!(
-        "strict normalization policy rejected {} compatibility normalization(s)",
-        disallowed.len()
-    );
-    for report in disallowed.iter().take(8) {
-        message.push_str(&format!(
-            "\n- {} [{}]: {}",
-            report.code,
-            report.effect,
-            report.formatted_warning()
-        ));
-    }
-    if disallowed.len() > 8 {
-        message.push_str(&format!("\n- ... {} more", disallowed.len() - 8));
-    }
-    message.push_str(
-        "\nPass --allow-compat-normalization to permit explicit compatibility rewrites/drops.",
-    );
-    Err(anyhow!(message))
 }
 
 fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {

@@ -37,9 +37,15 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit compatibility rewrites/drops instead of failing strict normalization policy
+        /// Permit all compatibility transforms instead of strict transform-policy rejection
         #[arg(long)]
         allow_compat_normalization: bool,
+        /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
+        #[arg(long = "allow-effect", value_parser = parse_report_effect)]
+        allow_effects: Vec<crate::spec::report::ReportEffect>,
+        /// Permit one transform report code in strict policy (repeatable)
+        #[arg(long = "allow-report-code")]
+        allow_report_codes: Vec<String>,
     },
     /// Generate a Rust CLI crate workspace from an OpenAPI spec
     Generate {
@@ -69,9 +75,15 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit compatibility rewrites/drops instead of failing strict normalization policy
+        /// Permit all compatibility transforms instead of strict transform-policy rejection
         #[arg(long)]
         allow_compat_normalization: bool,
+        /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
+        #[arg(long = "allow-effect", value_parser = parse_report_effect)]
+        allow_effects: Vec<crate::spec::report::ReportEffect>,
+        /// Permit one transform report code in strict policy (repeatable)
+        #[arg(long = "allow-report-code")]
+        allow_report_codes: Vec<String>,
     },
     /// Run `cargo build` against an already-generated workspace
     Validate {
@@ -86,7 +98,21 @@ fn load_options(
     include_path_prefixes: Vec<String>,
     exclude_operations: Vec<String>,
     allow_compat_normalization: bool,
+    allow_effects: Vec<crate::spec::report::ReportEffect>,
+    allow_report_codes: Vec<String>,
 ) -> crate::spec::LoadOptions {
+    let mut policy = if allow_compat_normalization {
+        crate::spec::transform::TransformPolicy::compatibility()
+    } else {
+        crate::spec::transform::TransformPolicy::strict()
+    };
+    for effect in allow_effects {
+        policy = policy.allow_effect(effect);
+    }
+    for code in allow_report_codes {
+        policy = policy.allow_code(code);
+    }
+
     crate::spec::LoadOptions {
         slice: crate::spec::slice::SliceOptions {
             include_operations,
@@ -94,12 +120,12 @@ fn load_options(
             include_path_prefixes,
             exclude_operations,
         },
-        policy: if allow_compat_normalization {
-            crate::spec::NormalizationPolicy::compatibility()
-        } else {
-            crate::spec::NormalizationPolicy::strict()
-        },
+        policy,
     }
+}
+
+fn parse_report_effect(value: &str) -> Result<crate::spec::report::ReportEffect, String> {
+    value.parse()
 }
 
 fn print_generate_progress(event: crate::pipeline::GenerateProgress) {
@@ -162,6 +188,8 @@ impl Cli {
                 include_path_prefixes,
                 exclude_operations,
                 allow_compat_normalization,
+                allow_effects,
+                allow_report_codes,
             } => {
                 let options = load_options(
                     include_operations,
@@ -169,10 +197,12 @@ impl Cli {
                     include_path_prefixes,
                     exclude_operations,
                     allow_compat_normalization,
+                    allow_effects,
+                    allow_report_codes,
                 );
                 if list_operations {
                     let mut options = options.clone();
-                    options.policy = crate::spec::NormalizationPolicy::compatibility();
+                    options.policy = crate::spec::transform::TransformPolicy::compatibility();
                     let loaded = crate::spec::load_with_options(&spec, &options)?;
                     for report in &loaded.reports {
                         eprintln!("pp: {}", report.formatted_warning());
@@ -214,6 +244,8 @@ impl Cli {
                 include_path_prefixes,
                 exclude_operations,
                 allow_compat_normalization,
+                allow_effects,
+                allow_report_codes,
             } => {
                 let options = load_options(
                     include_operations,
@@ -221,6 +253,8 @@ impl Cli {
                     include_path_prefixes,
                     exclude_operations,
                     allow_compat_normalization,
+                    allow_effects,
+                    allow_report_codes,
                 );
                 let _result = crate::pipeline::generate_with_progress(
                     crate::pipeline::GenerateRequest {

@@ -106,8 +106,14 @@ Generated workspaces also require an explicit base URL. `pp` uses `servers[0].ur
 the spec, or `--base-url <URL>` when the spec does not declare a server; it no longer
 falls back to `http://localhost`.
 
-When compatibility normalization is allowed, `pp` prints each normalization to stderr
-and exposes structured report entries through `pp inspect --reports`.
+When compatibility normalization is allowed, `pp` prints each normalization to stderr,
+exposes structured report entries through `pp inspect --reports`, and writes
+`pp-transform-plan.json` into generated workspaces. Prefer targeted approval with
+`--allow-effect <effect>` or `--allow-report-code <code>` when only one transform class
+or report code is acceptable.
+
+Available transform effects are `lossless_repair`, `explicit_selection`, `lossy_rewrite`,
+`semantic_drop`, `backend_workaround`, and `unsafe_fallback`.
 
 Current compatibility rules:
 

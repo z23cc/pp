@@ -55,6 +55,22 @@ paths:
           description: missing
 "#;
 
+const RESPONSE_VARIANT_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Response Variant Fixture
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+        '404':
+          description: missing
+"#;
+
 const NO_SERVER_SPEC: &str = r#"
 openapi: 3.0.0
 info:
@@ -78,7 +94,7 @@ fn inspect_rejects_compat_normalization_by_default() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("strict normalization policy rejected"),
+        stderr.contains("strict transform policy rejected"),
         "stderr did not explain strict rejection:\n{stderr}"
     );
     assert!(
@@ -124,9 +140,74 @@ fn strict_slice_ignores_lossy_reports_from_unselected_operations() {
 }
 
 #[test]
+fn inspect_allows_specific_effect_when_explicit() {
+    let output = run_inspect(&["--reports", "--allow-effect", "semantic_drop"]);
+    common::assert_success(output, "pp inspect --allow-effect semantic_drop --reports");
+}
+
+#[test]
+fn inspect_allows_specific_report_code_when_explicit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(temp.path(), "response-variant.yaml", RESPONSE_VARIANT_SPEC);
+    let output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(spec)
+        .arg("--reports")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_variants_pruned")
+        .output()
+        .expect("failed to run pp inspect");
+
+    common::assert_success(output, "pp inspect --allow-report-code");
+}
+
+#[test]
 fn inspect_allows_compat_normalization_when_explicit() {
     let output = run_inspect(&["--reports", "--allow-compat-normalization"]);
     common::assert_success(output, "pp inspect --allow-compat-normalization --reports");
+}
+
+#[test]
+fn generate_writes_transform_plan_with_approval_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(temp.path(), "lossy.yaml", LOSSY_SPEC);
+    let out_dir = temp.path().join("out");
+    let output = Command::new(common::pp_bin())
+        .arg("generate")
+        .arg(spec)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--base-url")
+        .arg("https://example.test")
+        .arg("--allow-effect")
+        .arg("semantic_drop")
+        .output()
+        .expect("failed to run pp generate");
+
+    common::assert_success(output, "pp generate --base-url --allow-effect");
+    let plan_path = out_dir.join("pp-transform-plan.json");
+    let value: Value = serde_json::from_slice(
+        &std::fs::read(&plan_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", plan_path.display())),
+    )
+    .expect("transform plan JSON");
+    assert_eq!(value["approval"]["profile"], "strict");
+    assert_eq!(
+        value["approval"]["allowed_effects"],
+        serde_json::json!(["semantic_drop"])
+    );
+    assert!(value["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["code"] == "spec.normalize.response_variants_pruned"
+            && entry["effect"] == "semantic_drop"
+    }));
+    assert!(value["approval"]["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| {
+            decision["code"] == "spec.normalize.response_variants_pruned"
+                && decision["allowed_by"] == "effect_allowlist"
+        }));
 }
 
 #[test]
