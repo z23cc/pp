@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/z23cc/pp/actions/workflows/ci.yml/badge.svg)](https://github.com/z23cc/pp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![crates.io](https://img.shields.io/badge/crates.io-TODO-lightgrey.svg)](https://crates.io/crates/pp-cli)
+[![release status](https://img.shields.io/badge/release-0.1.0%20candidate-blue.svg)](docs/release-status.md)
 
 `pp` turns one OpenAPI YAML/JSON spec into a buildable Rust CLI workspace. It
 uses `progenitor` as an in-process codegen library for API client + command
 generation, then renders wrapper files that make the generated CLI runnable.
 
-The Cargo package is `pp-cli`; the installed binary is `pp`.
+The Cargo package is `pp-cli`; the installed binary is `pp`. The project is preparing a `0.1.0` crates.io release; see `docs/release-status.md` for the current publication checklist and temporary dependency notes.
 
 ## Quickstart
 
@@ -30,7 +30,7 @@ Generate a CLI workspace and build it:
 
 ```bash
 pp generate testdata/petstore.yaml -o ./out/petstore --build
-./out/petstore/target/release/swagger-petstore-open-api-3-0 --help
+./out/petstore/target/release/swagger-petstore --help
 ```
 
 ## What pp is good for
@@ -133,11 +133,9 @@ MY_API_TOKEN=foo ./out/my-api/target/release/my-api get-ping
 
 - OpenAPI 3.1 support is a downgrade pass, not a full native 3.1 implementation.
 - OAuth2 is modeled as bearer-token input only.
-- Very large specs can expose upstream `progenitor` / `typify` codegen limits;
-  GitHub-scale specs are currently affected by
-  [oxidecomputer/typify#1011](https://github.com/oxidecomputer/typify/issues/1011).
+- Very large specs can still expose upstream `progenitor` / `typify` codegen limits. `pp` currently carries a temporary typify fork patch for nullable-composition fixes; remove it only after upstream releases the fixes and the GitHub-scale regression still passes.
 
-## Tests
+## Verification
 
 Default tests stay fast:
 
@@ -145,15 +143,15 @@ Default tests stay fast:
 cargo test
 ```
 
-Smoke tests generate real CLIs and run `cargo build --release`, so they are
-ignored by default. Run them explicitly when needed:
+`pp validate <workspace>` runs `cargo build --release` in a generated workspace:
 
 ```bash
-cargo test -- --ignored
+pp validate ./out/petstore
 ```
 
-The smoke suite covers petstore generation/build plus parameterized dispatcher
-commands and bearer/API-key headers against a local `mockito` server.
+Generated-workspace smoke tests are ignored in normal PR runs and covered by a manual/scheduled workflow. See `docs/verification.md` for the fast, standard, and deep verification profiles.
+
+The standard smoke profile covers petstore generation/build, auth headers, MCP error shapes, `tools/list` pagination, and MCP response shaping against local `mockito` servers.
 
 ## Contributing
 
@@ -162,4 +160,5 @@ Issues and PRs are welcome. Before submitting, run:
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```

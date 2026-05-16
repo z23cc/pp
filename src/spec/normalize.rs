@@ -6,6 +6,9 @@ use openapiv3::{
 };
 use std::collections::{HashMap, HashSet};
 
+use super::normalization_rules::{self as rules, typed};
+use super::report::{ReportEntry, ReportSubject};
+
 const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
     "plausible_web_plugins_api_controllers_",
     "PlausibleWeb.Plugins.API.Controllers.",
@@ -16,45 +19,76 @@ const JSON_MIME: &str = "application/json";
 const FORM_MIME: &str = "application/x-www-form-urlencoded";
 const OCTET_STREAM_MIME: &str = "application/octet-stream";
 
-pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
-    let mut warnings = Vec::new();
+pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<ReportEntry>> {
+    let mut reports = Vec::new();
     let mut stats = NormalizeStats::default();
-    let object_schema_refs = component_object_schema_refs(spec);
-    shorten_verbose_operation_ids(spec);
 
-    if let Some(components) = spec.components.as_mut() {
-        for (name, schema) in components.schemas.iter_mut() {
-            if let ReferenceOr::Item(schema) = schema {
-                normalize_schema(
-                    schema,
-                    &format!("component schema {name}"),
-                    &mut warnings,
-                    &mut stats,
-                )?;
-            }
-        }
-        for (name, request_body) in components.request_bodies.iter_mut() {
-            if let ReferenceOr::Item(request_body) = request_body {
-                normalize_request_body(
-                    request_body,
-                    &format!("component requestBody {name}"),
-                    &mut warnings,
-                    &mut stats,
-                );
-            }
-        }
-        for (name, response) in components.responses.iter_mut() {
-            if let ReferenceOr::Item(response) = response {
-                normalize_response(
-                    response,
-                    &format!("component response {name}"),
-                    &mut warnings,
-                    &mut stats,
-                );
-            }
+    apply_operation_naming_rules(spec, &mut reports);
+    apply_progenitor_compatibility_rules(spec, &mut reports, &mut stats)?;
+    emit_progenitor_compatibility_reports(&mut reports, &stats);
+    apply_response_relaxation_rules(spec, &mut reports);
+    emit_optional_object_query_param_report(&mut reports, &stats);
+
+    Ok(reports)
+}
+
+fn apply_operation_naming_rules(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
+    shorten_verbose_operation_ids(spec, reports);
+}
+
+fn apply_progenitor_compatibility_rules(
+    spec: &mut OpenAPI,
+    reports: &mut Vec<ReportEntry>,
+    stats: &mut NormalizeStats,
+) -> Result<()> {
+    normalize_components(spec, reports, stats)?;
+    let object_schema_refs = component_object_schema_refs(spec);
+    normalize_operations(spec, reports, stats, &object_schema_refs);
+    Ok(())
+}
+
+fn normalize_components(
+    spec: &mut OpenAPI,
+    reports: &mut Vec<ReportEntry>,
+    stats: &mut NormalizeStats,
+) -> Result<()> {
+    let Some(components) = spec.components.as_mut() else {
+        return Ok(());
+    };
+    for (name, schema) in components.schemas.iter_mut() {
+        if let ReferenceOr::Item(schema) = schema {
+            normalize_schema(schema, &format!("component schema {name}"), reports, stats)?;
         }
     }
+    for (name, request_body) in components.request_bodies.iter_mut() {
+        if let ReferenceOr::Item(request_body) = request_body {
+            normalize_request_body(
+                request_body,
+                &format!("component requestBody {name}"),
+                reports,
+                stats,
+            );
+        }
+    }
+    for (name, response) in components.responses.iter_mut() {
+        if let ReferenceOr::Item(response) = response {
+            normalize_response(
+                response,
+                &format!("component response {name}"),
+                reports,
+                stats,
+            );
+        }
+    }
+    Ok(())
+}
 
+fn normalize_operations(
+    spec: &mut OpenAPI,
+    reports: &mut Vec<ReportEntry>,
+    stats: &mut NormalizeStats,
+    object_schema_refs: &HashSet<String>,
+) {
     for (path, path_item) in spec.paths.paths.iter_mut() {
         let ReferenceOr::Item(item) = path_item else {
             continue;
@@ -64,104 +98,127 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<String>> {
             "get",
             path,
             &mut item.get,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "put",
             path,
             &mut item.put,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "post",
             path,
             &mut item.post,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "delete",
             path,
             &mut item.delete,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "options",
             path,
             &mut item.options,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "head",
             path,
             &mut item.head,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "patch",
             path,
             &mut item.patch,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
         normalize_maybe_operation(
             "trace",
             path,
             &mut item.trace,
-            &mut warnings,
-            &mut stats,
-            &object_schema_refs,
+            reports,
+            stats,
+            object_schema_refs,
         );
     }
+}
 
+fn emit_progenitor_compatibility_reports(reports: &mut Vec<ReportEntry>, stats: &NormalizeStats) {
     if stats.dropped_defaults > 0 {
-        warnings.push(format!(
-            "normalized {} schemas — dropped default values",
-            stats.dropped_defaults
+        reports.push(rules::typed_warning(
+            typed::SCHEMA_DEFAULTS_DROPPED,
+            format!(
+                "normalized {} schemas — dropped default values",
+                stats.dropped_defaults
+            ),
+            None,
         ));
     }
     if !stats.dropped_unsupported_request_body_ops.is_empty() {
-        warnings.push(format!(
-            "dropped {} operations with progenitor-unsupported request body: {}",
-            stats.dropped_unsupported_request_body_ops.len(),
-            stats.dropped_unsupported_request_body_ops.join(", ")
+        reports.push(rules::typed_warning(
+            typed::UNSUPPORTED_REQUEST_BODIES_DROPPED,
+            format!(
+                "dropped {} operations with progenitor-unsupported request body: {}",
+                stats.dropped_unsupported_request_body_ops.len(),
+                stats.dropped_unsupported_request_body_ops.join(", ")
+            ),
+            None,
         ));
     }
     if !stats.normalized_deep_object_query_params.is_empty() {
-        warnings.push(format!(
-            "normalized {} query parameters — replaced unsupported deepObject style with form: {}",
-            stats.normalized_deep_object_query_params.len(),
-            stats.normalized_deep_object_query_params.join(", ")
+        reports.push(rules::typed_warning(
+            typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN,
+            format!(
+                "normalized {} query parameters — replaced unsupported deepObject style with form: {}",
+                stats.normalized_deep_object_query_params.len(),
+                stats.normalized_deep_object_query_params.join(", ")
+            ),
+            None,
         ));
     }
+}
+
+fn apply_response_relaxation_rules(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
     let relaxed_responses = relax_response_schemas(spec);
     if relaxed_responses > 0 {
-        warnings.push(format!(
-            "normalized {relaxed_responses} response schemas — relaxed output fields for tolerant deserialization"
+        reports.push(rules::typed_warning(
+            typed::RESPONSE_SCHEMAS_RELAXED,
+            format!("normalized {relaxed_responses} response schemas — relaxed output fields for tolerant deserialization"),
+            None,
         ));
     }
+}
 
+fn emit_optional_object_query_param_report(reports: &mut Vec<ReportEntry>, stats: &NormalizeStats) {
     if !stats.dropped_optional_object_query_params.is_empty() {
-        warnings.push(format!(
-            "dropped {} optional object query parameters with progenitor-unsupported builder shape: {}",
-            stats.dropped_optional_object_query_params.len(),
-            stats.dropped_optional_object_query_params.join(", ")
+        reports.push(rules::typed_warning(
+            typed::OPTIONAL_OBJECT_QUERY_PARAMS_DROPPED,
+            format!(
+                "dropped {} optional object query parameters with progenitor-unsupported builder shape: {}",
+                stats.dropped_optional_object_query_params.len(),
+                stats.dropped_optional_object_query_params.join(", ")
+            ),
+            None,
         ));
     }
-
-    Ok(warnings)
 }
 
 #[derive(Default)]
@@ -223,7 +280,7 @@ fn optional_object_query_param_name(
     is_object.then(|| parameter_data.name.clone())
 }
 
-fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
+fn shorten_verbose_operation_ids(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
     let ids = operation_ids(spec);
     let candidates: Vec<_> = ids
         .iter()
@@ -252,7 +309,11 @@ fn shorten_verbose_operation_ids(spec: &mut OpenAPI) {
         if let Some(old) = operation.operation_id.clone() {
             if let Some(new) = replacements.get(&old) {
                 operation.operation_id = Some(new.clone());
-                eprintln!("pp: shortened operation '{old}' → '{new}'");
+                reports.push(rules::typed_warning(
+                    typed::OPERATION_IDS_SHORTENED,
+                    format!("shortened operation '{old}' → '{new}'"),
+                    Some(ReportSubject::operation(old)),
+                ));
             }
         }
     }
@@ -339,7 +400,7 @@ fn normalize_maybe_operation(
     method: &str,
     path: &str,
     operation: &mut Option<Operation>,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
     object_schema_refs: &HashSet<String>,
 ) {
@@ -356,7 +417,7 @@ fn normalize_maybe_operation(
 fn normalize_operation(
     operation: &mut Operation,
     op_name: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
     object_schema_refs: &HashSet<String>,
 ) -> bool {
@@ -413,8 +474,10 @@ fn normalize_operation(
         }
         if request_body_has_schemaless_content(request_body) {
             operation.request_body = None;
-            warnings.push(format!(
-                "normalized {op_name} — dropped requestBody (no schema specified)"
+            warnings.push(rules::typed_warning(
+                typed::SCHEMALESS_REQUEST_BODY_DROPPED,
+                format!("normalized {op_name} — dropped requestBody (no schema specified)"),
+                Some(ReportSubject::operation(op_name)),
             ));
         }
     }
@@ -433,7 +496,7 @@ fn normalize_operation(
 fn normalize_response_variants(
     operation: &mut Operation,
     op_name: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
 ) {
     let mut codes: Vec<String> = operation
         .responses
@@ -473,22 +536,30 @@ fn normalize_response_variants(
         operation.responses.default = None;
     }
 
-    warnings.push(format!(
-        "normalized {op_name} responses — kept {kept}, dropped {}",
-        dropped.join(", ")
+    warnings.push(rules::typed_warning(
+        typed::RESPONSE_VARIANTS_PRUNED,
+        format!(
+            "normalized {op_name} responses — kept {kept}, dropped {}",
+            dropped.join(", ")
+        ),
+        Some(ReportSubject::operation(op_name)),
     ));
 }
 
 fn normalize_request_body(
     request_body: &mut RequestBody,
     op_name: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> bool {
     if let Some((kept, dropped)) = normalize_request_content(&mut request_body.content) {
-        warnings.push(format!(
-            "normalized {op_name} — kept {kept}, dropped {}",
-            dropped.join(", ")
+        warnings.push(rules::typed_warning(
+            typed::CONTENT_TYPES_PRUNED,
+            format!(
+                "normalized {op_name} — kept {kept}, dropped {}",
+                dropped.join(", ")
+            ),
+            Some(ReportSubject::operation(op_name)),
         ));
     }
     if request_body.content.is_empty() {
@@ -510,13 +581,17 @@ fn normalize_request_body(
 fn normalize_response(
     response: &mut Response,
     op_name: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) {
     if let Some((kept, dropped)) = normalize_content(&mut response.content) {
-        warnings.push(format!(
-            "normalized {op_name} — kept {kept}, dropped {}",
-            dropped.join(", ")
+        warnings.push(rules::typed_warning(
+            typed::CONTENT_TYPES_PRUNED,
+            format!(
+                "normalized {op_name} — kept {kept}, dropped {}",
+                dropped.join(", ")
+            ),
+            Some(ReportSubject::operation(op_name)),
         ));
     }
     for (mime, media_type) in response.content.iter_mut() {
@@ -534,7 +609,7 @@ fn normalize_response(
 fn normalize_schema(
     schema: &mut Schema,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     if schema.schema_data.default.take().is_some() {
@@ -544,8 +619,10 @@ fn normalize_schema(
     match &mut schema.schema_kind {
         SchemaKind::Type(Type::String(string)) => {
             if let Some(colliding) = string_enum_collision(&string.enumeration) {
-                warnings.push(format!(
-                    "normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"
+                warnings.push(rules::typed_warning(
+                    typed::ENUM_CONSTRAINT_DROPPED,
+                    format!("normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"),
+                    Some(ReportSubject::schema(path)),
                 ));
                 string.enumeration.clear();
             }
@@ -572,14 +649,20 @@ fn normalize_schema(
             if let Some(typ) = any.typ.clone() {
                 if !is_supported_schema_type(&typ) {
                     any.typ = None;
-                    warnings.push(format!(
-                        "normalized {path} — replaced unsupported type '{typ}' with fallback"
+                    warnings.push(rules::typed_warning(
+                        typed::UNSUPPORTED_SCHEMA_TYPE_REPLACED,
+                        format!(
+                            "normalized {path} — replaced unsupported type '{typ}' with fallback"
+                        ),
+                        Some(ReportSubject::schema(path)),
                     ));
                 }
             }
             if let Some(colliding) = json_enum_collision(&any.enumeration) {
-                warnings.push(format!(
-                    "normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"
+                warnings.push(rules::typed_warning(
+                    typed::ENUM_CONSTRAINT_DROPPED,
+                    format!("normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"),
+                    Some(ReportSubject::schema(path)),
                 ));
                 any.enumeration.clear();
             }
@@ -614,7 +697,7 @@ fn normalize_schema(
 fn normalize_object_schema(
     object: &mut ObjectType,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     drop_colliding_properties(&mut object.properties, &mut object.required, path, warnings);
@@ -642,7 +725,7 @@ fn normalize_object_schema(
 fn normalize_array_schema(
     array: &mut ArrayType,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     if let Some(items) = array.items.as_mut() {
@@ -654,7 +737,7 @@ fn normalize_array_schema(
 fn normalize_schema_refs(
     refs: &mut [ReferenceOr<Schema>],
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     for (i, schema) in refs.iter_mut().enumerate() {
@@ -666,7 +749,7 @@ fn normalize_schema_refs(
 fn normalize_schema_ref(
     schema: &mut ReferenceOr<Schema>,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     if let ReferenceOr::Item(schema) = schema {
@@ -678,7 +761,7 @@ fn normalize_schema_ref(
 fn normalize_boxed_schema_ref(
     schema: &mut ReferenceOr<Box<Schema>>,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     if let ReferenceOr::Item(schema) = schema {
@@ -690,7 +773,7 @@ fn normalize_boxed_schema_ref(
 fn normalize_boxed_reference_or_schema(
     schema: &mut Box<ReferenceOr<Schema>>,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
     stats: &mut NormalizeStats,
 ) -> Result<()> {
     normalize_schema_ref(schema.as_mut(), path, warnings, stats)
@@ -1061,7 +1144,7 @@ fn drop_colliding_properties<V>(
     properties: &mut indexmap::IndexMap<String, V>,
     required: &mut Vec<String>,
     path: &str,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ReportEntry>,
 ) {
     let mut by_ident: HashMap<String, Vec<String>> = HashMap::new();
     for name in properties.keys() {
@@ -1075,9 +1158,13 @@ fn drop_colliding_properties<V>(
         if names.len() > 1 {
             let kept = &names[0];
             let dropped: Vec<String> = names.iter().skip(1).cloned().collect();
-            warnings.push(format!(
-                "normalized {path} — kept property '{kept}', dropped colliding [{}] (Rust identifier sanitization collision); wire format preserved for kept field",
-                dropped.join(", ")
+            warnings.push(rules::typed_warning(
+                typed::PROPERTIES_COLLIDING_DROPPED,
+                format!(
+                    "normalized {path} — kept property '{kept}', dropped colliding [{}] (Rust identifier sanitization collision); wire format preserved for kept field",
+                    dropped.join(", ")
+                ),
+                Some(ReportSubject::schema(path)),
             ));
             to_drop.extend(dropped);
         }
@@ -1217,6 +1304,7 @@ fn operation_name(method: &str, path: &str, operation: &Operation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::report::ReportStage;
 
     #[test]
     fn verbose_operation_ids_are_shortened() {
@@ -1227,6 +1315,45 @@ mod tests {
         assert_eq!(
             shorten_candidate("PlausibleWeb.Plugins.API.Controllers.Capabilities.index").as_deref(),
             Some("capabilities_index")
+        );
+    }
+
+    #[test]
+    fn verbose_operation_id_shortening_emits_report() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Verbose Operation
+  version: "1.0.0"
+paths:
+  /capabilities:
+    get:
+      operationId: PlausibleWeb.Plugins.API.Controllers.Capabilities.index
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        let warnings = normalize(&mut spec).unwrap();
+        let path = spec.paths.paths.get("/capabilities").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+
+        assert_eq!(
+            path.get.as_ref().unwrap().operation_id.as_deref(),
+            Some("capabilities_index")
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, typed::OPERATION_IDS_SHORTENED);
+        assert_eq!(
+            warnings[0].subject,
+            Some(ReportSubject::operation(
+                "PlausibleWeb.Plugins.API.Controllers.Capabilities.index"
+            ))
         );
     }
 
@@ -1298,6 +1425,12 @@ components:
 
         assert!(any.typ.is_none());
         assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].stage, ReportStage::TypedNormalization);
+        assert_eq!(warnings[0].code, typed::UNSUPPORTED_SCHEMA_TYPE_REPLACED);
+        assert_eq!(
+            warnings[0].subject,
+            Some(ReportSubject::schema("component schema Mystery"))
+        );
         assert!(warnings[0].contains("component schema Mystery"));
         assert!(warnings[0].contains("replaced unsupported type '' with fallback"));
     }

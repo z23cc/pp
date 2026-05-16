@@ -5,6 +5,7 @@ pub fn pp_bin() -> &'static str {
     env!("CARGO_BIN_EXE_pp")
 }
 
+#[allow(dead_code)]
 pub fn run_pp_generate(spec: &Path, out_dir: &Path) -> Output {
     Command::new(pp_bin())
         .arg("generate")
@@ -26,6 +27,7 @@ pub fn assert_success(output: Output, label: &str) {
     );
 }
 
+#[allow(dead_code)]
 pub fn generated_bin(out_dir: &Path, bin_name: &str) -> std::path::PathBuf {
     out_dir.join("target").join("release").join(bin_name)
 }

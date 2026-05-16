@@ -3,9 +3,11 @@ use rmcp::model::{CallToolRequestParams, CallToolResult, Implementation, ListToo
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, transport::stdio};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const TOOLS_PAGE_SIZE: usize = 100;
+static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct ApiMcpServer {
@@ -251,10 +253,12 @@ fn status_from_body(body: &Value) -> Option<u16> {
 }
 
 fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
+    let counter = MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "{{ bin_name }}-mcp-{}-{}-body.json",
+        "{{ bin_name }}-mcp-{}-{}-{}-body.json",
         tool_name,
-        std::process::id()
+        std::process::id(),
+        counter
     ));
     std::fs::write(&path, serde_json::to_vec(value).map_err(|error| {
         McpError::invalid_params(error.to_string(), None)

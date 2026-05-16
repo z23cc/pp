@@ -7,6 +7,9 @@ use openapiv3::{
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+use super::normalization_rules::{self as rules, slicing};
+use super::report::{ReportEntry, ReportSubject};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SliceOptions {
     pub include_operations: Vec<String>,
@@ -43,6 +46,40 @@ pub struct SliceReport {
     pub kept_operations: usize,
     pub dropped_operations: usize,
     pub pruned_components: PrunedComponents,
+}
+
+impl SliceReport {
+    pub fn report_entries(&self) -> Vec<ReportEntry> {
+        vec![
+            rules::slicing_warning(
+                slicing::OPERATIONS_FILTERED,
+                format!(
+                    "sliced spec — kept {} operations, dropped {} operations",
+                    self.kept_operations, self.dropped_operations
+                ),
+                None,
+            ),
+            rules::slicing_warning(
+                slicing::COMPONENTS_PRUNED,
+                format!(
+                    "pruned components — schemas {} -> {}, responses {} -> {}, parameters {} -> {}, requestBodies {} -> {}, headers {} -> {}, securitySchemes {} -> {}",
+                    self.pruned_components.schemas_before,
+                    self.pruned_components.schemas_after,
+                    self.pruned_components.responses_before,
+                    self.pruned_components.responses_after,
+                    self.pruned_components.parameters_before,
+                    self.pruned_components.parameters_after,
+                    self.pruned_components.request_bodies_before,
+                    self.pruned_components.request_bodies_after,
+                    self.pruned_components.headers_before,
+                    self.pruned_components.headers_after,
+                    self.pruned_components.security_schemes_before,
+                    self.pruned_components.security_schemes_after,
+                ),
+                Some(ReportSubject::component("components")),
+            ),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -714,6 +751,7 @@ fn prune_components(api: &mut OpenAPI, refs: &Refs) -> PrunedComponents {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::report::ReportStage;
 
     #[test]
     fn filters_and_prunes_components() {
@@ -781,6 +819,18 @@ components:
 
         assert_eq!(report.kept_operations, 1);
         assert_eq!(report.dropped_operations, 1);
+        let report_entries = report.report_entries();
+        assert_eq!(report_entries.len(), 2);
+        assert_eq!(report_entries[0].stage, ReportStage::Slicing);
+        assert_eq!(report_entries[0].code, "spec.slice.operations_filtered");
+        assert_eq!(
+            report_entries[0].formatted_warning(),
+            "sliced spec — kept 1 operations, dropped 1 operations"
+        );
+        assert_eq!(
+            report_entries[1].subject,
+            Some(ReportSubject::component("components"))
+        );
         assert!(api.paths.paths.contains_key("/kept/{id}"));
         assert!(!api.paths.paths.contains_key("/dropped"));
         let components = api.components.as_ref().unwrap();
@@ -790,5 +840,110 @@ components:
         assert!(components.parameters.contains_key("Id"));
         assert!(components.responses.contains_key("Kept"));
         assert_eq!(list_operations(&api).len(), 1);
+    }
+
+    #[test]
+    fn prunes_request_bodies_headers_and_security_schemes() {
+        let mut api: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info: { title: Slice Component Test, version: '1.0' }
+security:
+  - KeptKey: []
+paths:
+  /kept:
+    post:
+      operationId: keptPost
+      requestBody:
+        $ref: '#/components/requestBodies/KeptBody'
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Kept:
+              $ref: '#/components/headers/KeptHeader'
+  /dropped:
+    post:
+      operationId: droppedPost
+      security:
+        - DroppedKey: []
+      requestBody:
+        $ref: '#/components/requestBodies/DroppedBody'
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Dropped:
+              $ref: '#/components/headers/DroppedHeader'
+components:
+  requestBodies:
+    KeptBody:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/KeptBodySchema'
+    DroppedBody:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DroppedBodySchema'
+  headers:
+    KeptHeader:
+      schema:
+        $ref: '#/components/schemas/KeptHeaderSchema'
+    DroppedHeader:
+      schema:
+        $ref: '#/components/schemas/DroppedHeaderSchema'
+  securitySchemes:
+    KeptKey:
+      type: apiKey
+      in: header
+      name: X-Kept-Key
+    DroppedKey:
+      type: apiKey
+      in: header
+      name: X-Dropped-Key
+  schemas:
+    KeptBodySchema:
+      type: object
+    KeptHeaderSchema:
+      type: string
+    DroppedBodySchema:
+      type: object
+    DroppedHeaderSchema:
+      type: string
+"#,
+        )
+        .unwrap();
+
+        let report = slice_openapi(
+            &mut api,
+            &SliceOptions {
+                include_operations: vec!["keptPost".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.kept_operations, 1);
+        assert_eq!(report.dropped_operations, 1);
+        assert_eq!(report.pruned_components.request_bodies_before, 2);
+        assert_eq!(report.pruned_components.request_bodies_after, 1);
+        assert_eq!(report.pruned_components.headers_before, 2);
+        assert_eq!(report.pruned_components.headers_after, 1);
+        assert_eq!(report.pruned_components.security_schemes_before, 2);
+        assert_eq!(report.pruned_components.security_schemes_after, 1);
+
+        let components = api.components.as_ref().unwrap();
+        assert!(components.request_bodies.contains_key("KeptBody"));
+        assert!(!components.request_bodies.contains_key("DroppedBody"));
+        assert!(components.headers.contains_key("KeptHeader"));
+        assert!(!components.headers.contains_key("DroppedHeader"));
+        assert!(components.security_schemes.contains_key("KeptKey"));
+        assert!(!components.security_schemes.contains_key("DroppedKey"));
+        assert!(components.schemas.contains_key("KeptBodySchema"));
+        assert!(components.schemas.contains_key("KeptHeaderSchema"));
+        assert!(!components.schemas.contains_key("DroppedBodySchema"));
+        assert!(!components.schemas.contains_key("DroppedHeaderSchema"));
     }
 }

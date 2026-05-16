@@ -1,7 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -85,6 +84,54 @@ fn load_options(
     }
 }
 
+fn print_generate_progress(event: crate::pipeline::GenerateProgress) {
+    match event {
+        crate::pipeline::GenerateProgress::Inspecting { spec_path } => {
+            eprintln!("pp: inspecting {}...", spec_path.display());
+        }
+        crate::pipeline::GenerateProgress::Warning { warning } => {
+            eprintln!("pp: {warning}");
+        }
+        crate::pipeline::GenerateProgress::SpecOk {
+            operation_count,
+            auth_kind,
+            target_bin_name,
+        } => {
+            eprintln!(
+                "pp: spec ok ({} operations, auth={:?}); target bin '{target_bin_name}'",
+                operation_count, auth_kind
+            );
+        }
+        crate::pipeline::GenerateProgress::QueryApiKeyAutoInjectionLimited { param_name } => {
+            eprintln!(
+                "pp: query API key '{param_name}' auto-injection is limited — users may still need --{param_name} on the command line"
+            );
+        }
+        crate::pipeline::GenerateProgress::GeneratingApiCrate => {
+            eprintln!("pp: generating API crate via progenitor...");
+        }
+        crate::pipeline::GenerateProgress::RenderingWrapperCrate => {
+            eprintln!("pp: rendering wrapper crate...");
+        }
+        crate::pipeline::GenerateProgress::WorkspaceWritten { output_path } => {
+            eprintln!("pp: workspace written to {}", output_path.display());
+        }
+        crate::pipeline::GenerateProgress::BuildStarted => {
+            eprintln!("pp: running `cargo build --release` (this can take 1-2 minutes)...");
+        }
+        crate::pipeline::GenerateProgress::BuildSucceeded => {
+            eprintln!("pp: build succeeded");
+        }
+    }
+}
+
+fn validate_workspace_build(workspace: &std::path::Path) -> Result<()> {
+    eprintln!("pp: running `cargo build --release` (this can take 1-2 minutes)...");
+    crate::pipeline::validate_workspace_build(workspace)?;
+    eprintln!("pp: build succeeded");
+    Ok(())
+}
+
 impl Cli {
     pub fn run(self) -> Result<()> {
         match self.command {
@@ -104,19 +151,26 @@ impl Cli {
                 );
                 if list_operations {
                     let loaded = crate::spec::load_with_options(&spec, &options)?;
-                    for warning in &loaded.normalization_warnings {
-                        eprintln!("pp: {warning}");
+                    for report in &loaded.reports {
+                        eprintln!("pp: {}", report.formatted_warning());
                     }
                     for operation in crate::spec::slice::list_operations(&loaded.api) {
                         println!("{}", serde_json::to_string(&operation)?);
                     }
                 } else {
-                    let facts = if options.slice.is_noop() {
-                        crate::spec::inspect(&spec)?
+                    let loaded = if options.slice.is_noop() {
+                        crate::spec::load(&spec)?
                     } else {
-                        crate::spec::inspect_with_options(&spec, &options)?
+                        crate::spec::load_with_options(&spec, &options)?
                     };
-                    println!("{}", serde_json::to_string_pretty(&facts)?);
+                    for report in loaded.reports.iter().filter(|report| {
+                        report.stage == crate::spec::report::ReportStage::PreParseTolerance
+                            || report.code
+                                == crate::spec::normalization_rules::typed::OPERATION_IDS_SHORTENED
+                    }) {
+                        eprintln!("pp: {}", report.formatted_warning());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&loaded.facts)?);
                 }
                 Ok(())
             }
@@ -130,74 +184,25 @@ impl Cli {
                 include_path_prefixes,
                 exclude_operations,
             } => {
-                eprintln!("pp: inspecting {}...", spec.display());
                 let options = load_options(
                     include_operations,
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
                 );
-                let loaded = if options.slice.is_noop() {
-                    crate::spec::load(&spec)?
-                } else {
-                    crate::spec::load_with_options(&spec, &options)?
-                };
-                for warning in &loaded.normalization_warnings {
-                    eprintln!("pp: {warning}");
-                }
-                let facts = loaded.facts;
-                let bin_name = name.unwrap_or(facts.bin_name);
-                let api_name = format!("{bin_name}-api");
-                eprintln!(
-                    "pp: spec ok ({} operations, auth={:?}); target bin '{bin_name}'",
-                    facts.operation_count, facts.auth_kind
-                );
-                let manifest = crate::render::WrapperManifest::new(
-                    bin_name,
-                    facts.base_url,
-                    facts.base_url_is_relative,
-                    facts.auth_kind,
-                    api_name.clone(),
-                )
-                .with_openapi(&loaded.api)?;
-                if let crate::spec::AuthKind::QueryApiKey { param_name } = &manifest.auth_kind {
-                    eprintln!(
-                        "pp: query API key '{param_name}' auto-injection is limited — users may still need --{param_name} on the command line"
-                    );
-                }
-
-                eprintln!("pp: generating API crate via progenitor...");
-                crate::progenitor_driver::generate(&loaded.api, &output.join("api"), &api_name)?;
-                eprintln!("pp: rendering wrapper crate...");
-                crate::render::render(&manifest, &output)?;
-                eprintln!("pp: workspace written to {}", output.display());
-
-                if build {
-                    eprintln!("pp: running `cargo build --release` (this can take 1-2 minutes)...");
-                    let out = ProcessCommand::new("cargo")
-                        .arg("build")
-                        .arg("--release")
-                        .current_dir(&output)
-                        .output()
-                        .with_context(|| {
-                            format!("failed to spawn cargo build in {}", output.display())
-                        })?;
-                    if !out.status.success() {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        return Err(anyhow!(
-                            "cargo build --release failed (exit {}):\n{stderr}",
-                            out.status.code().unwrap_or(-1)
-                        ));
-                    }
-                    eprintln!("pp: build succeeded");
-                }
-
+                let _result = crate::pipeline::generate_with_progress(
+                    crate::pipeline::GenerateRequest {
+                        spec_path: spec,
+                        output_path: output,
+                        bin_name: name,
+                        validate: build,
+                        load_options: options,
+                    },
+                    print_generate_progress,
+                )?;
                 Ok(())
             }
-            Command::Validate { workspace } => {
-                let _ = workspace;
-                anyhow::bail!("`validate` not implemented yet (Week 3 work item 9)");
-            }
+            Command::Validate { workspace } => validate_workspace_build(&workspace),
         }
     }
 }
