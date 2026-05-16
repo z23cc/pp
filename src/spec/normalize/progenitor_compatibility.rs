@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::backend::BackendCapabilities;
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
+use crate::spec::transform::TransformAuditEntry;
 use crate::spec::traversal;
 
 pub(super) const JSON_MIME: &str = "application/json";
@@ -185,6 +186,13 @@ impl CompatibilityTransformPlan {
             .collect()
     }
 
+    pub(crate) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+        self.actions
+            .iter()
+            .flat_map(CompatibilityTransformAction::audit_entries)
+            .collect()
+    }
+
     fn push(&mut self, action: CompatibilityTransformAction) {
         self.actions.push(action);
     }
@@ -358,6 +366,10 @@ impl OperationTarget {
             path: path.to_string(),
         }
     }
+
+    fn label(&self) -> String {
+        format!("{} {}", self.method, self.path)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,6 +519,164 @@ impl CompatibilityTransformAction {
             | Self::ReplaceUnsupportedSchemaType { report, .. }
             | Self::DropCollidingProperties { report, .. } => report,
         }
+    }
+
+    fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+        let report = self.report_entry();
+        match self {
+            Self::PruneResponseVariants { target, kept, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    format!("operation {} responses", target.label()),
+                    format!("prune response variants to {kept}"),
+                )
+                .with_backend_requirement("backend requires one response variant per operation")
+                .with_before_after("multiple response variants", format!("kept {kept}")),
+            ],
+            Self::PruneContentTypes { target, kept, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    content_target_label(target),
+                    format!("prune content types to {kept}"),
+                )
+                .with_backend_requirement("backend requires one supported content type per message")
+                .with_before_after("multiple content types", format!("kept {kept}")),
+            ],
+            Self::DropUnsupportedRequestBody { target, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    content_target_label(target),
+                    "drop requestBody with only unsupported content types",
+                )
+                .with_backend_requirement("backend request body content-type support is limited")
+                .with_before_after("requestBody with unsupported content", "requestBody removed"),
+            ],
+            Self::DropSchemaDefaults { targets, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    summarize_targets(targets),
+                    format!("drop default values from {} schemas", targets.len()),
+                )
+                .with_backend_requirement("backend/typify path does not accept schema default values reliably")
+                .with_before_after("schema.default present", "schema.default removed"),
+            ],
+            Self::DropUnsupportedRequestBodyOperations { targets, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    summarize_targets(
+                        &targets
+                            .iter()
+                            .map(|target| target.operation.label())
+                            .collect::<Vec<_>>(),
+                    ),
+                    format!("drop {} operations with unsupported request bodies", targets.len()),
+                )
+                .with_backend_requirement("backend cannot generate operations whose request body has no supported media type")
+                .with_before_after("operation requestBody unsupported", "operation removed"),
+            ],
+            Self::RewriteDeepObjectQueryParams { targets, .. } => targets
+                .iter()
+                .map(|target| {
+                    TransformAuditEntry::new(
+                        "typed_normalization",
+                        report.code,
+                        format!("{}.query.{}", target.operation.label(), target.param_name),
+                        "rewrite query parameter style",
+                    )
+                    .with_backend_requirement("backend does not support deepObject query parameters")
+                    .with_before_after("style: deepObject", "style: form")
+                })
+                .collect(),
+            Self::DropOptionalObjectQueryParams { targets, .. } => targets
+                .iter()
+                .map(|target| {
+                    TransformAuditEntry::new(
+                        "typed_normalization",
+                        report.code,
+                        format!("{}.query.{}", target.operation.label(), target.param_name),
+                        "drop optional object-shaped query parameter",
+                    )
+                    .with_backend_requirement("backend builder shape does not support optional object query parameters")
+                    .with_before_after("optional object query parameter", "parameter removed")
+                })
+                .collect(),
+            Self::DropSchemalessRequestBody { target, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    format!("operation {} requestBody", target.label()),
+                    "drop schemaless requestBody",
+                )
+                .with_backend_requirement("backend requires request body content to declare schemas")
+                .with_before_after("requestBody content without schema", "requestBody removed"),
+            ],
+            Self::DropEnumConstraint { target, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    target.clone(),
+                    "drop enum constraint with colliding generated identifiers",
+                )
+                .with_backend_requirement("backend requires unique sanitized Rust enum variants")
+                .with_before_after("constrained enum", "free-form string/schema"),
+            ],
+            Self::ReplaceUnsupportedSchemaType { target, .. } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    target.clone(),
+                    "replace unsupported schema type with fallback",
+                )
+                .with_backend_requirement("backend supports a limited set of OpenAPI schema types")
+                .with_before_after("unsupported schema type", "fallback schema"),
+            ],
+            Self::DropCollidingProperties {
+                target, dropped, ..
+            } => vec![
+                TransformAuditEntry::new(
+                    "typed_normalization",
+                    report.code,
+                    target.clone(),
+                    format!("drop colliding properties: {}", dropped.join(", ")),
+                )
+                .with_backend_requirement("backend requires unique sanitized Rust field names")
+                .with_before_after("colliding object properties", "kept first property; removed collisions"),
+            ],
+        }
+    }
+}
+
+fn content_target_label(target: &ContentTarget) -> String {
+    match target {
+        ContentTarget::ComponentRequestBody(name) => format!("component requestBody {name}"),
+        ContentTarget::ComponentResponse(name) => format!("component response {name}"),
+        ContentTarget::OperationRequestBody(operation) => {
+            format!("operation {} requestBody", operation.label())
+        }
+        ContentTarget::OperationResponse { operation, status } => {
+            format!("operation {} response {status}", operation.label())
+        }
+        ContentTarget::OperationDefaultResponse(operation) => {
+            format!("operation {} default response", operation.label())
+        }
+    }
+}
+
+fn summarize_targets(targets: &[String]) -> String {
+    const MAX_INLINE_TARGETS: usize = 4;
+    if targets.len() <= MAX_INLINE_TARGETS {
+        targets.join(", ")
+    } else {
+        format!(
+            "{} and {} more",
+            targets[..MAX_INLINE_TARGETS].join(", "),
+            targets.len() - MAX_INLINE_TARGETS
+        )
     }
 }
 

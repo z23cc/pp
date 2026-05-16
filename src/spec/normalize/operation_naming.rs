@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
+use crate::spec::transform::TransformAuditEntry;
 use crate::spec::traversal;
 
 const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
@@ -24,6 +25,13 @@ impl OperationNamingPlan {
             .map(|action| action.report.clone())
             .collect()
     }
+
+    pub(super) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+        self.actions
+            .iter()
+            .map(OperationNamingAction::audit_entry)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +41,18 @@ struct OperationNamingAction {
     old: String,
     new: String,
     report: ReportEntry,
+}
+
+impl OperationNamingAction {
+    fn audit_entry(&self) -> TransformAuditEntry {
+        TransformAuditEntry::new(
+            "typed_normalization",
+            self.report.code,
+            format!("operation {} {} operationId", self.method, self.path),
+            "shorten operationId",
+        )
+        .with_before_after(&self.old, &self.new)
+    }
 }
 
 pub(super) fn propose(spec: &OpenAPI) -> OperationNamingPlan {

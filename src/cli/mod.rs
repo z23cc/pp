@@ -218,6 +218,7 @@ impl Cli {
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
                                 "facts": loaded.facts,
+                                "auth_plan": loaded.auth_plan,
                                 "reports": loaded.reports,
                             }))?
                         );

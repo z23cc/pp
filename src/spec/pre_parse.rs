@@ -8,59 +8,184 @@ use regex::Regex;
 
 use super::normalization_rules::{self as rules, pre_parse};
 use super::report::ReportEntry;
+use super::transform::TransformAuditEntry;
 
 type DowngradeReport = Option<(String, usize)>;
 
+/// Proposed raw string repairs that must be approved before the source text is
+/// mutated and parsed into a typed [`openapiv3::OpenAPI`] value.
+#[derive(Debug, Clone)]
+pub(crate) struct RawSpecRepairPlan {
+    actions: Vec<RawSpecRepairAction>,
+}
+
+impl RawSpecRepairPlan {
+    pub(crate) fn propose(raw: &str) -> Result<Self> {
+        let mut current = raw.to_string();
+        let mut actions = Vec::new();
+
+        let (downgraded_yaml, downgraded) = downgrade_openapi_31(&current)?;
+        if let (Some(next), Some((version, transforms))) = (downgraded_yaml, downgraded) {
+            current = next;
+            actions.push(RawSpecRepairAction::DowngradeOpenApi31 {
+                version,
+                transforms,
+            });
+        }
+
+        let (clamped, clamp_count) = clamp_numeric_bounds(&current)?;
+        if clamp_count > 0 {
+            current = clamped;
+            actions.push(RawSpecRepairAction::ClampNumericBounds { count: clamp_count });
+        }
+
+        let (normalized_tags, tag_count) = normalize_top_level_tag_descriptions(&current);
+        if tag_count > 0 {
+            current = normalized_tags;
+            actions.push(RawSpecRepairAction::ReplaceTagDescriptions { count: tag_count });
+        }
+
+        let (inlined_refs, ref_count) = replace_ref_only_operations(&current)?;
+        if ref_count > 0 {
+            current = inlined_refs;
+            actions.push(RawSpecRepairAction::ReplaceRefOnlyOperations { count: ref_count });
+        }
+
+        // Keep the final staged source consumed here so each proposal step has
+        // the same update-current shape, including the last repair rule.
+        let _final_staged_source = current;
+        Ok(Self { actions })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    pub(crate) fn report_entries(&self) -> Vec<ReportEntry> {
+        self.actions
+            .iter()
+            .map(RawSpecRepairAction::report_entry)
+            .collect()
+    }
+
+    pub(crate) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+        self.actions
+            .iter()
+            .map(RawSpecRepairAction::audit_entry)
+            .collect()
+    }
+
+    /// Applies this plan to the same raw source string it was proposed from.
+    pub(crate) fn apply(&self, raw: &str) -> Result<String> {
+        let mut current = raw.to_string();
+
+        for action in &self.actions {
+            current = match action {
+                RawSpecRepairAction::DowngradeOpenApi31 { .. } => {
+                    downgrade_openapi_31(&current)?.0.unwrap_or(current)
+                }
+                RawSpecRepairAction::ClampNumericBounds { .. } => clamp_numeric_bounds(&current)?.0,
+                RawSpecRepairAction::ReplaceTagDescriptions { .. } => {
+                    normalize_top_level_tag_descriptions(&current).0
+                }
+                RawSpecRepairAction::ReplaceRefOnlyOperations { .. } => {
+                    replace_ref_only_operations(&current)?.0
+                }
+            };
+        }
+
+        Ok(current)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RawSpecRepairAction {
+    DowngradeOpenApi31 { version: String, transforms: usize },
+    ClampNumericBounds { count: usize },
+    ReplaceTagDescriptions { count: usize },
+    ReplaceRefOnlyOperations { count: usize },
+}
+
+impl RawSpecRepairAction {
+    fn report_entry(&self) -> ReportEntry {
+        match self {
+            Self::DowngradeOpenApi31 {
+                version,
+                transforms,
+            } => rules::pre_parse_warning(
+                pre_parse::OPENAPI_31_DOWNGRADED,
+                format!(
+                    "downgraded OpenAPI {version} → 3.0.3 for parsing ({transforms} transforms applied)"
+                ),
+                None,
+            ),
+            Self::ClampNumericBounds { count } => rules::pre_parse_warning(
+                pre_parse::NUMERIC_BOUNDS_CLAMPED,
+                format!("clamped {count} out-of-range numeric bounds"),
+                None,
+            ),
+            Self::ReplaceTagDescriptions { count } => rules::pre_parse_warning(
+                pre_parse::TAG_DESCRIPTIONS_REPLACED,
+                format!("replaced {count} non-string top-level tag descriptions"),
+                None,
+            ),
+            Self::ReplaceRefOnlyOperations { count } => rules::pre_parse_warning(
+                pre_parse::REF_ONLY_OPERATIONS_REPLACED,
+                format!("replaced {count} ref-only operations with parseable placeholders"),
+                None,
+            ),
+        }
+    }
+
+    fn audit_entry(&self) -> TransformAuditEntry {
+        match self {
+            Self::DowngradeOpenApi31 {
+                version,
+                transforms,
+            } => TransformAuditEntry::new(
+                "pre_parse_tolerance",
+                pre_parse::OPENAPI_31_DOWNGRADED,
+                "raw.openapi.version",
+                format!("downgrade OpenAPI 3.1-compatible source ({transforms} raw rewrite steps)"),
+            )
+            .with_before_after(format!("openapi: {version}"), "openapi: 3.0.3"),
+            Self::ClampNumericBounds { count } => TransformAuditEntry::new(
+                "pre_parse_tolerance",
+                pre_parse::NUMERIC_BOUNDS_CLAMPED,
+                "raw.numeric_bounds",
+                format!("clamp {count} out-of-range numeric bound literals"),
+            )
+            .with_before_after("integer literal outside i64 range", "nearest i64 bound"),
+            Self::ReplaceTagDescriptions { count } => TransformAuditEntry::new(
+                "pre_parse_tolerance",
+                pre_parse::TAG_DESCRIPTIONS_REPLACED,
+                "raw.tags[].description",
+                format!("replace {count} non-string tag descriptions"),
+            )
+            .with_before_after("mapping-valued tag description", "empty string description"),
+            Self::ReplaceRefOnlyOperations { count } => TransformAuditEntry::new(
+                "pre_parse_tolerance",
+                pre_parse::REF_ONLY_OPERATIONS_REPLACED,
+                "raw.paths.*.$ref_operation",
+                format!("replace {count} ref-only operations with parseable placeholders"),
+            )
+            .with_before_after(
+                "operation containing only $ref",
+                "placeholder operationId/responses",
+            ),
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub(super) fn normalize_yaml(raw: &str) -> Result<(Option<String>, Vec<ReportEntry>)> {
-    let (mut owned, downgraded) = downgrade_openapi_31(raw)?;
-    let mut current = owned.as_deref().unwrap_or(raw).to_string();
-    let mut changed = owned.is_some();
-    let mut reports = Vec::new();
-
-    if let Some((version, transforms)) = downgraded {
-        reports.push(rules::pre_parse_warning(
-            pre_parse::OPENAPI_31_DOWNGRADED,
-            format!("downgraded OpenAPI {version} → 3.0.3 for parsing ({transforms} transforms applied)"),
-            None,
-        ));
-    }
-
-    let (clamped, clamp_count) = clamp_numeric_bounds(&current)?;
-    if clamp_count > 0 {
-        current = clamped;
-        changed = true;
-        reports.push(rules::pre_parse_warning(
-            pre_parse::NUMERIC_BOUNDS_CLAMPED,
-            format!("clamped {clamp_count} out-of-range numeric bounds"),
-            None,
-        ));
-    }
-
-    let (normalized_tags, tag_count) = normalize_top_level_tag_descriptions(&current);
-    if tag_count > 0 {
-        current = normalized_tags;
-        changed = true;
-        reports.push(rules::pre_parse_warning(
-            pre_parse::TAG_DESCRIPTIONS_REPLACED,
-            format!("replaced {tag_count} non-string top-level tag descriptions"),
-            None,
-        ));
-    }
-
-    let (inlined_refs, ref_count) = replace_ref_only_operations(&current)?;
-    if ref_count > 0 {
-        current = inlined_refs;
-        changed = true;
-        reports.push(rules::pre_parse_warning(
-            pre_parse::REF_ONLY_OPERATIONS_REPLACED,
-            format!("replaced {ref_count} ref-only operations with parseable placeholders"),
-            None,
-        ));
-    }
-
-    if changed {
-        owned = Some(current);
-    }
+    let plan = RawSpecRepairPlan::propose(raw)?;
+    let reports = plan.report_entries();
+    let owned = if plan.is_empty() {
+        None
+    } else {
+        Some(plan.apply(raw)?)
+    };
 
     Ok((owned, reports))
 }

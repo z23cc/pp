@@ -5,6 +5,7 @@ use crate::backend::BackendCapabilities;
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::references;
 use crate::spec::report::ReportEntry;
+use crate::spec::transform::TransformAuditEntry;
 use crate::spec::traversal;
 
 type ReplaceCount = usize;
@@ -21,12 +22,40 @@ impl ResponseRelaxationPlan {
             .map(|action| action.report.clone())
             .collect()
     }
+
+    pub(super) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+        self.action
+            .iter()
+            .map(RelaxResponseSchemas::audit_entry)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct RelaxResponseSchemas {
     count: ReplaceCount,
     report: ReportEntry,
+}
+
+impl RelaxResponseSchemas {
+    fn audit_entry(&self) -> TransformAuditEntry {
+        TransformAuditEntry::new(
+            "typed_normalization",
+            self.report.code,
+            "responses.*.schema",
+            format!(
+                "relax {} response schemas for tolerant deserialization",
+                self.count
+            ),
+        )
+        .with_backend_requirement(
+            "backend requires response-only schemas to deserialize missing/null fields tolerantly",
+        )
+        .with_before_after(
+            "required response fields / strict property schemas",
+            "optional nullable response fields",
+        )
+    }
 }
 
 pub(super) fn propose(

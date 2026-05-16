@@ -136,6 +136,15 @@ fn inspect_reports_outputs_facts_and_structured_reports() {
     let payload: Value =
         serde_json::from_slice(&output.stdout).expect("inspect reports stdout is JSON");
     assert_eq!(payload["facts"]["operation_count"].as_u64(), Some(2));
+    assert_eq!(payload["auth_plan"]["selected"]["kind"], "none");
+    assert_eq!(payload["auth_plan"]["decision"]["kind"], "none");
+    assert_eq!(
+        payload["auth_plan"]["candidates"]
+            .as_array()
+            .expect("auth candidates is an array")
+            .len(),
+        0
+    );
 
     let reports = payload["reports"].as_array().expect("reports is an array");
     assert!(

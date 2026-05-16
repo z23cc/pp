@@ -1,13 +1,12 @@
 use crate::context::Context;
+use crate::invoke::{invoke_operation, ArgDef, OperationInvocation};
 use rmcp::model::{CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool, ToolsCapability};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, transport::stdio};
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const TOOLS_PAGE_SIZE: usize = {{ mcp_runtime.tools_page_size }};
-static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct ApiMcpServer {
@@ -19,12 +18,6 @@ struct ToolDef {
     description: &'static str,
     input_schema: fn() -> rmcp::model::JsonObject,
     args: &'static [ArgDef],
-}
-
-struct ArgDef {
-    json_name: &'static str,
-    cli_name: &'static str,
-    body_field: bool,
 }
 
 {% for tool in mcp_tools %}
@@ -61,14 +54,8 @@ pub async fn serve(context: Context) -> anyhow::Result<()> {
 
 impl ApiMcpServer {
     async fn dispatch(&self, tool: &'static ToolDef, arguments: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
-        let captured = Arc::new(Mutex::new(crate::context::CapturedOutput::default()));
-        let mut context = self.context.clone();
-        context.output = crate::context::OutputMode::Capture(captured.clone());
-        let mut argv = vec![tool.name.to_string()];
-        let mut temp_files = Vec::new();
-
 {% if mcp_runtime.auth_missing_env_literal %}
-        if context.auth.is_none() {
+        if self.context.auth.is_none() {
             return Ok(CallToolResult::structured_error(json!({
                 "kind": "auth_missing",
                 "message": "missing required auth env var",
@@ -84,48 +71,20 @@ impl ApiMcpServer {
             .transpose()?
             .unwrap_or(false);
 
-        let mut body = serde_json::Map::new();
-        for arg in tool.args {
-            if let Some(value) = arguments.get(arg.json_name) {
-                if value.is_null() {
-                    continue;
-                }
-                if arg.body_field {
-                    body.insert(arg.json_name.to_string(), value.clone());
-                    continue;
-                }
-                argv.push(format!("--{}", arg.cli_name));
-                if arg.cli_name == "json-body" {
-                    let path = write_json_body(tool.name, value)?;
-                    argv.push(path.display().to_string());
-                    temp_files.push(path);
-                } else {
-                    push_cli_value(&mut argv, value);
-                }
-            }
-        }
-        if !body.is_empty() {
-            argv.push("--json-body".to_string());
-            let path = write_json_body(tool.name, &Value::Object(body))?;
-            argv.push(path.display().to_string());
-            temp_files.push(path);
-        }
+        let result = invoke_operation(
+            self.context.clone(),
+            OperationInvocation {
+                name: tool.name,
+                args: tool.args,
+                arguments,
+            },
+        )
+        .await?;
 
-        let command = crate::cli_builder::command_for_operation(tool.name)
-            .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {}", tool.name), None))?;
-        let matches = command
-            .try_get_matches_from(argv)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        let result = crate::cli_builder::execute_operation(context, tool.name, &matches).await;
-        for path in temp_files {
-            let _ = std::fs::remove_file(path);
+        if result.is_error {
+            return Ok(CallToolResult::structured_error(classify_tool_error(result.value)));
         }
-        let captured = captured.lock().expect("capture lock");
-        let value = captured.value.clone().unwrap_or_else(|| json!({ "ok": true }));
-        if result.is_err() {
-            return Ok(CallToolResult::structured_error(classify_tool_error(value)));
-        }
-        Ok(CallToolResult::structured(shape_success(value, field_filter.as_deref(), compact)))
+        Ok(CallToolResult::structured(shape_success(result.value, field_filter.as_deref(), compact)))
     }
 }
 
@@ -250,38 +209,6 @@ fn status_from_body(body: &Value) -> Option<u16> {
         }
     }
     None
-}
-
-fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
-    let counter = MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "{}-{}-{}-{}-body.json",
-        {{ mcp_runtime.temp_body_file_prefix_literal }},
-        tool_name,
-        std::process::id(),
-        counter
-    ));
-    std::fs::write(&path, serde_json::to_vec(value).map_err(|error| {
-        McpError::invalid_params(error.to_string(), None)
-    })?)
-    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-    Ok(path)
-}
-
-fn push_cli_value(argv: &mut Vec<String>, value: &Value) {
-    match value {
-        Value::String(value) => argv.push(value.clone()),
-        Value::Number(value) => argv.push(value.to_string()),
-        Value::Bool(value) => argv.push(value.to_string()),
-        Value::Array(values) => {
-            let flag = argv.pop().expect("flag exists");
-            for value in values {
-                argv.push(flag.clone());
-                push_cli_value(argv, value);
-            }
-        }
-        other => argv.push(other.to_string()),
-    }
 }
 
 impl ServerHandler for ApiMcpServer {

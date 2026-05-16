@@ -15,6 +15,7 @@ const MAIN_TEMPLATE: &str = include_str!("templates/main.rs.j2");
 const CLI_BUILDER_TEMPLATE: &str = include_str!("templates/cli_builder.rs.j2");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/context.rs.j2");
 const AUTH_TEMPLATE: &str = include_str!("templates/auth.rs.j2");
+const INVOKE_TEMPLATE: &str = include_str!("templates/invoke.rs.j2");
 const PRINT_TEMPLATE: &str = include_str!("templates/print.rs.j2");
 const MCP_TEMPLATE: &str = include_str!("templates/mcp.rs.j2");
 
@@ -226,6 +227,12 @@ pub(crate) fn render(manifest: &WrapperManifest, out_dir: &Path) -> Result<()> {
         &out_dir.join("src/auth.rs"),
     )?;
     write_template(
+        "invoke.rs",
+        INVOKE_TEMPLATE,
+        manifest,
+        &out_dir.join("src/invoke.rs"),
+    )?;
+    write_template(
         "print.rs",
         PRINT_TEMPLATE,
         manifest,
@@ -300,11 +307,12 @@ paths:
         assert!(rendered.contains(".get(\"_pp_compact\")"));
         assert!(rendered.contains("McpError::invalid_params(\"_pp_compact must be a boolean\""));
         assert!(rendered.contains("\"env\": \"PETSTORE_TOKEN\""));
-        assert!(rendered.contains("\"petstore-mcp\""));
+        assert!(rendered.contains("invoke_operation("));
+        assert!(!rendered.contains("write_json_body"));
     }
 
     #[test]
-    fn mcp_template_uses_process_local_counter_for_temp_body_files() {
+    fn invocation_template_uses_process_local_counter_for_temp_body_files() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
             "https://example.test".to_string(),
@@ -313,11 +321,15 @@ paths:
             "petstore-api".to_string(),
         );
 
-        let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
+        let rendered = render_template("invoke.rs", INVOKE_TEMPLATE, &manifest).unwrap();
 
+        assert!(rendered.contains("pub async fn invoke_operation"));
+        assert!(rendered.contains("struct ProgenitorCliInvocationAdapter"));
+        assert!(rendered.contains(".create_new(true)"));
         assert!(rendered.contains("static MCP_BODY_FILE_COUNTER: AtomicU64"));
         assert!(rendered.contains("MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)"));
         assert!(rendered.contains("{}-{}-{}-{}-body.json"));
+        assert!(rendered.contains("\"petstore-mcp\""));
     }
 
     #[test]

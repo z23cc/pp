@@ -4,11 +4,15 @@
 //! argument handling and the current spec/progenitor/render implementation
 //! without committing to a public library API.
 
-use crate::backend::{ApiBackend, ApiCrateRequest, BackendDiagnostic, ProgenitorBackend};
+use crate::backend::{
+    ApiBackend, ApiCrateRequest, BackendDiagnostic, ProgenitorBackend, SourceTransformPurpose,
+};
 use crate::model::ApiModel;
 use crate::render::WrapperManifest;
 use crate::spec::{
-    report::ReportEntry, transform::TransformPlan, AuthKind, LoadOptions, SpecFacts,
+    report::ReportEntry,
+    transform::{TransformAuditEntry, TransformPlan},
+    AuthKind, LoadOptions, SpecFacts,
 };
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
@@ -101,7 +105,7 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         });
     }
 
-    let transform_plan = loaded.transform_plan.clone();
+    let mut transform_plan = loaded.transform_plan.clone();
     write_transform_plan(&request.output_path, &transform_plan)?;
     let facts = loaded.facts;
     let target_bin_name = request.bin_name.unwrap_or_else(|| facts.bin_name.clone());
@@ -143,6 +147,11 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
             crate_name: &api_name,
         })
         .with_context(|| format!("{} backend failed to generate API crate", backend.name()))?;
+    transform_plan.add_audits(backend_diagnostic_audits(
+        backend.name(),
+        &api_output.diagnostics,
+    ));
+    write_transform_plan(&request.output_path, &transform_plan)?;
 
     progress(GenerateProgress::RenderingWrapperCrate);
     crate::render::render(&manifest, &request.output_path)?;
@@ -170,6 +179,68 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         target_bin_name,
         validation,
     })
+}
+
+fn backend_diagnostic_audits(
+    backend_name: &str,
+    diagnostics: &[BackendDiagnostic],
+) -> Vec<TransformAuditEntry> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| match diagnostic {
+            BackendDiagnostic::SourceTransform(source_transform) => {
+                let action = if source_transform.changed {
+                    format!(
+                        "apply generated source transform '{}' ({} replacements)",
+                        source_transform.name, source_transform.replacement_count
+                    )
+                } else {
+                    format!(
+                        "check generated source transform '{}' (not applied)",
+                        source_transform.name
+                    )
+                };
+                let (before, after) = if source_transform.changed {
+                    (
+                        format!("{} matched", source_transform.precondition),
+                        format!(
+                            "{} replacements applied for {}",
+                            source_transform.replacement_count,
+                            source_transform_purpose_label(source_transform.purpose)
+                        ),
+                    )
+                } else {
+                    (
+                        format!("{} not present", source_transform.precondition),
+                        "generated source unchanged".to_string(),
+                    )
+                };
+                TransformAuditEntry::new(
+                    "backend_source_transform",
+                    format!(
+                        "backend.{backend_name}.source_transform.{}",
+                        source_transform.name
+                    ),
+                    format!("{backend_name} generated source"),
+                    action,
+                )
+                .with_backend_requirement(format!(
+                    "{}; upstream assumption: {}; source shape: {}",
+                    source_transform.precondition,
+                    source_transform.upstream_assumption,
+                    source_transform.upstream_version
+                ))
+                .with_before_after(before, after)
+            }
+        })
+        .collect()
+}
+
+fn source_transform_purpose_label(purpose: SourceTransformPurpose) -> &'static str {
+    match purpose {
+        SourceTransformPurpose::ClapParserCompatibility => "clap parser compatibility",
+        SourceTransformPurpose::ErrorDiagnostics => "error diagnostics",
+    }
 }
 
 fn write_transform_plan(output_path: &Path, transform_plan: &TransformPlan) -> Result<()> {
@@ -335,7 +406,28 @@ paths:
         );
         assert!(result.output_path.join("Cargo.toml").exists());
         assert!(result.output_path.join("api/src/lib.rs").exists());
-        assert!(result.output_path.join("pp-transform-plan.json").exists());
+        let transform_plan_path = result.output_path.join("pp-transform-plan.json");
+        assert!(transform_plan_path.exists());
+        assert!(result.transform_plan.audits.iter().any(|audit| {
+            audit.source_stage == "backend_source_transform"
+                && audit.code == "backend.fake.source_transform.fake_transform"
+                && audit.backend_requirement.is_some()
+        }));
+        let transform_plan_json: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(transform_plan_path).expect("read transform plan"),
+        )
+        .expect("parse transform plan");
+        assert!(transform_plan_json["audits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|audit| {
+                audit["source_stage"] == "backend_source_transform"
+                    && audit["code"] == "backend.fake.source_transform.fake_transform"
+                    && audit["target"] == "fake generated source"
+                    && audit.get("before").is_some()
+                    && audit.get("after").is_some()
+            }));
     }
 
     #[test]

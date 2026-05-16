@@ -4,6 +4,7 @@ use openapiv3::OpenAPI;
 use crate::backend::BackendCapabilities;
 
 use super::report::ReportEntry;
+use super::transform::TransformAuditEntry;
 
 mod operation_naming;
 mod progenitor_compatibility;
@@ -28,6 +29,14 @@ impl TypedNormalizationPlan {
         reports.extend(self.compatibility.report_entries());
         reports.extend(self.response_relaxation.report_entries());
         reports
+    }
+
+    pub(crate) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+        let mut audits = Vec::new();
+        audits.extend(self.operation_naming.audit_entries());
+        audits.extend(self.compatibility.audit_entries());
+        audits.extend(self.response_relaxation.audit_entries());
+        audits
     }
 }
 
@@ -137,7 +146,7 @@ mod tests {
     use crate::backend::BackendCapabilities;
     use crate::spec::normalization_rules::typed;
     use crate::spec::report::{ReportStage, ReportSubject};
-    use crate::spec::transform::{TransformPlan, TransformPolicy};
+    use crate::spec::transform::{TransformAuditEntry, TransformPlan, TransformPolicy};
 
     fn assert_strict_rejects_typed_proposal_without_mutating_spec(
         yaml: &str,
@@ -195,6 +204,20 @@ paths:
         assert_eq!(serde_json::to_value(&spec).unwrap(), before);
         assert_eq!(proposal_reports.len(), 1);
         assert_eq!(proposal_reports[0].code, typed::OPERATION_IDS_SHORTENED);
+        assert_eq!(proposals.audit_entries().len(), 1);
+        assert_eq!(
+            proposals.audit_entries()[0],
+            TransformAuditEntry::new(
+                "typed_normalization",
+                typed::OPERATION_IDS_SHORTENED,
+                "operation get /capabilities operationId",
+                "shorten operationId",
+            )
+            .with_before_after(
+                "PlausibleWeb.Plugins.API.Controllers.Capabilities.index",
+                "capabilities_index",
+            )
+        );
         assert_eq!(
             proposal_reports[0].subject,
             Some(ReportSubject::operation(

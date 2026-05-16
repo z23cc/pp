@@ -1,0 +1,185 @@
+use crate::context::{CapturedOutput, Context, OutputMode};
+use rmcp::ErrorData as McpError;
+use serde_json::{json, Value};
+use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub struct ArgDef {
+    pub json_name: &'static str,
+    pub cli_name: &'static str,
+    pub body_field: bool,
+}
+
+pub struct OperationInvocation {
+    pub name: &'static str,
+    pub args: &'static [ArgDef],
+    pub arguments: rmcp::model::JsonObject,
+}
+
+pub struct OperationInvocationResult {
+    pub value: Value,
+    pub is_error: bool,
+}
+
+/// Transitional Progenitor CLI bridge used by MCP tools.
+///
+/// This is intentionally backend debt: MCP JSON arguments are still adapted into
+/// generated CLI argv/Clap matches and then dispatched through the CLI executor.
+/// It is not yet the final shared typed operation invocation layer for both CLI
+/// and MCP callers.
+pub async fn invoke_operation(
+    context: Context,
+    invocation: OperationInvocation,
+) -> Result<OperationInvocationResult, McpError> {
+    ProgenitorCliInvocationAdapter::invoke(context, invocation).await
+}
+
+struct ProgenitorCliInvocationAdapter;
+
+impl ProgenitorCliInvocationAdapter {
+    pub async fn invoke(
+        context: Context,
+        invocation: OperationInvocation,
+    ) -> Result<OperationInvocationResult, McpError> {
+        let captured = Arc::new(Mutex::new(CapturedOutput::default()));
+        let mut context = context;
+        context.output = OutputMode::Capture(captured.clone());
+
+        let bridge = ProgenitorCliBridgeInvocation::from_json(
+            invocation.name,
+            invocation.args,
+            &invocation.arguments,
+        )?;
+        let command = crate::cli_builder::command_for_operation(invocation.name)
+            .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {}", invocation.name), None))?;
+        let matches = command
+            .try_get_matches_from(bridge.argv())
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+
+        let result = crate::cli_builder::execute_operation(context, invocation.name, &matches).await;
+        drop(bridge);
+
+        let captured = captured.lock().expect("capture lock");
+        let value = captured.value.clone().unwrap_or_else(|| json!({ "ok": true }));
+        Ok(OperationInvocationResult {
+            value,
+            is_error: result.is_err(),
+        })
+    }
+}
+
+struct ProgenitorCliBridgeInvocation {
+    argv: Vec<String>,
+    temp_files: Vec<std::path::PathBuf>,
+}
+
+impl ProgenitorCliBridgeInvocation {
+    fn from_json(
+        tool_name: &str,
+        args: &'static [ArgDef],
+        arguments: &rmcp::model::JsonObject,
+    ) -> Result<Self, McpError> {
+        let mut argv = vec![tool_name.to_string()];
+        let mut temp_files = Vec::new();
+        let mut body = serde_json::Map::new();
+
+        for arg in args {
+            if let Some(value) = arguments.get(arg.json_name) {
+                if value.is_null() {
+                    continue;
+                }
+                if arg.body_field {
+                    body.insert(arg.json_name.to_string(), value.clone());
+                    continue;
+                }
+                argv.push(format!("--{}", arg.cli_name));
+                if arg.cli_name == "json-body" {
+                    let path = write_json_body(tool_name, value)?;
+                    argv.push(path.display().to_string());
+                    temp_files.push(path);
+                } else {
+                    push_cli_value(&mut argv, value);
+                }
+            }
+        }
+
+        if !body.is_empty() {
+            argv.push("--json-body".to_string());
+            let path = write_json_body(tool_name, &Value::Object(body))?;
+            argv.push(path.display().to_string());
+            temp_files.push(path);
+        }
+
+        Ok(Self { argv, temp_files })
+    }
+
+    fn argv(&self) -> Vec<String> {
+        self.argv.clone()
+    }
+}
+
+impl Drop for ProgenitorCliBridgeInvocation {
+    fn drop(&mut self) {
+        for path in self.temp_files.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+    let mut last_collision = None;
+    for _ in 0..16 {
+        let counter = MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "{}-{}-{}-{}-body.json",
+            {{ mcp_runtime.temp_body_file_prefix_literal }},
+            tool_name,
+            std::process::id(),
+            counter
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(&bytes) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(McpError::internal_error(error.to_string(), None));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_collision = Some(error);
+            }
+            Err(error) => return Err(McpError::internal_error(error.to_string(), None)),
+        }
+    }
+    Err(McpError::internal_error(
+        last_collision
+            .map(|error| format!("failed to create temp JSON body file after retries: {error}"))
+            .unwrap_or_else(|| "failed to create temp JSON body file after retries".to_string()),
+        None,
+    ))
+}
+
+fn push_cli_value(argv: &mut Vec<String>, value: &Value) {
+    match value {
+        Value::String(value) => argv.push(value.clone()),
+        Value::Number(value) => argv.push(value.to_string()),
+        Value::Bool(value) => argv.push(value.to_string()),
+        Value::Array(values) => {
+            let flag = argv.pop().expect("flag exists");
+            for value in values {
+                argv.push(flag.clone());
+                push_cli_value(argv, value);
+            }
+        }
+        other => argv.push(other.to_string()),
+    }
+}
