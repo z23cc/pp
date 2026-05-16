@@ -69,7 +69,7 @@ pub(super) fn propose(
     spec: &OpenAPI,
     backend_capabilities: &BackendCapabilities,
 ) -> ResponseRelaxationPlan {
-    if !backend_capabilities.requires_relaxed_response_schemas {
+    if !backend_capabilities.responses.requires_relaxed_schemas {
         return ResponseRelaxationPlan::default();
     }
 

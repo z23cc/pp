@@ -7,13 +7,48 @@ use std::sync::{Arc, Mutex};
 
 static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub const INVOCATION_ADAPTER_KIND: &str = {{ mcp_runtime.invocation_adapter_kind_literal }};
-pub const INVOCATION_ADAPTER_REASON: &str = {{ mcp_runtime.invocation_adapter_reason_literal }};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationAdapterKind {
+    ProgenitorCliBridge,
+}
 
+impl InvocationAdapterKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProgenitorCliBridge => {{ mcp_runtime.invocation_adapter.kind_literal }},
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvocationAdapterContract {
+    pub kind: InvocationAdapterKind,
+    pub reason: &'static str,
+    pub preserves_cli_dispatch: bool,
+    pub uses_temp_json_body_files: bool,
+}
+
+pub const INVOCATION_ADAPTER_CONTRACT: InvocationAdapterContract = InvocationAdapterContract {
+    kind: {{ mcp_runtime.invocation_adapter.kind_rust_variant }},
+    reason: {{ mcp_runtime.invocation_adapter.reason_literal }},
+    preserves_cli_dispatch: true,
+    uses_temp_json_body_files: true,
+};
+pub const INVOCATION_ADAPTER_KIND: InvocationAdapterKind = INVOCATION_ADAPTER_CONTRACT.kind;
+pub const INVOCATION_ADAPTER_KIND_NAME: &str = INVOCATION_ADAPTER_KIND.as_str();
+pub const INVOCATION_ADAPTER_REASON: &str = INVOCATION_ADAPTER_CONTRACT.reason;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgBinding {
+    CliFlag { cli_name: &'static str },
+    FlattenedJsonBodyField,
+    WholeJsonBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArgDef {
     pub json_name: &'static str,
-    pub cli_name: &'static str,
-    pub body_field: bool,
+    pub binding: ArgBinding,
 }
 
 pub struct OperationInvocation {
@@ -37,6 +72,7 @@ pub async fn invoke_operation(
     context: Context,
     invocation: OperationInvocation,
 ) -> Result<OperationInvocationResult, McpError> {
+    let _contract = ProgenitorCliBridgeInvoker::CONTRACT;
     ProgenitorCliBridgeInvoker::invoke(context, invocation).await
 }
 
@@ -47,7 +83,15 @@ pub async fn invoke_operation(
 /// - dispatch through the same generated operation executor as human CLI calls;
 /// - preserve captured structured output and MCP error/result shapes;
 /// - keep temporary JSON body files process-local and cleaned up on drop.
+trait OperationInvoker {
+    const CONTRACT: InvocationAdapterContract;
+}
+
 struct ProgenitorCliBridgeInvoker;
+
+impl OperationInvoker for ProgenitorCliBridgeInvoker {
+    const CONTRACT: InvocationAdapterContract = INVOCATION_ADAPTER_CONTRACT;
+}
 
 impl ProgenitorCliBridgeInvoker {
     pub async fn invoke(
@@ -101,17 +145,20 @@ impl ProgenitorCliBridgeInvocation {
                 if value.is_null() {
                     continue;
                 }
-                if arg.body_field {
-                    body.insert(arg.json_name.to_string(), value.clone());
-                    continue;
-                }
-                argv.push(format!("--{}", arg.cli_name));
-                if arg.cli_name == "json-body" {
-                    let path = write_json_body(tool_name, value)?;
-                    argv.push(path.display().to_string());
-                    temp_files.push(path);
-                } else {
-                    push_cli_value(&mut argv, value);
+                match arg.binding {
+                    ArgBinding::CliFlag { cli_name } => {
+                        argv.push(format!("--{cli_name}"));
+                        push_cli_value(&mut argv, value);
+                    }
+                    ArgBinding::FlattenedJsonBodyField => {
+                        body.insert(arg.json_name.to_string(), value.clone());
+                    }
+                    ArgBinding::WholeJsonBody => {
+                        argv.push("--json-body".to_string());
+                        let path = write_json_body(tool_name, value)?;
+                        argv.push(path.display().to_string());
+                        temp_files.push(path);
+                    }
                 }
             }
         }

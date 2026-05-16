@@ -2,6 +2,7 @@ use heck::ToSnakeCase;
 use openapiv3::OpenAPI;
 use std::collections::HashMap;
 
+use super::pass::{NormalizationPass, NormalizationPassContext, NormalizationPassPlan};
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
 use crate::spec::transform::{json_pointer_escape, TransformActionKind, TransformAuditEntry};
@@ -19,19 +20,41 @@ pub(super) struct OperationNamingPlan {
     actions: Vec<OperationNamingAction>,
 }
 
-impl OperationNamingPlan {
-    pub(super) fn report_entries(&self) -> Vec<ReportEntry> {
+impl NormalizationPassPlan for OperationNamingPlan {
+    fn report_entries(&self) -> Vec<ReportEntry> {
         self.actions
             .iter()
             .map(|action| action.report.clone())
             .collect()
     }
 
-    pub(super) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+    fn audit_entries(&self) -> Vec<TransformAuditEntry> {
         self.actions
             .iter()
             .map(OperationNamingAction::audit_entry)
             .collect()
+    }
+}
+
+pub(super) struct OperationNamingPass;
+
+impl NormalizationPass for OperationNamingPass {
+    type Plan = OperationNamingPlan;
+
+    fn propose(&self, spec: &OpenAPI, context: &NormalizationPassContext<'_>) -> Self::Plan {
+        let _ = context.backend_capabilities;
+        self::propose(spec)
+    }
+
+    fn apply_approved(
+        &self,
+        spec: &mut OpenAPI,
+        reports: &mut Vec<ReportEntry>,
+        context: &NormalizationPassContext<'_>,
+        approved_plan: &Self::Plan,
+    ) {
+        let _ = context.backend_capabilities;
+        self::apply_approved(spec, reports, approved_plan);
     }
 }
 

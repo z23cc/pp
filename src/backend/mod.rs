@@ -38,37 +38,79 @@ pub(crate) enum SourceTransformPurpose {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendCapabilities {
-    pub supported_request_body_content_types: &'static [&'static str],
-    pub supported_schema_types: &'static [&'static str],
-    pub requires_single_response_variant_per_operation: bool,
+    pub profile: BackendCapabilityProfile,
+    pub request_bodies: RequestBodyRequirements,
+    pub responses: ResponseRequirements,
+    pub message_content: MessageContentRequirements,
+    pub parameters: ParameterRequirements,
+    pub schemas: SchemaRequirements,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendCapabilityProfile {
+    Progenitor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequestBodyRequirements {
+    pub supported_content_types: &'static [&'static str],
+    pub accepts_schemaless: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResponseRequirements {
+    pub requires_single_variant_per_operation: bool,
+    pub requires_relaxed_schemas: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MessageContentRequirements {
     pub requires_single_content_type_per_message: bool,
-    pub supports_deep_object_query_parameters: bool,
-    pub supports_optional_object_query_parameters: bool,
-    pub supports_schema_defaults: bool,
-    pub accepts_schemaless_request_bodies: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParameterRequirements {
+    pub supports_deep_object_query: bool,
+    pub supports_optional_object_query: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchemaRequirements {
+    pub supported_types: &'static [&'static str],
+    pub supports_defaults: bool,
     pub requires_unique_sanitized_enum_variants: bool,
     pub requires_unique_sanitized_object_properties: bool,
-    pub requires_relaxed_response_schemas: bool,
 }
 
 impl BackendCapabilities {
     pub(crate) const fn progenitor() -> Self {
         Self {
-            supported_request_body_content_types: &[
-                "application/json",
-                "application/x-www-form-urlencoded",
-                "application/octet-stream",
-            ],
-            supported_schema_types: &["string", "number", "integer", "boolean", "array", "object"],
-            requires_single_response_variant_per_operation: true,
-            requires_single_content_type_per_message: true,
-            supports_deep_object_query_parameters: false,
-            supports_optional_object_query_parameters: false,
-            supports_schema_defaults: false,
-            accepts_schemaless_request_bodies: false,
-            requires_unique_sanitized_enum_variants: true,
-            requires_unique_sanitized_object_properties: true,
-            requires_relaxed_response_schemas: true,
+            profile: BackendCapabilityProfile::Progenitor,
+            request_bodies: RequestBodyRequirements {
+                supported_content_types: &[
+                    "application/json",
+                    "application/x-www-form-urlencoded",
+                    "application/octet-stream",
+                ],
+                accepts_schemaless: false,
+            },
+            responses: ResponseRequirements {
+                requires_single_variant_per_operation: true,
+                requires_relaxed_schemas: true,
+            },
+            message_content: MessageContentRequirements {
+                requires_single_content_type_per_message: true,
+            },
+            parameters: ParameterRequirements {
+                supports_deep_object_query: false,
+                supports_optional_object_query: false,
+            },
+            schemas: SchemaRequirements {
+                supported_types: &["string", "number", "integer", "boolean", "array", "object"],
+                supports_defaults: false,
+                requires_unique_sanitized_enum_variants: true,
+                requires_unique_sanitized_object_properties: true,
+            },
         }
     }
 }
@@ -115,8 +157,9 @@ mod tests {
     fn progenitor_backend_advertises_current_codegen_limits() {
         let capabilities = ProgenitorBackend.capabilities();
 
+        assert_eq!(capabilities.profile, BackendCapabilityProfile::Progenitor);
         assert_eq!(
-            capabilities.supported_request_body_content_types,
+            capabilities.request_bodies.supported_content_types,
             &[
                 "application/json",
                 "application/x-www-form-urlencoded",
@@ -124,18 +167,26 @@ mod tests {
             ]
         );
         assert_eq!(
-            capabilities.supported_schema_types,
+            capabilities.schemas.supported_types,
             &["string", "number", "integer", "boolean", "array", "object"]
         );
-        assert!(capabilities.requires_single_response_variant_per_operation);
-        assert!(capabilities.requires_single_content_type_per_message);
-        assert!(!capabilities.supports_deep_object_query_parameters);
-        assert!(!capabilities.supports_optional_object_query_parameters);
-        assert!(!capabilities.supports_schema_defaults);
-        assert!(!capabilities.accepts_schemaless_request_bodies);
-        assert!(capabilities.requires_unique_sanitized_enum_variants);
-        assert!(capabilities.requires_unique_sanitized_object_properties);
-        assert!(capabilities.requires_relaxed_response_schemas);
+        assert!(capabilities.responses.requires_single_variant_per_operation);
+        assert!(
+            capabilities
+                .message_content
+                .requires_single_content_type_per_message
+        );
+        assert!(!capabilities.parameters.supports_deep_object_query);
+        assert!(!capabilities.parameters.supports_optional_object_query);
+        assert!(!capabilities.schemas.supports_defaults);
+        assert!(!capabilities.request_bodies.accepts_schemaless);
+        assert!(capabilities.schemas.requires_unique_sanitized_enum_variants);
+        assert!(
+            capabilities
+                .schemas
+                .requires_unique_sanitized_object_properties
+        );
+        assert!(capabilities.responses.requires_relaxed_schemas);
     }
 
     #[test]

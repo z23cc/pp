@@ -574,7 +574,7 @@ paths:
         std::fs::write(&spec_path, DEEP_OBJECT_SPEC).expect("write spec");
         let output_path = temp.path().join("out");
         let mut capabilities = BackendCapabilities::progenitor();
-        capabilities.supports_deep_object_query_parameters = true;
+        capabilities.parameters.supports_deep_object_query = true;
         let backend = FakeBackend::with_capabilities(capabilities);
 
         let result = generate_with_backend_and_progress(

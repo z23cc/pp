@@ -7,8 +7,11 @@ use super::report::ReportEntry;
 use super::transform::TransformAuditEntry;
 
 mod operation_naming;
+mod pass;
 mod progenitor_compatibility;
 mod response_relaxation;
+
+use pass::{NormalizationPass, NormalizationPassContext, NormalizationPassPlan};
 
 #[cfg(test)]
 use openapiv3::{QueryStyle, ReferenceOr, SchemaKind, StatusCode, Type};
@@ -44,13 +47,16 @@ pub(crate) fn propose_typed_normalization_transforms(
     spec: &OpenAPI,
     backend_capabilities: &BackendCapabilities,
 ) -> TypedNormalizationPlan {
-    let operation_naming = operation_naming::propose(spec);
+    let pass_context = NormalizationPassContext::new(backend_capabilities);
+    let operation_naming_pass = operation_naming::OperationNamingPass;
+    let operation_naming = operation_naming_pass.propose(spec, &pass_context);
 
     let mut compatibility_basis = spec.clone();
     let mut discarded_reports = Vec::new();
-    operation_naming::apply_approved(
+    operation_naming_pass.apply_approved(
         &mut compatibility_basis,
         &mut discarded_reports,
+        &pass_context,
         &operation_naming,
     );
     let compatibility =
@@ -80,7 +86,13 @@ pub(crate) fn normalize_with_approved_typed_normalization_transforms(
     approved_transforms: &TypedNormalizationPlan,
 ) -> Result<Vec<ReportEntry>> {
     let mut reports = Vec::new();
-    operation_naming::apply_approved(spec, &mut reports, &approved_transforms.operation_naming);
+    let pass_context = NormalizationPassContext::new(backend_capabilities);
+    operation_naming::OperationNamingPass.apply_approved(
+        spec,
+        &mut reports,
+        &pass_context,
+        &approved_transforms.operation_naming,
+    );
     let compatibility_stats = progenitor_compatibility::apply_approved(
         spec,
         &mut reports,
@@ -1494,7 +1506,7 @@ paths:
         )
         .unwrap();
         let mut capabilities = BackendCapabilities::progenitor();
-        capabilities.supported_request_body_content_types = &[FORM_MIME];
+        capabilities.request_bodies.supported_content_types = &[FORM_MIME];
 
         let warnings = normalize_unchecked_for_tests(&mut spec, &capabilities).unwrap();
         let path = spec.paths.paths.get("/tokens").unwrap();

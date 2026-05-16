@@ -70,9 +70,17 @@ components:
         ),
     );
     let out_dir = temp.path().join("out");
+    let output = common::pp_generate_command(&spec, &out_dir)
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_variants_pruned")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_schemas_relaxed")
+        .arg("--build")
+        .output()
+        .expect("failed to run pp generate");
     common::assert_success(
-        common::run_pp_generate(&spec, &out_dir),
-        "pp generate --build",
+        output,
+        "pp generate --allow-report-code response_variants_pruned/response_schemas_relaxed --build",
     );
     let bin = common::generated_bin(&out_dir, "error-api");
 
@@ -136,9 +144,15 @@ paths:
 "#,
     );
     let out_dir = temp.path().join("out");
+    let output = common::pp_generate_command(&spec, &out_dir)
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_schemas_relaxed")
+        .arg("--build")
+        .output()
+        .expect("failed to run pp generate");
     common::assert_success(
-        common::run_pp_generate(&spec, &out_dir),
-        "pp generate --build",
+        output,
+        "pp generate --allow-report-code spec.normalize.response_schemas_relaxed --build",
     );
     let bin = common::generated_bin(&out_dir, "transport-api");
 

@@ -9,10 +9,21 @@ fn petstore_generate_builds_and_lists_real_path_and_query_param_ops() {
     let spec = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/petstore.yaml");
     let out_dir = temp.path().join("out");
 
-    common::assert_success(
-        common::run_pp_generate_allow_semantic_drop(&spec, &out_dir),
-        "pp generate --build",
-    );
+    let output = common::pp_generate_command(&spec, &out_dir)
+        .arg("--auth-scheme")
+        .arg("api_key")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.content_types_pruned")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_variants_pruned")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.schema_defaults_dropped")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_schemas_relaxed")
+        .arg("--build")
+        .output()
+        .expect("failed to run pp generate");
+    common::assert_success(output, "pp generate --build");
 
     let bin = common::generated_bin(&out_dir, "swagger-petstore");
     let mut command = Command::new(&bin);

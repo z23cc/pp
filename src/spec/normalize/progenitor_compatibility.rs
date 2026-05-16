@@ -16,6 +16,8 @@ pub(super) const JSON_MIME: &str = "application/json";
 #[cfg(test)]
 pub(super) const FORM_MIME: &str = "application/x-www-form-urlencoded";
 
+mod schema_defaults;
+
 pub(crate) fn propose_transforms(
     spec: &OpenAPI,
     backend_capabilities: &BackendCapabilities,
@@ -140,7 +142,7 @@ fn normalize_operations(
 
 pub(super) fn emit_summary_reports(reports: &mut Vec<ReportEntry>, stats: &NormalizeStats) {
     if stats.dropped_defaults > 0 {
-        reports.push(schema_defaults_report(stats.dropped_defaults));
+        reports.push(schema_defaults::summary_report(stats.dropped_defaults));
     }
     if !stats.dropped_unsupported_request_body_ops.is_empty() {
         reports.push(unsupported_request_body_operations_report(
@@ -259,8 +261,8 @@ impl CompatibilityTransformPlan {
         self.actions.iter().any(|action| {
             matches!(
                 action,
-                CompatibilityTransformAction::DropSchemaDefaults { targets, .. }
-                    if targets.iter().any(|target| target == path)
+                CompatibilityTransformAction::DropSchemaDefaults(action)
+                    if action.contains(path)
             )
         })
     }
@@ -409,10 +411,9 @@ struct CompatibilityAggregateProposal {
 impl CompatibilityAggregateProposal {
     fn push_actions(self, plan: &mut CompatibilityTransformPlan) {
         if !self.schema_defaults.is_empty() {
-            plan.push(CompatibilityTransformAction::DropSchemaDefaults {
-                report: schema_defaults_report(self.schema_defaults.len()),
-                targets: self.schema_defaults,
-            });
+            plan.push(CompatibilityTransformAction::DropSchemaDefaults(
+                schema_defaults::Action::new(self.schema_defaults),
+            ));
         }
         if !self.unsupported_request_body_ops.is_empty() {
             let op_names = self
@@ -470,10 +471,7 @@ enum CompatibilityTransformAction {
         target: ContentTarget,
         report: ReportEntry,
     },
-    DropSchemaDefaults {
-        targets: Vec<String>,
-        report: ReportEntry,
-    },
+    DropSchemaDefaults(schema_defaults::Action),
     DropUnsupportedRequestBodyOperations {
         targets: Vec<OperationRequestBodyDropTarget>,
         report: ReportEntry,
@@ -508,10 +506,10 @@ enum CompatibilityTransformAction {
 impl CompatibilityTransformAction {
     fn report_entry(&self) -> &ReportEntry {
         match self {
+            Self::DropSchemaDefaults(action) => action.report_entry(),
             Self::PruneResponseVariants { report, .. }
             | Self::PruneContentTypes { report, .. }
             | Self::DropUnsupportedRequestBody { report, .. }
-            | Self::DropSchemaDefaults { report, .. }
             | Self::DropUnsupportedRequestBodyOperations { report, .. }
             | Self::RewriteDeepObjectQueryParams { report, .. }
             | Self::DropOptionalObjectQueryParams { report, .. }
@@ -567,19 +565,7 @@ impl CompatibilityTransformAction {
                 .with_before_after("requestBody with unsupported content", "requestBody removed")
                 .with_before_after_json(json!({ "requestBody": "unsupported_content" }), json!(null)),
             ],
-            Self::DropSchemaDefaults { targets, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    summarize_targets(targets),
-                    format!("drop default values from {} schemas", targets.len()),
-                )
-                .with_action_kind(TransformActionKind::Drop)
-                .with_backend_requirement_id("progenitor.schema.defaults_unsupported")
-                .with_backend_requirement("backend/typify path does not accept schema default values reliably")
-                .with_before_after("schema.default present", "schema.default removed")
-                .with_before_after_json(json!({ "default": "present" }), json!({ "default": "removed" })),
-            ],
+            Self::DropSchemaDefaults(action) => action.audit_entries(),
             Self::DropUnsupportedRequestBodyOperations { targets, .. } => vec![
                 TransformAuditEntry::new(
                     "typed_normalization",
@@ -869,7 +855,7 @@ fn propose_operation_transforms(
                             aggregate,
                             backend_capabilities,
                         );
-                        if !backend_capabilities.accepts_schemaless_request_bodies
+                        if !backend_capabilities.request_bodies.accepts_schemaless
                             && request_body_has_schemaless_content(request_body)
                         {
                             plan.push(CompatibilityTransformAction::DropSchemalessRequestBody {
@@ -966,7 +952,10 @@ fn propose_parameter_transforms(
 ) {
     for (i, param) in operation.parameters.iter().enumerate() {
         if let ReferenceOr::Item(param) = param {
-            if !backend_capabilities.supports_optional_object_query_parameters {
+            if !backend_capabilities
+                .parameters
+                .supports_optional_object_query
+            {
                 if let Some(param_name) =
                     optional_object_query_param_name(param, object_schema_refs)
                 {
@@ -987,7 +976,7 @@ fn propose_parameter_transforms(
                     style,
                     ..
                 } => {
-                    if !backend_capabilities.supports_deep_object_query_parameters
+                    if !backend_capabilities.parameters.supports_deep_object_query
                         && *style == QueryStyle::DeepObject
                     {
                         aggregate
@@ -1139,7 +1128,11 @@ fn propose_response_variant_pruning(
     if operation.responses.default.is_some() {
         codes.push("default".to_string());
     }
-    if !backend_capabilities.requires_single_response_variant_per_operation || codes.len() <= 1 {
+    if !backend_capabilities
+        .responses
+        .requires_single_variant_per_operation
+        || codes.len() <= 1
+    {
         return None;
     }
 
@@ -1201,14 +1194,6 @@ fn unsupported_request_body_report(
             "normalized {target_label} — dropped requestBody with only unsupported content types: {dropped}"
         ),
         Some(content_report_subject(target, target_label)),
-    )
-}
-
-fn schema_defaults_report(count: usize) -> ReportEntry {
-    rules::typed_warning(
-        typed::SCHEMA_DEFAULTS_DROPPED,
-        format!("normalized {count} schemas — dropped default values"),
-        None,
     )
 }
 
@@ -1365,13 +1350,16 @@ fn propose_schema_transforms(
     aggregate: &mut CompatibilityAggregateProposal,
     backend_capabilities: &BackendCapabilities,
 ) {
-    if !backend_capabilities.supports_schema_defaults && schema.schema_data.default.is_some() {
+    if schema_defaults::should_propose(schema, backend_capabilities) {
         aggregate.schema_defaults.push(path.to_string());
     }
 
     match &schema.schema_kind {
         SchemaKind::Type(Type::String(string)) => {
-            if backend_capabilities.requires_unique_sanitized_enum_variants {
+            if backend_capabilities
+                .schemas
+                .requires_unique_sanitized_enum_variants
+            {
                 if let Some(colliding) = string_enum_collision(&string.enumeration) {
                     plan.push(CompatibilityTransformAction::DropEnumConstraint {
                         target: path.to_string(),
@@ -1431,7 +1419,10 @@ fn propose_schema_transforms(
                     });
                 }
             }
-            if backend_capabilities.requires_unique_sanitized_enum_variants {
+            if backend_capabilities
+                .schemas
+                .requires_unique_sanitized_enum_variants
+            {
                 if let Some(colliding) = json_enum_collision(&any.enumeration) {
                     plan.push(CompatibilityTransformAction::DropEnumConstraint {
                         target: path.to_string(),
@@ -1439,7 +1430,10 @@ fn propose_schema_transforms(
                     });
                 }
             }
-            let dropped = if backend_capabilities.requires_unique_sanitized_object_properties {
+            let dropped = if backend_capabilities
+                .schemas
+                .requires_unique_sanitized_object_properties
+            {
                 propose_colliding_property_actions(&any.properties, path, plan)
             } else {
                 HashSet::new()
@@ -1488,7 +1482,10 @@ fn propose_object_schema_transforms(
     aggregate: &mut CompatibilityAggregateProposal,
     backend_capabilities: &BackendCapabilities,
 ) {
-    let dropped = if backend_capabilities.requires_unique_sanitized_object_properties {
+    let dropped = if backend_capabilities
+        .schemas
+        .requires_unique_sanitized_object_properties
+    {
         propose_colliding_property_actions(&object.properties, path, plan)
     } else {
         HashSet::new()
@@ -1837,9 +1834,7 @@ fn normalize_schema(
     stats: &mut NormalizeStats,
     approved_transforms: &CompatibilityTransformPlan,
 ) -> Result<()> {
-    if approved_transforms.should_drop_schema_default(path)
-        && schema.schema_data.default.take().is_some()
-    {
+    if schema_defaults::apply(schema, approved_transforms.should_drop_schema_default(path)) {
         stats.dropped_defaults += 1;
     }
 
@@ -2047,7 +2042,7 @@ fn normalize_boxed_reference_or_schema(
 }
 
 fn is_supported_schema_type(typ: &str, backend_capabilities: &BackendCapabilities) -> bool {
-    backend_capabilities.supported_schema_types.contains(&typ)
+    backend_capabilities.schemas.supported_types.contains(&typ)
 }
 
 fn drop_colliding_properties<V>(
@@ -2154,7 +2149,11 @@ fn propose_response_content_pruning(
     content: &indexmap::IndexMap<String, MediaType>,
     backend_capabilities: &BackendCapabilities,
 ) -> Option<(String, Vec<String>)> {
-    if !backend_capabilities.requires_single_content_type_per_message || content.len() <= 1 {
+    if !backend_capabilities
+        .message_content
+        .requires_single_content_type_per_message
+        || content.len() <= 1
+    {
         return None;
     }
 
@@ -2185,7 +2184,10 @@ fn propose_request_content_pruning(
         return None;
     }
     if supported.len() == content.len()
-        && (!backend_capabilities.requires_single_content_type_per_message || content.len() <= 1)
+        && (!backend_capabilities
+            .message_content
+            .requires_single_content_type_per_message
+            || content.len() <= 1)
     {
         return None;
     }
@@ -2229,7 +2231,8 @@ fn content_has_only_unsupported_request_types(
 
 fn is_supported_request_mime(mime: &str, backend_capabilities: &BackendCapabilities) -> bool {
     backend_capabilities
-        .supported_request_body_content_types
+        .request_bodies
+        .supported_content_types
         .contains(&mime)
 }
 

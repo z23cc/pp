@@ -1,6 +1,9 @@
 //! Render the wrapper crate around progenitor's generated API crate.
 
-use crate::model::{ApiModel, McpArgBinding, McpResponseShaping, McpTool as ModelMcpTool};
+use crate::model::{
+    ApiModel, McpArgBinding, McpInvocationAdapterContract, McpResponseShaping,
+    McpTool as ModelMcpTool,
+};
 use crate::spec::AuthKind;
 use anyhow::{Context, Result};
 use heck::ToShoutySnakeCase;
@@ -17,6 +20,7 @@ const CONTEXT_TEMPLATE: &str = include_str!("templates/context.rs.j2");
 const AUTH_TEMPLATE: &str = include_str!("templates/auth.rs.j2");
 const INVOKE_TEMPLATE: &str = include_str!("templates/invoke.rs.j2");
 const PRINT_TEMPLATE: &str = include_str!("templates/print.rs.j2");
+const RUNTIME_TEMPLATE: &str = include_str!("templates/runtime.rs.j2");
 const MCP_TEMPLATE: &str = include_str!("templates/mcp.rs.j2");
 
 /// Facts required to render the generated wrapper crate.
@@ -44,10 +48,18 @@ pub(crate) struct McpRuntimeManifest {
     pub temp_body_file_prefix_literal: String,
     pub auth_missing_env_literal: Option<String>,
     pub invocation_adapter_kind: String,
-    pub invocation_adapter_kind_literal: String,
     pub invocation_adapter_reason: String,
-    pub invocation_adapter_reason_literal: String,
+    pub invocation_adapter: RenderMcpInvocationAdapterContract,
     pub response_shaping: RenderMcpResponseShaping,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RenderMcpInvocationAdapterContract {
+    pub kind: String,
+    pub kind_literal: String,
+    pub kind_rust_variant: String,
+    pub reason: String,
+    pub reason_literal: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,9 +79,7 @@ pub(crate) struct RenderMcpTool {
 pub(crate) struct RenderMcpArg {
     pub json_name: String,
     pub json_name_literal: String,
-    pub cli_name: String,
-    pub cli_name_literal: String,
-    pub body_field: bool,
+    pub binding_expr: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,8 +107,8 @@ impl WrapperManifest {
         let progenitor_crate_name = progenitor_lib_name.replace('-', "_");
         let auth_env_var = auth_env_var(&auth_kind, &env_prefix);
         let temp_body_file_prefix = format!("{bin_name}-mcp");
-        let invocation_adapter_kind = "progenitor_cli_bridge".to_string();
-        let invocation_adapter_reason = "MCP tool calls use the Progenitor CLI bridge adapter because the current generated surface does not expose stable typed operation invocation metadata".to_string();
+        let invocation_adapter =
+            render_invocation_adapter(McpInvocationAdapterContract::progenitor_cli_bridge());
         Self {
             bin_name,
             base_url,
@@ -120,14 +130,9 @@ impl WrapperManifest {
                 auth_missing_env_literal: auth_env_var
                     .as_ref()
                     .map(|env| serde_json::to_string(env).expect("auth env var serializes")),
-                invocation_adapter_kind_literal: serde_json::to_string(&invocation_adapter_kind)
-                    .expect("invocation adapter kind serializes"),
-                invocation_adapter_kind,
-                invocation_adapter_reason_literal: serde_json::to_string(
-                    &invocation_adapter_reason,
-                )
-                .expect("invocation adapter reason serializes"),
-                invocation_adapter_reason,
+                invocation_adapter_kind: invocation_adapter.kind.clone(),
+                invocation_adapter_reason: invocation_adapter.reason.clone(),
+                invocation_adapter,
                 response_shaping: render_response_shaping(McpResponseShaping::default()),
             },
         }
@@ -136,6 +141,10 @@ impl WrapperManifest {
     pub(crate) fn with_api_model(mut self, api_model: ApiModel) -> Self {
         self.mcp_tools = render_mcp_tools(api_model.mcp_tools);
         self.mcp_runtime.response_shaping = render_response_shaping(api_model.mcp_response_shaping);
+        let invocation_adapter = render_invocation_adapter(api_model.mcp_invocation_adapter);
+        self.mcp_runtime.invocation_adapter_kind = invocation_adapter.kind.clone();
+        self.mcp_runtime.invocation_adapter_reason = invocation_adapter.reason.clone();
+        self.mcp_runtime.invocation_adapter = invocation_adapter;
         self
     }
 }
@@ -164,17 +173,34 @@ fn render_mcp_tools(tools: Vec<ModelMcpTool>) -> Vec<RenderMcpTool> {
 }
 
 fn render_mcp_arg(arg: crate::model::McpArg) -> RenderMcpArg {
-    let (cli_name, body_field) = match arg.binding {
-        McpArgBinding::CliFlag { cli_name } => (cli_name, false),
-        McpArgBinding::FlattenedBodyField => ("json-body".to_string(), true),
-        McpArgBinding::WholeJsonBody => ("json-body".to_string(), false),
+    let binding_expr = match arg.binding {
+        McpArgBinding::CliFlag { cli_name } => {
+            let cli_name_literal = serde_json::to_string(&cli_name).expect("arg name serializes");
+            format!("crate::invoke::ArgBinding::CliFlag {{ cli_name: {cli_name_literal} }}")
+        }
+        McpArgBinding::FlattenedBodyField => {
+            "crate::invoke::ArgBinding::FlattenedJsonBodyField".to_string()
+        }
+        McpArgBinding::WholeJsonBody => "crate::invoke::ArgBinding::WholeJsonBody".to_string(),
     };
     RenderMcpArg {
         json_name_literal: serde_json::to_string(&arg.json_name).expect("arg name serializes"),
-        cli_name_literal: serde_json::to_string(&cli_name).expect("arg name serializes"),
         json_name: arg.json_name,
-        cli_name,
-        body_field,
+        binding_expr,
+    }
+}
+
+fn render_invocation_adapter(
+    adapter: McpInvocationAdapterContract,
+) -> RenderMcpInvocationAdapterContract {
+    let kind = adapter.kind.as_str().to_string();
+    RenderMcpInvocationAdapterContract {
+        kind_literal: serde_json::to_string(&kind).expect("invocation adapter kind serializes"),
+        kind_rust_variant: adapter.kind.rust_variant().to_string(),
+        reason_literal: serde_json::to_string(&adapter.reason)
+            .expect("invocation adapter reason serializes"),
+        kind,
+        reason: adapter.reason,
     }
 }
 
@@ -253,6 +279,12 @@ pub(crate) fn render(manifest: &WrapperManifest, out_dir: &Path) -> Result<()> {
         &out_dir.join("src/print.rs"),
     )?;
     write_template(
+        "runtime.rs",
+        RUNTIME_TEMPLATE,
+        manifest,
+        &out_dir.join("src/runtime.rs"),
+    )?;
+    write_template(
         "mcp.rs",
         MCP_TEMPLATE,
         manifest,
@@ -296,6 +328,11 @@ paths:
   /items:
     get:
       operationId: listItems
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
       responses:
         '200':
           description: ok
@@ -316,13 +353,95 @@ paths:
         assert!(rendered.contains("const TOOLS_PAGE_SIZE: usize = 100;"));
         assert!(rendered.contains("fn schema_1() -> rmcp::model::JsonObject"));
         assert!(rendered.contains("static ARGS_1: &[ArgDef]"));
+        assert!(rendered.contains("crate::invoke::ArgBinding::"));
         assert!(rendered.contains("name: \"list_items\""));
-        assert!(rendered.contains("parse_field_filter(arguments.get(\"_pp_fields\"))"));
-        assert!(rendered.contains(".get(\"_pp_compact\")"));
-        assert!(rendered.contains("McpError::invalid_params(\"_pp_compact must be a boolean\""));
+        assert!(rendered.contains("crate::runtime::parse_response_shaping(&arguments)"));
+        assert!(rendered.contains("crate::runtime::classify_tool_error(result.value)"));
+        assert!(rendered.contains("response_shaping.shape_success(result.value)"));
+        assert!(!rendered.contains("fn parse_field_filter"));
+        assert!(!rendered.contains("fn classify_tool_error"));
         assert!(rendered.contains("\"env\": \"PETSTORE_TOKEN\""));
         assert!(rendered.contains("invoke_operation("));
         assert!(!rendered.contains("write_json_body"));
+    }
+
+    #[test]
+    fn runtime_template_owns_response_shaping_helpers() {
+        let manifest = WrapperManifest::new(
+            "petstore".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+            "petstore-api".to_string(),
+        );
+
+        let rendered = render_template("runtime.rs", RUNTIME_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("pub fn parse_response_shaping("));
+        assert!(rendered.contains("fn parse_field_filter("));
+        assert!(rendered.contains("fn compact_value("));
+        assert!(rendered.contains("pub fn classify_tool_error("));
+        assert!(rendered.contains("arguments.get(\"_pp_fields\")"));
+        assert!(rendered.contains("McpError::invalid_params(\"_pp_compact must be a boolean\""));
+    }
+
+    #[test]
+    fn mcp_template_avoids_arg_binding_import_for_no_arg_tools() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: No Args API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let manifest = WrapperManifest::new(
+            "noargs".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+            "noargs-api".to_string(),
+        );
+        let api_model = ApiModel::from_openapi(&api, None).unwrap();
+        let manifest = manifest.with_api_model(api_model);
+
+        let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("static ARGS_1: &[ArgDef] = &["));
+        assert!(!rendered.contains("use crate::invoke::{invoke_operation, ArgBinding"));
+        assert!(!rendered.contains("ArgBinding::"));
+    }
+
+    #[test]
+    fn mcp_template_avoids_value_import_for_zero_tool_servers() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Empty API
+  version: "1.0.0"
+paths: {}
+"#;
+        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let manifest = WrapperManifest::new(
+            "empty".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+            "empty-api".to_string(),
+        );
+        let api_model = ApiModel::from_openapi(&api, None).unwrap();
+        let manifest = manifest.with_api_model(api_model);
+
+        let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
+
+        assert!(!rendered.contains("use serde_json::Value"));
+        assert!(!rendered.contains("fn schema_"));
     }
 
     #[test]
@@ -339,15 +458,26 @@ paths:
 
         assert!(rendered.contains("pub async fn invoke_operation"));
         assert!(rendered.contains("struct ProgenitorCliBridgeInvoker"));
+        assert!(rendered.contains("pub enum InvocationAdapterKind"));
+        assert!(rendered.contains("pub struct InvocationAdapterContract"));
+        assert!(rendered.contains("trait OperationInvoker"));
+        assert!(rendered.contains(
+            "pub const INVOCATION_ADAPTER_KIND: InvocationAdapterKind = INVOCATION_ADAPTER_CONTRACT.kind;"
+        ));
+        assert!(rendered.contains(
+            "pub const INVOCATION_ADAPTER_KIND_NAME: &str = INVOCATION_ADAPTER_KIND.as_str();"
+        ));
         assert!(rendered.contains("Adapter contract:"));
-        assert!(rendered
-            .contains("pub const INVOCATION_ADAPTER_KIND: &str = \"progenitor_cli_bridge\";"));
         assert!(rendered.contains("generated CLI argv/Clap dispatch semantics"));
         assert!(!rendered.contains("backend debt"));
         assert!(!rendered.contains("Transitional Progenitor CLI bridge"));
         assert_eq!(
             manifest.mcp_runtime.invocation_adapter_kind,
             "progenitor_cli_bridge"
+        );
+        assert_eq!(
+            manifest.mcp_runtime.invocation_adapter.kind_rust_variant,
+            "InvocationAdapterKind::ProgenitorCliBridge"
         );
         assert!(manifest
             .mcp_runtime
