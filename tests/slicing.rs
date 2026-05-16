@@ -203,8 +203,10 @@ fn petstore_store_slice_generates_and_builds() {
         .arg(&out_dir)
         .arg("--include-tag")
         .arg("store")
-        .arg("--allow-effect")
-        .arg("semantic_drop")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_variants_pruned")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.content_types_pruned")
         .arg("--build")
         .output()
         .expect("failed to run sliced pp generate");

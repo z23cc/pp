@@ -94,17 +94,12 @@ pub(crate) fn normalize_with_approved_typed_normalization_transforms(
         &pass_context,
         &approved_transforms.operation_naming,
     );
-    let compatibility_stats = progenitor_compatibility::apply_approved(
+    progenitor_compatibility::apply_approved(
         spec,
         &mut reports,
         backend_capabilities,
         &approved_transforms.compatibility,
     )?;
-    progenitor_compatibility::emit_summary_reports(&mut reports, &compatibility_stats);
-    progenitor_compatibility::emit_optional_object_query_param_report(
-        &mut reports,
-        &compatibility_stats,
-    );
     response_relaxation::ResponseRelaxationPass.apply_approved(
         spec,
         &mut reports,
@@ -417,6 +412,56 @@ components:
 "#,
             &[typed::SCHEMA_DEFAULTS_DROPPED],
         );
+    }
+
+    #[test]
+    fn aggregate_apply_errors_when_approved_schema_default_report_drifts() {
+        let original: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Defaults
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    One:
+      type: object
+      default: {}
+    Two:
+      type: object
+      default: {}
+"#,
+        )
+        .unwrap();
+        let mut drifted: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Defaults
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    One:
+      type: object
+      default: {}
+"#,
+        )
+        .unwrap();
+        let approved_plan =
+            propose_typed_normalization_transforms(&original, &BackendCapabilities::progenitor());
+
+        let err = normalize_with_approved_typed_normalization_transforms(
+            &mut drifted,
+            &BackendCapabilities::progenitor(),
+            &approved_plan,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "approved aggregate report drift for spec.normalize.schema_defaults_dropped"
+        ));
     }
 
     #[test]

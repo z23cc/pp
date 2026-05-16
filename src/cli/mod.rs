@@ -83,9 +83,6 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
-        #[arg(long = "allow-effect", value_parser = parse_report_effect)]
-        allow_effects: Vec<crate::spec::report::ReportEffect>,
         /// Permit one transform report code in strict policy (repeatable)
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
@@ -108,6 +105,7 @@ struct LoadOptionsArgs {
     allow_effects: Vec<crate::spec::report::ReportEffect>,
     allow_report_codes: Vec<String>,
     auth_scheme: Option<String>,
+    approval_surface: crate::spec::transform::ApprovalSurface,
 }
 
 fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
@@ -119,9 +117,11 @@ fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
         allow_effects,
         allow_report_codes,
         auth_scheme,
+        approval_surface,
     } = args;
 
-    let mut policy = crate::spec::transform::TransformPolicy::strict();
+    let mut policy =
+        crate::spec::transform::TransformPolicy::strict().with_approval_surface(approval_surface);
     for effect in allow_effects {
         policy = policy.allow_effect(effect);
     }
@@ -217,10 +217,10 @@ impl Cli {
                     allow_effects,
                     allow_report_codes,
                     auth_scheme,
+                    approval_surface:
+                        crate::spec::transform::ApprovalSurface::ReportCodesAndEffects,
                 });
                 if list_operations {
-                    let mut options = options.clone();
-                    options.policy = crate::spec::transform::TransformPolicy::compatibility();
                     let loaded = crate::spec::load_for_operation_listing(&spec, &options)?;
                     for report in &loaded.reports {
                         eprintln!("pp: {}", report.formatted_warning());
@@ -262,7 +262,6 @@ impl Cli {
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
-                allow_effects,
                 allow_report_codes,
                 auth_scheme,
             } => {
@@ -271,9 +270,10 @@ impl Cli {
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
-                    allow_effects,
+                    allow_effects: Vec::new(),
                     allow_report_codes,
                     auth_scheme,
+                    approval_surface: crate::spec::transform::ApprovalSurface::ReportCodesOnly,
                 });
                 let _result = crate::pipeline::generate_with_progress(
                     crate::pipeline::GenerateRequest {
@@ -308,6 +308,7 @@ mod tests {
             allow_effects: Vec::new(),
             allow_report_codes: Vec::new(),
             auth_scheme: Some("bearerAuth".to_string()),
+            approval_surface: crate::spec::transform::ApprovalSurface::ReportCodesAndEffects,
         });
 
         assert!(matches!(
@@ -376,6 +377,22 @@ mod tests {
         let err =
             Cli::try_parse_from(["pp", "inspect", "spec.yaml", "--allow-compat-normalization"])
                 .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn generate_rejects_allow_effect_flag() {
+        let err = Cli::try_parse_from([
+            "pp",
+            "generate",
+            "spec.yaml",
+            "-o",
+            "out",
+            "--allow-effect",
+            "semantic_drop",
+        ])
+        .unwrap_err();
 
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }

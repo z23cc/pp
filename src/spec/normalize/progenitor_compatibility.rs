@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use openapiv3::{
     ArrayType, MediaType, ObjectType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody,
     Response, Schema, SchemaKind, Type,
@@ -16,6 +16,7 @@ pub(super) const JSON_MIME: &str = "application/json";
 #[cfg(test)]
 pub(super) const FORM_MIME: &str = "application/x-www-form-urlencoded";
 
+mod query_params;
 mod response_variants;
 mod schema_defaults;
 
@@ -61,6 +62,7 @@ pub(super) fn apply_approved(
         backend_capabilities,
         approved_transforms,
     )?;
+    approved_transforms.emit_applied_aggregate_reports(reports, &stats)?;
     Ok(stats)
 }
 
@@ -141,36 +143,9 @@ fn normalize_operations(
     Ok(())
 }
 
-pub(super) fn emit_summary_reports(reports: &mut Vec<ReportEntry>, stats: &NormalizeStats) {
-    if stats.dropped_defaults > 0 {
-        reports.push(schema_defaults::summary_report(stats.dropped_defaults));
-    }
-    if !stats.dropped_unsupported_request_body_ops.is_empty() {
-        reports.push(unsupported_request_body_operations_report(
-            &stats.dropped_unsupported_request_body_ops,
-        ));
-    }
-    if !stats.normalized_deep_object_query_params.is_empty() {
-        reports.push(deep_object_query_params_report(
-            &stats.normalized_deep_object_query_params,
-        ));
-    }
-}
-
-pub(super) fn emit_optional_object_query_param_report(
-    reports: &mut Vec<ReportEntry>,
-    stats: &NormalizeStats,
-) {
-    if !stats.dropped_optional_object_query_params.is_empty() {
-        reports.push(optional_object_query_params_report(
-            &stats.dropped_optional_object_query_params,
-        ));
-    }
-}
-
 #[derive(Default)]
 pub(super) struct NormalizeStats {
-    dropped_defaults: usize,
+    dropped_schema_defaults: Vec<String>,
     dropped_unsupported_request_body_ops: Vec<String>,
     normalized_deep_object_query_params: Vec<String>,
     dropped_optional_object_query_params: Vec<String>,
@@ -199,6 +174,100 @@ impl CompatibilityTransformPlan {
 
     fn push(&mut self, action: CompatibilityTransformAction) {
         self.actions.push(action);
+    }
+
+    fn emit_applied_aggregate_reports(
+        &self,
+        reports: &mut Vec<ReportEntry>,
+        stats: &NormalizeStats,
+    ) -> Result<()> {
+        let mut saw_schema_defaults = false;
+        let mut saw_unsupported_request_bodies = false;
+        let mut saw_deep_object_query_params = false;
+        let mut saw_optional_object_query_params = false;
+
+        for action in &self.actions {
+            match action {
+                CompatibilityTransformAction::DropSchemaDefaults(action) => {
+                    saw_schema_defaults = true;
+                    ensure_aggregate_labels(
+                        action.report_entry().code,
+                        action.targets(),
+                        &stats.dropped_schema_defaults,
+                    )?;
+                    reports.push(action.report_entry().clone());
+                }
+                CompatibilityTransformAction::DropUnsupportedRequestBodyOperations {
+                    targets,
+                    report,
+                } => {
+                    saw_unsupported_request_bodies = true;
+                    let expected = targets
+                        .iter()
+                        .map(|target| target.op_name.clone())
+                        .collect::<Vec<_>>();
+                    ensure_aggregate_labels(
+                        report.code,
+                        &expected,
+                        &stats.dropped_unsupported_request_body_ops,
+                    )?;
+                    reports.push(report.clone());
+                }
+                CompatibilityTransformAction::RewriteDeepObjectQueryParams(action) => {
+                    saw_deep_object_query_params = true;
+                    ensure_aggregate_labels(
+                        action.report_entry().code,
+                        &action.labels(),
+                        &stats.normalized_deep_object_query_params,
+                    )?;
+                    reports.push(action.report_entry().clone());
+                }
+                CompatibilityTransformAction::DropOptionalObjectQueryParams(action) => {
+                    saw_optional_object_query_params = true;
+                    ensure_aggregate_labels(
+                        action.report_entry().code,
+                        &action.labels(),
+                        &stats.dropped_optional_object_query_params,
+                    )?;
+                    reports.push(action.report_entry().clone());
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_schema_defaults && !stats.dropped_schema_defaults.is_empty() {
+            return Err(aggregate_drift_error(
+                typed::SCHEMA_DEFAULTS_DROPPED,
+                "no approved aggregate action",
+                &format!("applied {:?}", stats.dropped_schema_defaults),
+            ));
+        }
+        if !saw_unsupported_request_bodies && !stats.dropped_unsupported_request_body_ops.is_empty()
+        {
+            return Err(aggregate_drift_error(
+                typed::UNSUPPORTED_REQUEST_BODIES_DROPPED,
+                "no approved aggregate action",
+                &format!("applied {:?}", stats.dropped_unsupported_request_body_ops),
+            ));
+        }
+        if !saw_deep_object_query_params && !stats.normalized_deep_object_query_params.is_empty() {
+            return Err(aggregate_drift_error(
+                typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN,
+                "no approved aggregate action",
+                &format!("applied {:?}", stats.normalized_deep_object_query_params),
+            ));
+        }
+        if !saw_optional_object_query_params
+            && !stats.dropped_optional_object_query_params.is_empty()
+        {
+            return Err(aggregate_drift_error(
+                typed::OPTIONAL_OBJECT_QUERY_PARAMS_DROPPED,
+                "no approved aggregate action",
+                &format!("applied {:?}", stats.dropped_optional_object_query_params),
+            ));
+        }
+
+        Ok(())
     }
 
     fn response_variants_for(
@@ -274,10 +343,8 @@ impl CompatibilityTransformPlan {
         param_name: &str,
     ) -> Option<&ParameterTransformTarget> {
         self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::RewriteDeepObjectQueryParams { targets, .. } =
-                action
-            {
-                targets.iter().find(|target| {
+            if let CompatibilityTransformAction::RewriteDeepObjectQueryParams(action) = action {
+                action.targets().iter().find(|target| {
                     target.operation == *operation && target.param_name == param_name
                 })
             } else {
@@ -292,10 +359,8 @@ impl CompatibilityTransformPlan {
         param_name: &str,
     ) -> Option<&ParameterTransformTarget> {
         self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::DropOptionalObjectQueryParams { targets, .. } =
-                action
-            {
-                targets.iter().find(|target| {
+            if let CompatibilityTransformAction::DropOptionalObjectQueryParams(action) = action {
+                action.targets().iter().find(|target| {
                     target.operation == *operation && target.param_name == param_name
                 })
             } else {
@@ -357,6 +422,26 @@ impl CompatibilityTransformPlan {
     }
 }
 
+fn ensure_aggregate_labels(
+    code: &'static str,
+    expected: &[String],
+    actual: &[String],
+) -> Result<()> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(aggregate_drift_error(
+            code,
+            &format!("planned {expected:?}"),
+            &format!("applied {actual:?}"),
+        ))
+    }
+}
+
+fn aggregate_drift_error(code: &'static str, expected: &str, actual: &str) -> anyhow::Error {
+    anyhow!("approved aggregate report drift for {code}: {expected}; {actual}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OperationTarget {
     method: String,
@@ -388,12 +473,7 @@ enum ContentTarget {
     OperationDefaultResponse(OperationTarget),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParameterTransformTarget {
-    operation: OperationTarget,
-    param_name: String,
-    label: String,
-}
+type ParameterTransformTarget = query_params::Target;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OperationRequestBodyDropTarget {
@@ -430,28 +510,14 @@ impl CompatibilityAggregateProposal {
             );
         }
         if !self.deep_object_query_params.is_empty() {
-            let labels = self
-                .deep_object_query_params
-                .iter()
-                .map(|target| target.label.clone())
-                .collect::<Vec<_>>();
-            plan.push(CompatibilityTransformAction::RewriteDeepObjectQueryParams {
-                report: deep_object_query_params_report(&labels),
-                targets: self.deep_object_query_params,
-            });
+            plan.push(CompatibilityTransformAction::RewriteDeepObjectQueryParams(
+                query_params::DeepObjectAction::new(self.deep_object_query_params),
+            ));
         }
         if !self.optional_object_query_params.is_empty() {
-            let labels = self
-                .optional_object_query_params
-                .iter()
-                .map(|target| target.label.clone())
-                .collect::<Vec<_>>();
-            plan.push(
-                CompatibilityTransformAction::DropOptionalObjectQueryParams {
-                    report: optional_object_query_params_report(&labels),
-                    targets: self.optional_object_query_params,
-                },
-            );
+            plan.push(CompatibilityTransformAction::DropOptionalObjectQueryParams(
+                query_params::OptionalObjectAction::new(self.optional_object_query_params),
+            ));
         }
     }
 }
@@ -473,14 +539,8 @@ enum CompatibilityTransformAction {
         targets: Vec<OperationRequestBodyDropTarget>,
         report: ReportEntry,
     },
-    RewriteDeepObjectQueryParams {
-        targets: Vec<ParameterTransformTarget>,
-        report: ReportEntry,
-    },
-    DropOptionalObjectQueryParams {
-        targets: Vec<ParameterTransformTarget>,
-        report: ReportEntry,
-    },
+    RewriteDeepObjectQueryParams(query_params::DeepObjectAction),
+    DropOptionalObjectQueryParams(query_params::OptionalObjectAction),
     DropSchemalessRequestBody {
         target: OperationTarget,
         report: ReportEntry,
@@ -508,12 +568,12 @@ impl CompatibilityTransformAction {
             Self::PruneContentTypes { report, .. }
             | Self::DropUnsupportedRequestBody { report, .. }
             | Self::DropUnsupportedRequestBodyOperations { report, .. }
-            | Self::RewriteDeepObjectQueryParams { report, .. }
-            | Self::DropOptionalObjectQueryParams { report, .. }
             | Self::DropSchemalessRequestBody { report, .. }
             | Self::DropEnumConstraint { report, .. }
             | Self::ReplaceUnsupportedSchemaType { report, .. }
             | Self::DropCollidingProperties { report, .. } => report,
+            Self::RewriteDeepObjectQueryParams(action) => action.report_entry(),
+            Self::DropOptionalObjectQueryParams(action) => action.report_entry(),
         }
     }
 
@@ -568,38 +628,8 @@ impl CompatibilityTransformAction {
                 .with_before_after("operation requestBody unsupported", "operation removed")
                 .with_before_after_json(json!({ "operation": "requestBody unsupported" }), json!(null)),
             ],
-            Self::RewriteDeepObjectQueryParams { targets, .. } => targets
-                .iter()
-                .map(|target| {
-                    TransformAuditEntry::new(
-                        "typed_normalization",
-                        report.code,
-                        format!("{}.query.{}", target.operation.label(), target.param_name),
-                        "rewrite query parameter style",
-                    )
-                    .with_action_kind(TransformActionKind::Rewrite)
-                    .with_backend_requirement_id("progenitor.query.deep_object_unsupported")
-                    .with_backend_requirement("backend does not support deepObject query parameters")
-                    .with_before_after("style: deepObject", "style: form")
-                    .with_before_after_json(json!({ "style": "deepObject" }), json!({ "style": "form" }))
-                })
-                .collect(),
-            Self::DropOptionalObjectQueryParams { targets, .. } => targets
-                .iter()
-                .map(|target| {
-                    TransformAuditEntry::new(
-                        "typed_normalization",
-                        report.code,
-                        format!("{}.query.{}", target.operation.label(), target.param_name),
-                        "drop optional object-shaped query parameter",
-                    )
-                    .with_action_kind(TransformActionKind::Drop)
-                    .with_backend_requirement_id("progenitor.query.optional_object_unsupported")
-                    .with_backend_requirement("backend builder shape does not support optional object query parameters")
-                    .with_before_after("optional object query parameter", "parameter removed")
-                    .with_before_after_json(json!({ "parameter": &target.param_name }), json!(null))
-                })
-                .collect(),
+            Self::RewriteDeepObjectQueryParams(action) => action.audit_entries(),
+            Self::DropOptionalObjectQueryParams(action) => action.audit_entries(),
             Self::DropSchemalessRequestBody { target, .. } => vec![
                 TransformAuditEntry::new(
                     "typed_normalization",
@@ -1134,30 +1164,6 @@ fn unsupported_request_body_operations_report(op_names: &[String]) -> ReportEntr
             "dropped {} operations with progenitor-unsupported request body: {}",
             op_names.len(),
             op_names.join(", ")
-        ),
-        None,
-    )
-}
-
-fn deep_object_query_params_report(labels: &[String]) -> ReportEntry {
-    rules::typed_warning(
-        typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN,
-        format!(
-            "normalized {} query parameters — replaced unsupported deepObject style with form: {}",
-            labels.len(),
-            labels.join(", ")
-        ),
-        None,
-    )
-}
-
-fn optional_object_query_params_report(labels: &[String]) -> ReportEntry {
-    rules::typed_warning(
-        typed::OPTIONAL_OBJECT_QUERY_PARAMS_DROPPED,
-        format!(
-            "dropped {} optional object query parameters with progenitor-unsupported builder shape: {}",
-            labels.len(),
-            labels.join(", ")
         ),
         None,
     )
@@ -1756,7 +1762,7 @@ fn normalize_schema(
     approved_transforms: &CompatibilityTransformPlan,
 ) -> Result<()> {
     if schema_defaults::apply(schema, approved_transforms.should_drop_schema_default(path)) {
-        stats.dropped_defaults += 1;
+        stats.dropped_schema_defaults.push(path.to_string());
     }
 
     match &mut schema.schema_kind {

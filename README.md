@@ -29,7 +29,10 @@ pp inspect testdata/petstore.yaml --list-operations
 Generate a CLI workspace and build it:
 
 ```bash
-pp generate testdata/petstore.yaml -o ./out/petstore --allow-effect semantic_drop --build
+pp generate testdata/petstore.yaml -o ./out/petstore \
+  --allow-report-code spec.normalize.response_variants_pruned \
+  --allow-report-code spec.normalize.content_types_pruned \
+  --build
 ./out/petstore/target/release/swagger-petstore --help
 ```
 
@@ -46,7 +49,9 @@ pp generate testdata/petstore.yaml -o ./out/petstore --allow-effect semantic_dro
 Every generated binary supports human CLI commands and an MCP stdio server:
 
 ```bash
-pp generate stripe.yaml -o ./stripe --allow-effect semantic_drop --build
+pp generate stripe.yaml -o ./stripe \
+  --allow-report-code <reviewed-report-code> \
+  --build
 cargo install --path ./stripe
 stripe charges_retrieve --id ch_123
 stripe mcp
@@ -100,9 +105,10 @@ These `_pp_` controls only apply to successful MCP tool results. CLI `--json` ou
 ## Spec normalization
 
 `pp` is strict by default: compatibility rewrites, lossy drops, backend workarounds,
-and unsafe fallback replacements fail generation instead of silently proceeding. Approve
-only the required compatibility work with `--allow-effect <effect>` or
-`--allow-report-code <code>`.
+and unsafe fallback replacements fail generation instead of silently proceeding. For
+`generate`, approve only the required compatibility work with repeatable
+`--allow-report-code <code>` flags. `inspect` also accepts `--allow-effect <effect>` for
+exploratory report review.
 
 Generated workspaces also require an explicit base URL. `pp` uses `servers[0].url` from
 the spec, or `--base-url <URL>` when the spec does not declare a server; it no longer
@@ -113,11 +119,11 @@ stable `operationId`. `pp inspect --list-operations` still shows discovery-only 
 IDs for unnamed operations, but generation fails until those operations are given an
 `operationId` or excluded from the generated surface.
 
-When compatibility normalization is allowed by effect or report code, `pp` prints each
+When compatibility normalization is allowed by report code, `pp` prints each
 normalization to stderr, exposes structured report entries through `pp inspect --reports`,
 and writes `pp-transform-plan.json` into generated workspaces. Use
-`pp inspect --reports --allow-report-code <code>` to approve a single known rule, or
-`--allow-effect <effect>` to approve a narrow class of transforms.
+`pp inspect --reports --allow-report-code <code>` to approve a single known rule for review,
+then pass the same reviewed `--allow-report-code <code>` flags to `pp generate`.
 
 The transform plan also includes machine-readable audit entries for applied raw repairs,
 typed normalization, backend source transforms, and runtime-generation seams. Audit entries
@@ -132,16 +138,16 @@ not an implicit fallback path in strict mode.
 Current compatibility rules:
 
 - Request body media types: keep `application/json` when present, otherwise fail unless
-  the specific report code or effect is explicitly allowed.
+  the specific report code is explicitly allowed for generation.
 - Response media types: keep `application/json` when present, otherwise fail unless
-  the specific report code or effect is explicitly allowed.
+  the specific report code is explicitly allowed for generation.
 - Response variants: keep `200`, else the first 2xx response, else the first
   available response such as `default`; strict mode rejects this pruning by default.
-- Schemaless request bodies: dropping CLI body input when no JSON Schema is present requires explicit approval by report code or effect.
+- Schemaless request bodies: dropping CLI body input when no JSON Schema is present requires explicit approval by report code for generation.
 - OpenAPI 3.1: downgrade supported 3.1 shapes into the 3.0 parser path only when
-  the specific report code or effect is explicitly allowed.
+  the specific report code is explicitly allowed for generation.
 - Enum collisions, property name collisions, and unsupported schema types are
-  rewritten only when the specific report code or effect is explicitly allowed so codegen can continue.
+  rewritten only when the specific report code is explicitly allowed so codegen can continue.
 
 ## Auth
 

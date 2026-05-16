@@ -57,9 +57,7 @@ impl TransformPlan {
             if rejected.len() > 8 {
                 message.push_str(&format!("\n- ... {} more", rejected.len() - 8));
             }
-            message.push_str(
-                "\nPass --allow-effect or --allow-report-code to approve explicit compatibility transforms.",
-            );
+            message.push_str(policy.approval_surface.rejection_hint());
             return Err(anyhow!(message));
         }
 
@@ -80,6 +78,7 @@ pub(crate) struct TransformPolicy {
     pub profile: PolicyProfile,
     pub allowed_effects: BTreeSet<ReportEffect>,
     pub allowed_codes: BTreeSet<String>,
+    pub approval_surface: ApprovalSurface,
 }
 
 impl Default for TransformPolicy {
@@ -94,14 +93,22 @@ impl TransformPolicy {
             profile: PolicyProfile::Strict,
             allowed_effects: BTreeSet::new(),
             allowed_codes: BTreeSet::new(),
+            approval_surface: ApprovalSurface::ReportCodesOnly,
         }
     }
 
+    pub fn with_approval_surface(mut self, approval_surface: ApprovalSurface) -> Self {
+        self.approval_surface = approval_surface;
+        self
+    }
+
+    #[allow(dead_code)]
     pub fn compatibility() -> Self {
         Self {
             profile: PolicyProfile::Compatibility,
             allowed_effects: BTreeSet::new(),
             allowed_codes: BTreeSet::new(),
+            approval_surface: ApprovalSurface::ReportCodesAndEffects,
         }
     }
 
@@ -138,8 +145,28 @@ impl TransformPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalSurface {
+    ReportCodesOnly,
+    ReportCodesAndEffects,
+}
+
+impl ApprovalSurface {
+    fn rejection_hint(self) -> &'static str {
+        match self {
+            Self::ReportCodesOnly => {
+                "\nPass --allow-report-code to approve explicit compatibility transforms."
+            }
+            Self::ReportCodesAndEffects => {
+                "\nPass --allow-report-code to approve explicit compatibility transforms. Inspect also supports --allow-effect for exploratory review."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PolicyProfile {
     Strict,
+    #[allow(dead_code)]
     Compatibility,
 }
 

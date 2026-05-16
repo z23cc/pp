@@ -370,6 +370,32 @@ fn inspect_allows_specific_report_code_when_explicit() {
 }
 
 #[test]
+fn generate_rejection_guidance_is_report_code_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(temp.path(), "lossy.yaml", LOSSY_SPEC);
+    let output = Command::new(common::pp_bin())
+        .arg("generate")
+        .arg(spec)
+        .arg("-o")
+        .arg(temp.path().join("out"))
+        .arg("--base-url")
+        .arg("https://example.test")
+        .output()
+        .expect("failed to run pp generate");
+
+    assert!(!output.status.success(), "generate unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Pass --allow-report-code"),
+        "stderr did not include report-code approval hint:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("--allow-effect"),
+        "generate stderr should not advertise broad effect approval:\n{stderr}"
+    );
+}
+
+#[test]
 fn generate_writes_transform_plan_with_approval_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let spec = common::write_spec(temp.path(), "lossy.yaml", LOSSY_SPEC);
@@ -381,12 +407,14 @@ fn generate_writes_transform_plan_with_approval_metadata() {
         .arg(&out_dir)
         .arg("--base-url")
         .arg("https://example.test")
-        .arg("--allow-effect")
-        .arg("semantic_drop")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.response_variants_pruned")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.content_types_pruned")
         .output()
         .expect("failed to run pp generate");
 
-    common::assert_success(output, "pp generate --base-url --allow-effect");
+    common::assert_success(output, "pp generate --base-url --allow-report-code");
     let plan_path = out_dir.join("pp-transform-plan.json");
     let value: Value = serde_json::from_slice(
         &std::fs::read(&plan_path)
@@ -394,9 +422,13 @@ fn generate_writes_transform_plan_with_approval_metadata() {
     )
     .expect("transform plan JSON");
     assert_eq!(value["approval"]["profile"], "strict");
+    assert_eq!(value["approval"]["allowed_effects"], serde_json::json!([]));
     assert_eq!(
-        value["approval"]["allowed_effects"],
-        serde_json::json!(["semantic_drop"])
+        value["approval"]["allowed_codes"],
+        serde_json::json!([
+            "spec.normalize.content_types_pruned",
+            "spec.normalize.response_variants_pruned"
+        ])
     );
     assert!(value["entries"].as_array().unwrap().iter().any(|entry| {
         entry["code"] == "spec.normalize.response_variants_pruned"
@@ -408,7 +440,7 @@ fn generate_writes_transform_plan_with_approval_metadata() {
         .iter()
         .any(|decision| {
             decision["code"] == "spec.normalize.response_variants_pruned"
-                && decision["allowed_by"] == "effect_allowlist"
+                && decision["allowed_by"] == "report_code_allowlist"
         }));
     let audits = value["audits"].as_array().expect("audits array");
     assert!(audits.iter().any(|audit| {

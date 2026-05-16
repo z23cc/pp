@@ -119,11 +119,25 @@ pub(crate) fn load_for_operation_listing(
     path: &Path,
     options: &LoadOptions,
 ) -> Result<LoadedOperationListingSpec> {
-    let prepared = prepare_openapi(path, options)?;
-    Ok(LoadedOperationListingSpec {
-        api: prepared.api,
-        reports: prepared.reports,
-    })
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read spec: {}", path.display()))?;
+    let raw_repair_plan = pre_parse::RawSpecRepairPlan::propose(&raw)?;
+    let mut reports = raw_repair_plan.report_entries();
+    let repaired_raw = if raw_repair_plan.is_empty() {
+        None
+    } else {
+        Some(raw_repair_plan.apply(&raw)?)
+    };
+    let parse_raw = repaired_raw.as_deref().unwrap_or(&raw);
+    let mut api = parse_prepared(parse_raw)
+        .with_context(|| format!("failed to parse spec: {}", path.display()))?;
+
+    if !options.slice.is_noop() {
+        let slice_report = slice::slice_openapi(&mut api, &options.slice)?;
+        reports.extend(slice_report.report_entries());
+    }
+
+    Ok(LoadedOperationListingSpec { api, reports })
 }
 
 struct PreparedOpenApi {

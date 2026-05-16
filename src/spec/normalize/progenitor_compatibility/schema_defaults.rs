@@ -46,6 +46,10 @@ impl Action {
     pub(super) fn contains(&self, path: &str) -> bool {
         self.targets.iter().any(|target| target == path)
     }
+
+    pub(super) fn targets(&self) -> &[String] {
+        &self.targets
+    }
 }
 
 pub(super) fn should_propose(schema: &Schema, backend_capabilities: &BackendCapabilities) -> bool {
