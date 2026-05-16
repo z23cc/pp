@@ -71,6 +71,28 @@ paths:
           description: missing
 "#;
 
+const RESPONSE_RELAXATION_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Response Relaxation Fixture
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+"#;
+
 const NO_SERVER_SPEC: &str = r#"
 openapi: 3.0.0
 info:
@@ -207,6 +229,39 @@ fn strict_policy_rejects_component_multipart_only_request_body() {
     assert!(
         stderr.contains("component requestBody Upload"),
         "stderr did not identify component request body:\n{stderr}"
+    );
+}
+
+#[test]
+fn strict_policy_rejects_response_relaxation_before_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "response-relaxation.yaml",
+        RESPONSE_RELAXATION_SPEC,
+    );
+    let output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(spec)
+        .output()
+        .expect("failed to run pp inspect");
+
+    assert!(
+        !output.status.success(),
+        "strict inspect unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("strict transform policy rejected"),
+        "stderr did not explain strict rejection:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("spec.normalize.response_schemas_relaxed"),
+        "stderr did not name response relaxation report:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("tolerant deserialization"),
+        "stderr did not preserve response relaxation warning text:\n{stderr}"
     );
 }
 

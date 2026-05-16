@@ -1,10 +1,80 @@
 use openapiv3::{MediaType, OpenAPI, ReferenceOr, Response, Schema, SchemaData, SchemaKind, Type};
 use std::collections::BTreeSet;
 
+use crate::backend::BackendCapabilities;
+use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::references;
+use crate::spec::report::ReportEntry;
 use crate::spec::traversal;
 
 type ReplaceCount = usize;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ResponseRelaxationPlan {
+    action: Option<RelaxResponseSchemas>,
+}
+
+impl ResponseRelaxationPlan {
+    pub(super) fn report_entries(&self) -> Vec<ReportEntry> {
+        self.action
+            .iter()
+            .map(|action| action.report.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RelaxResponseSchemas {
+    count: ReplaceCount,
+    report: ReportEntry,
+}
+
+pub(super) fn propose(
+    spec: &OpenAPI,
+    backend_capabilities: &BackendCapabilities,
+) -> ResponseRelaxationPlan {
+    if !backend_capabilities.requires_relaxed_response_schemas {
+        return ResponseRelaxationPlan::default();
+    }
+
+    let mut candidate = spec.clone();
+    let count = relax_response_schemas(&mut candidate);
+    if count == 0 {
+        return ResponseRelaxationPlan::default();
+    }
+
+    ResponseRelaxationPlan {
+        action: Some(RelaxResponseSchemas {
+            count,
+            report: response_schemas_relaxed_report(count),
+        }),
+    }
+}
+
+pub(super) fn apply_approved(
+    spec: &mut OpenAPI,
+    reports: &mut Vec<ReportEntry>,
+    approved_plan: &ResponseRelaxationPlan,
+) {
+    let Some(action) = &approved_plan.action else {
+        return;
+    };
+
+    let relaxed = relax_response_schemas(spec);
+    debug_assert_eq!(
+        relaxed, action.count,
+        "approved response relaxation count drifted between proposal and apply"
+    );
+    reports.push(action.report.clone());
+}
+
+fn response_schemas_relaxed_report(count: ReplaceCount) -> ReportEntry {
+    rules::typed_warning(
+        typed::RESPONSE_SCHEMAS_RELAXED,
+        format!("normalized {count} response schemas — relaxed output fields for tolerant deserialization"),
+        None,
+    )
+}
 
 pub(super) fn relax_response_schemas(spec: &mut OpenAPI) -> ReplaceCount {
     let request_refs = collect_request_schema_refs(spec);

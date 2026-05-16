@@ -88,23 +88,28 @@ pub(crate) fn load(path: &Path) -> Result<LoadedSpec> {
 pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
+    // Pre-parse tolerance intentionally happens inside `parse()` before a typed
+    // `OpenAPI` value exists. The typed normalization policy boundary below
+    // starts only after these parse-time repairs make real-world specs parseable.
     let (mut spec, mut reports) =
         parse(&raw, path).with_context(|| format!("failed to parse spec: {}", path.display()))?;
     if !options.slice.is_noop() {
         let slice_report = slice::slice_openapi(&mut spec, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
-    let approved_compatibility_transforms =
-        normalize::propose_compatibility_transforms(&spec, &options.backend_capabilities);
-    let proposed_reports = approved_compatibility_transforms.report_entries();
+    let approved_typed_normalization_transforms =
+        normalize::propose_typed_normalization_transforms(&spec, &options.backend_capabilities);
+    let proposed_reports = approved_typed_normalization_transforms.report_entries();
     let mut proposed_plan = transform::TransformPlan::from_reports(&proposed_reports);
     proposed_plan.approve(&options.policy)?;
 
-    reports.extend(normalize::normalize_with_approved_compatibility_transforms(
-        &mut spec,
-        &options.backend_capabilities,
-        &approved_compatibility_transforms,
-    )?);
+    reports.extend(
+        normalize::normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &options.backend_capabilities,
+            &approved_typed_normalization_transforms,
+        )?,
+    );
     let mut transform_plan = transform::TransformPlan::from_reports(&reports);
     transform_plan.approve(&options.policy)?;
     let facts = inspect_openapi(&spec)?;
@@ -301,6 +306,41 @@ components:
             schema.schema_kind,
             openapiv3::SchemaKind::Type(openapiv3::Type::String(_))
         ));
+    }
+
+    #[test]
+    fn pre_parse_reports_remain_outside_typed_normalization_proposals() {
+        let (spec, pre_parse_reports) = parse(
+            r#"
+openapi: 3.1.0
+info:
+  title: Future API
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    MaybeName:
+      type: [string, null]
+"#,
+            Path::new("future.yaml"),
+        )
+        .unwrap();
+        assert!(pre_parse_reports
+            .iter()
+            .any(|report| report.code == "spec.pre_parse.openapi_31_downgraded"));
+
+        let typed_plan = normalize::propose_typed_normalization_transforms(
+            &spec,
+            &BackendCapabilities::progenitor(),
+        );
+        assert!(typed_plan
+            .report_entries()
+            .iter()
+            .all(|report| report.stage == ReportStage::TypedNormalization));
+        assert!(!typed_plan
+            .report_entries()
+            .iter()
+            .any(|report| report.code.starts_with("spec.pre_parse.")));
     }
 
     #[test]

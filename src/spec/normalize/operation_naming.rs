@@ -12,7 +12,30 @@ const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
     "application_controllers_",
 ];
 
-pub(super) fn apply(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
+#[derive(Debug, Clone, Default)]
+pub(super) struct OperationNamingPlan {
+    actions: Vec<OperationNamingAction>,
+}
+
+impl OperationNamingPlan {
+    pub(super) fn report_entries(&self) -> Vec<ReportEntry> {
+        self.actions
+            .iter()
+            .map(|action| action.report.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OperationNamingAction {
+    method: String,
+    path: String,
+    old: String,
+    new: String,
+    report: ReportEntry,
+}
+
+pub(super) fn propose(spec: &OpenAPI) -> OperationNamingPlan {
     let ids = operation_ids(spec);
     let candidates: Vec<_> = ids
         .iter()
@@ -37,18 +60,51 @@ pub(super) fn apply(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
         .filter(|(old, new)| old != new && chosen_counts.get(new) == Some(&1))
         .collect();
 
+    let actions = traversal::operations(spec)
+        .into_iter()
+        .filter_map(|operation_ref| {
+            let old = operation_ref.operation.operation_id.clone()?;
+            let new = replacements.get(&old)?.clone();
+            Some(OperationNamingAction {
+                method: operation_ref.method.to_string(),
+                path: operation_ref.path.to_string(),
+                report: shortened_report(&old, &new),
+                old,
+                new,
+            })
+        })
+        .collect();
+
+    OperationNamingPlan { actions }
+}
+
+pub(super) fn apply_approved(
+    spec: &mut OpenAPI,
+    reports: &mut Vec<ReportEntry>,
+    approved_plan: &OperationNamingPlan,
+) {
     traversal::visit_operations_mut(spec, |operation_ref| {
-        if let Some(old) = operation_ref.operation.operation_id.clone() {
-            if let Some(new) = replacements.get(&old) {
-                operation_ref.operation.operation_id = Some(new.clone());
-                reports.push(rules::typed_warning(
-                    typed::OPERATION_IDS_SHORTENED,
-                    format!("shortened operation '{old}' → '{new}'"),
-                    Some(ReportSubject::operation(old)),
-                ));
-            }
-        }
+        let Some(old) = operation_ref.operation.operation_id.clone() else {
+            return;
+        };
+        let Some(action) = approved_plan.actions.iter().find(|action| {
+            action.method == operation_ref.method
+                && action.path == operation_ref.path
+                && action.old == old
+        }) else {
+            return;
+        };
+        operation_ref.operation.operation_id = Some(action.new.clone());
+        reports.push(action.report.clone());
     });
+}
+
+fn shortened_report(old: &str, new: &str) -> ReportEntry {
+    rules::typed_warning(
+        typed::OPERATION_IDS_SHORTENED,
+        format!("shortened operation '{old}' → '{new}'"),
+        Some(ReportSubject::operation(old)),
+    )
 }
 
 fn operation_ids(spec: &OpenAPI) -> Vec<String> {
@@ -123,8 +179,9 @@ paths:
         )
         .unwrap();
 
+        let plan = propose(&spec);
         let mut warnings = Vec::new();
-        apply(&mut spec, &mut warnings);
+        apply_approved(&mut spec, &mut warnings, &plan);
         let path = spec.paths.paths.get("/capabilities").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");

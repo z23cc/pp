@@ -3,7 +3,6 @@ use openapiv3::OpenAPI;
 
 use crate::backend::BackendCapabilities;
 
-use super::normalization_rules::{self as rules, typed};
 use super::report::ReportEntry;
 
 mod operation_naming;
@@ -15,6 +14,85 @@ use openapiv3::{QueryStyle, ReferenceOr, SchemaKind, StatusCode, Type};
 #[cfg(test)]
 use progenitor_compatibility::{FORM_MIME, JSON_MIME};
 
+#[derive(Debug, Clone)]
+pub(crate) struct TypedNormalizationPlan {
+    operation_naming: operation_naming::OperationNamingPlan,
+    compatibility: progenitor_compatibility::CompatibilityTransformPlan,
+    response_relaxation: response_relaxation::ResponseRelaxationPlan,
+}
+
+impl TypedNormalizationPlan {
+    pub(crate) fn report_entries(&self) -> Vec<ReportEntry> {
+        let mut reports = Vec::new();
+        reports.extend(self.operation_naming.report_entries());
+        reports.extend(self.compatibility.report_entries());
+        reports.extend(self.response_relaxation.report_entries());
+        reports
+    }
+}
+
+pub(crate) fn propose_typed_normalization_transforms(
+    spec: &OpenAPI,
+    backend_capabilities: &BackendCapabilities,
+) -> TypedNormalizationPlan {
+    let operation_naming = operation_naming::propose(spec);
+
+    let mut compatibility_basis = spec.clone();
+    let mut discarded_reports = Vec::new();
+    operation_naming::apply_approved(
+        &mut compatibility_basis,
+        &mut discarded_reports,
+        &operation_naming,
+    );
+    let compatibility =
+        progenitor_compatibility::propose_transforms(&compatibility_basis, backend_capabilities);
+
+    let mut response_basis = compatibility_basis;
+    discarded_reports.clear();
+    let _ = progenitor_compatibility::apply_approved(
+        &mut response_basis,
+        &mut discarded_reports,
+        backend_capabilities,
+        &compatibility,
+    )
+    .expect("compatibility proposal replay for response relaxation should not fail");
+    let response_relaxation = response_relaxation::propose(&response_basis, backend_capabilities);
+
+    TypedNormalizationPlan {
+        operation_naming,
+        compatibility,
+        response_relaxation,
+    }
+}
+
+pub(crate) fn normalize_with_approved_typed_normalization_transforms(
+    spec: &mut OpenAPI,
+    backend_capabilities: &BackendCapabilities,
+    approved_transforms: &TypedNormalizationPlan,
+) -> Result<Vec<ReportEntry>> {
+    let mut reports = Vec::new();
+    operation_naming::apply_approved(spec, &mut reports, &approved_transforms.operation_naming);
+    let compatibility_stats = progenitor_compatibility::apply_approved(
+        spec,
+        &mut reports,
+        backend_capabilities,
+        &approved_transforms.compatibility,
+    )?;
+    progenitor_compatibility::emit_summary_reports(&mut reports, &compatibility_stats);
+    progenitor_compatibility::emit_optional_object_query_param_report(
+        &mut reports,
+        &compatibility_stats,
+    );
+    response_relaxation::apply_approved(
+        spec,
+        &mut reports,
+        &approved_transforms.response_relaxation,
+    );
+
+    Ok(reports)
+}
+
+#[cfg(test)]
 pub(crate) fn propose_compatibility_transforms(
     spec: &OpenAPI,
     backend_capabilities: &BackendCapabilities,
@@ -22,27 +100,22 @@ pub(crate) fn propose_compatibility_transforms(
     progenitor_compatibility::propose_transforms(spec, backend_capabilities)
 }
 
+#[cfg(test)]
 pub(crate) fn normalize_with_approved_compatibility_transforms(
     spec: &mut OpenAPI,
     backend_capabilities: &BackendCapabilities,
     approved_compatibility_transforms: &progenitor_compatibility::CompatibilityTransformPlan,
 ) -> Result<Vec<ReportEntry>> {
-    let mut reports = Vec::new();
-    apply_operation_naming_rules(spec, &mut reports);
-    let compatibility_stats = progenitor_compatibility::apply_approved(
+    let approved_transforms = TypedNormalizationPlan {
+        operation_naming: operation_naming::propose(spec),
+        compatibility: approved_compatibility_transforms.clone(),
+        response_relaxation: response_relaxation::ResponseRelaxationPlan::default(),
+    };
+    normalize_with_approved_typed_normalization_transforms(
         spec,
-        &mut reports,
         backend_capabilities,
-        approved_compatibility_transforms,
-    )?;
-    progenitor_compatibility::emit_summary_reports(&mut reports, &compatibility_stats);
-    apply_response_relaxation_rules(spec, &mut reports, backend_capabilities);
-    progenitor_compatibility::emit_optional_object_query_param_report(
-        &mut reports,
-        &compatibility_stats,
-    );
-
-    Ok(reports)
+        &approved_transforms,
+    )
 }
 
 #[cfg(test)]
@@ -50,37 +123,14 @@ fn normalize_unchecked_for_tests(
     spec: &mut OpenAPI,
     backend_capabilities: &BackendCapabilities,
 ) -> Result<Vec<ReportEntry>> {
-    let approved_compatibility_transforms =
-        propose_compatibility_transforms(spec, backend_capabilities);
-    normalize_with_approved_compatibility_transforms(
+    let approved_transforms = propose_typed_normalization_transforms(spec, backend_capabilities);
+    normalize_with_approved_typed_normalization_transforms(
         spec,
         backend_capabilities,
-        &approved_compatibility_transforms,
+        &approved_transforms,
     )
 }
 
-fn apply_operation_naming_rules(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
-    operation_naming::apply(spec, reports);
-}
-
-fn apply_response_relaxation_rules(
-    spec: &mut OpenAPI,
-    reports: &mut Vec<ReportEntry>,
-    backend_capabilities: &BackendCapabilities,
-) {
-    if !backend_capabilities.requires_relaxed_response_schemas {
-        return;
-    }
-
-    let relaxed_responses = response_relaxation::relax_response_schemas(spec);
-    if relaxed_responses > 0 {
-        reports.push(rules::typed_warning(
-            typed::RESPONSE_SCHEMAS_RELAXED,
-            format!("normalized {relaxed_responses} response schemas — relaxed output fields for tolerant deserialization"),
-            None,
-        ));
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +138,177 @@ mod tests {
     use crate::spec::normalization_rules::typed;
     use crate::spec::report::{ReportStage, ReportSubject};
     use crate::spec::transform::{TransformPlan, TransformPolicy};
+
+    fn assert_strict_rejects_typed_proposal_without_mutating_spec(
+        yaml: &str,
+        expected_codes: &[&str],
+    ) {
+        let spec: OpenAPI = serde_yaml::from_str(yaml).unwrap();
+        let before = serde_json::to_value(&spec).unwrap();
+        let proposals =
+            propose_typed_normalization_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = proposals.report_entries();
+        let mut plan = TransformPlan::from_reports(&proposal_reports);
+
+        assert!(
+            plan.approve(&TransformPolicy::strict()).is_err(),
+            "strict policy unexpectedly approved reports: {proposal_reports:?}"
+        );
+        assert_eq!(serde_json::to_value(&spec).unwrap(), before);
+        for expected_code in expected_codes {
+            assert!(
+                proposal_reports
+                    .iter()
+                    .any(|report| report.code == *expected_code),
+                "missing proposed report code {expected_code}; reports: {proposal_reports:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_plan_includes_operation_id_shortening_before_apply() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Verbose Operation
+  version: "1.0.0"
+paths:
+  /capabilities:
+    get:
+      operationId: PlausibleWeb.Plugins.API.Controllers.Capabilities.index
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&spec).unwrap();
+
+        let proposals =
+            propose_typed_normalization_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = proposals.report_entries();
+        let mut plan = TransformPlan::from_reports(&proposal_reports);
+        plan.approve(&TransformPolicy::strict())
+            .expect("operation ID shortening is lossless and strict-approved");
+
+        assert_eq!(serde_json::to_value(&spec).unwrap(), before);
+        assert_eq!(proposal_reports.len(), 1);
+        assert_eq!(proposal_reports[0].code, typed::OPERATION_IDS_SHORTENED);
+        assert_eq!(
+            proposal_reports[0].subject,
+            Some(ReportSubject::operation(
+                "PlausibleWeb.Plugins.API.Controllers.Capabilities.index"
+            ))
+        );
+        assert_eq!(
+            plan.approval.unwrap().decisions[0].allowed_by,
+            "strict_default"
+        );
+    }
+
+    #[test]
+    fn downstream_typed_reports_use_post_operation_naming_basis() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Verbose Pruning
+  version: "1.0.0"
+paths:
+  /capabilities:
+    get:
+      operationId: PlausibleWeb.Plugins.API.Controllers.Capabilities.index
+      responses:
+        '200':
+          description: ok
+        '404':
+          description: missing
+"#,
+        )
+        .unwrap();
+
+        let approved_plan =
+            propose_typed_normalization_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = approved_plan.report_entries();
+        assert!(proposal_reports
+            .iter()
+            .any(|report| report.contains("capabilities_index responses")));
+        assert!(!proposal_reports.iter().any(|report| report
+            .contains("PlausibleWeb.Plugins.API.Controllers.Capabilities.index responses")));
+
+        let reports = normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &approved_plan,
+        )
+        .unwrap();
+
+        assert_eq!(reports, proposal_reports);
+    }
+
+    #[test]
+    fn operation_id_shortening_applies_only_from_approved_typed_plan() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Verbose Operation
+  version: "1.0.0"
+paths:
+  /capabilities:
+    get:
+      operationId: PlausibleWeb.Plugins.API.Controllers.Capabilities.index
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+        let empty_plan = TypedNormalizationPlan {
+            operation_naming: operation_naming::OperationNamingPlan::default(),
+            compatibility: progenitor_compatibility::CompatibilityTransformPlan::default(),
+            response_relaxation: response_relaxation::ResponseRelaxationPlan::default(),
+        };
+
+        let reports = normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &empty_plan,
+        )
+        .unwrap();
+        let path = spec.paths.paths.get("/capabilities").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        assert_eq!(
+            path.get.as_ref().unwrap().operation_id.as_deref(),
+            Some("PlausibleWeb.Plugins.API.Controllers.Capabilities.index")
+        );
+        assert!(!reports
+            .iter()
+            .any(|report| report.code == typed::OPERATION_IDS_SHORTENED));
+
+        let approved_plan =
+            propose_typed_normalization_transforms(&spec, &BackendCapabilities::progenitor());
+        let reports = normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &approved_plan,
+        )
+        .unwrap();
+        let path = spec.paths.paths.get("/capabilities").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        assert_eq!(
+            path.get.as_ref().unwrap().operation_id.as_deref(),
+            Some("capabilities_index")
+        );
+        assert!(reports
+            .iter()
+            .any(|report| report.code == typed::OPERATION_IDS_SHORTENED));
+    }
 
     #[test]
     fn planned_pruning_reports_are_policy_checked_without_mutating_spec() {
@@ -131,6 +352,214 @@ paths:
         assert!(proposal_reports
             .iter()
             .any(|report| report.code == typed::CONTENT_TYPES_PRUNED));
+    }
+
+    #[test]
+    fn strict_policy_rejects_schema_default_proposal_before_mutation() {
+        assert_strict_rejects_typed_proposal_without_mutating_spec(
+            r#"
+openapi: 3.0.0
+info:
+  title: Defaults
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    Pet:
+      type: object
+      default:
+        name: cat
+"#,
+            &[typed::SCHEMA_DEFAULTS_DROPPED],
+        );
+    }
+
+    #[test]
+    fn strict_policy_rejects_query_param_proposals_before_mutation() {
+        assert_strict_rejects_typed_proposal_without_mutating_spec(
+            r##"
+openapi: 3.0.0
+info:
+  title: Query Params
+  version: "1.0.0"
+paths:
+  /search:
+    get:
+      operationId: searchPets
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            $ref: "#/components/schemas/Filter"
+        - name: required_filter
+          in: query
+          required: true
+          style: deepObject
+          schema:
+            type: object
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Filter:
+      type: object
+      properties:
+        color:
+          type: string
+"##,
+            &[
+                typed::OPTIONAL_OBJECT_QUERY_PARAMS_DROPPED,
+                typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN,
+            ],
+        );
+    }
+
+    #[test]
+    fn strict_policy_preserves_empty_request_body_content_without_proposal() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Empty Request Bodies
+  version: "1.0.0"
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        content: {}
+      responses:
+        '200':
+          description: ok
+components:
+  requestBodies:
+    EmptyBody:
+      content: {}
+"#,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&spec).unwrap();
+        let approved_plan =
+            propose_typed_normalization_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = approved_plan.report_entries();
+        let mut transform_plan = TransformPlan::from_reports(&proposal_reports);
+
+        transform_plan
+            .approve(&TransformPolicy::strict())
+            .expect("empty request body content has no implicit normalization proposal");
+        let reports = normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &approved_plan,
+        )
+        .unwrap();
+
+        assert!(proposal_reports.is_empty());
+        assert!(reports.is_empty());
+        assert_eq!(serde_json::to_value(&spec).unwrap(), before);
+    }
+
+    #[test]
+    fn strict_policy_rejects_schemaless_body_proposal_before_mutation() {
+        assert_strict_rejects_typed_proposal_without_mutating_spec(
+            r#"
+openapi: 3.0.0
+info:
+  title: Schemaless Body
+  version: "1.0.0"
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        content:
+          application/json: {}
+      responses:
+        '200':
+          description: ok
+"#,
+            &[typed::SCHEMALESS_REQUEST_BODY_DROPPED],
+        );
+    }
+
+    #[test]
+    fn strict_policy_rejects_response_relaxation_proposal_before_mutation() {
+        assert_strict_rejects_typed_proposal_without_mutating_spec(
+            r#"
+openapi: 3.0.0
+info:
+  title: Relax Responses
+  version: "1.0.0"
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+"#,
+            &[typed::RESPONSE_SCHEMAS_RELAXED],
+        );
+    }
+
+    #[test]
+    fn strict_policy_rejects_enum_and_property_collision_proposals_before_mutation() {
+        assert_strict_rejects_typed_proposal_without_mutating_spec(
+            r#"
+openapi: 3.0.0
+info:
+  title: Collisions
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    Reaction:
+      type: string
+      enum:
+        - "+1"
+        - "-1"
+    Pet:
+      type: object
+      properties:
+        foo-bar:
+          type: string
+        foo_bar:
+          type: string
+"#,
+            &[
+                typed::ENUM_CONSTRAINT_DROPPED,
+                typed::PROPERTIES_COLLIDING_DROPPED,
+            ],
+        );
+    }
+
+    #[test]
+    fn strict_policy_rejects_unsupported_schema_type_proposal_before_mutation() {
+        assert_strict_rejects_typed_proposal_without_mutating_spec(
+            r#"
+openapi: 3.0.0
+info:
+  title: Unsupported Type
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    Mystery:
+      type: ""
+      enum:
+        - ok
+"#,
+            &[typed::UNSUPPORTED_SCHEMA_TYPE_REPLACED],
+        );
     }
 
     #[test]
@@ -220,6 +649,7 @@ paths:
             &proposals,
         )
         .unwrap();
+        assert_eq!(reports, proposal_reports);
         let mut transform_plan = TransformPlan::from_reports(&reports);
         transform_plan
             .approve(&TransformPolicy::compatibility())
@@ -446,6 +876,119 @@ components:
         assert!(warnings[0].contains("dropped enum constraint"));
         assert!(warnings[0].contains("+1, -1"));
         assert!(warnings[0].contains("preserving wire format"));
+    }
+
+    #[test]
+    fn response_relaxation_applies_only_from_approved_typed_plan() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Relax Responses
+  version: "1.0.0"
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+"#,
+        )
+        .unwrap();
+        let empty_plan = TypedNormalizationPlan {
+            operation_naming: operation_naming::OperationNamingPlan::default(),
+            compatibility: progenitor_compatibility::CompatibilityTransformPlan::default(),
+            response_relaxation: response_relaxation::ResponseRelaxationPlan::default(),
+        };
+
+        let reports = normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &empty_plan,
+        )
+        .unwrap();
+        let path = spec.paths.paths.get("/pets").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let response = path
+            .get
+            .as_ref()
+            .unwrap()
+            .responses
+            .responses
+            .get(&StatusCode::Code(200))
+            .unwrap();
+        let ReferenceOr::Item(response) = response else {
+            panic!("expected inline response");
+        };
+        let ReferenceOr::Item(schema) = response
+            .content
+            .get(JSON_MIME)
+            .unwrap()
+            .schema
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected inline response schema");
+        };
+        let SchemaKind::Type(Type::Object(object)) = &schema.schema_kind else {
+            panic!("expected response object");
+        };
+        assert_eq!(object.required, vec!["name"]);
+        assert!(!reports
+            .iter()
+            .any(|report| report.code == typed::RESPONSE_SCHEMAS_RELAXED));
+
+        let approved_plan =
+            propose_typed_normalization_transforms(&spec, &BackendCapabilities::progenitor());
+        let reports = normalize_with_approved_typed_normalization_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &approved_plan,
+        )
+        .unwrap();
+        let path = spec.paths.paths.get("/pets").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let response = path
+            .get
+            .as_ref()
+            .unwrap()
+            .responses
+            .responses
+            .get(&StatusCode::Code(200))
+            .unwrap();
+        let ReferenceOr::Item(response) = response else {
+            panic!("expected inline response");
+        };
+        let ReferenceOr::Item(schema) = response
+            .content
+            .get(JSON_MIME)
+            .unwrap()
+            .schema
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected inline response schema");
+        };
+        let SchemaKind::Type(Type::Object(object)) = &schema.schema_kind else {
+            panic!("expected response object");
+        };
+        assert!(object.required.is_empty());
+        assert!(reports
+            .iter()
+            .any(|report| report.code == typed::RESPONSE_SCHEMAS_RELAXED));
     }
 
     #[test]
