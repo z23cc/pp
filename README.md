@@ -155,9 +155,8 @@ Generated CLIs currently support:
 
 By default, auth selection fails when multiple supported component security schemes are
 selectable. Use `--auth-scheme <NAME>` to select a specific
-`components.securitySchemes` entry; this overrides `--auth-policy` and does not fall back
-to query-parameter heuristics. Use `--auth-policy legacy` only when you intentionally want
-the previous component-order compatibility behavior.
+`components.securitySchemes` entry; explicit scheme selection does not fall back to
+query-parameter heuristics.
 
 Example:
 

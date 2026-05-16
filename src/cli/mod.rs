@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -13,22 +13,11 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum AuthPolicyArg {
-    Legacy,
-    FailAmbiguous,
-}
-
-impl AuthPolicyArg {
-    fn into_policy(self, auth_scheme: Option<String>) -> crate::spec::AuthSelectionPolicy {
-        if let Some(name) = auth_scheme {
-            return crate::spec::AuthSelectionPolicy::ExplicitScheme { name };
-        }
-
-        match self {
-            Self::Legacy => crate::spec::AuthSelectionPolicy::LegacyCompatible,
-            Self::FailAmbiguous => crate::spec::AuthSelectionPolicy::FailAmbiguous,
-        }
+fn auth_policy_from_scheme(auth_scheme: Option<String>) -> crate::spec::AuthSelectionPolicy {
+    if let Some(name) = auth_scheme {
+        crate::spec::AuthSelectionPolicy::ExplicitScheme { name }
+    } else {
+        crate::spec::AuthSelectionPolicy::FailAmbiguous
     }
 }
 
@@ -65,9 +54,6 @@ pub enum Command {
         /// Permit one transform report code in strict policy (repeatable)
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
-        /// Auth selection behavior when multiple component security schemes are selectable
-        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::FailAmbiguous)]
-        auth_policy: AuthPolicyArg,
         /// Explicit component security scheme name to use for generated auth
         #[arg(long = "auth-scheme")]
         auth_scheme: Option<String>,
@@ -109,9 +95,6 @@ pub enum Command {
         /// Permit one transform report code in strict policy (repeatable)
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
-        /// Auth selection behavior when multiple component security schemes are selectable
-        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::FailAmbiguous)]
-        auth_policy: AuthPolicyArg,
         /// Explicit component security scheme name to use for generated auth
         #[arg(long = "auth-scheme")]
         auth_scheme: Option<String>,
@@ -131,7 +114,6 @@ struct LoadOptionsArgs {
     allow_compat_normalization: bool,
     allow_effects: Vec<crate::spec::report::ReportEffect>,
     allow_report_codes: Vec<String>,
-    auth_policy: AuthPolicyArg,
     auth_scheme: Option<String>,
 }
 
@@ -144,7 +126,6 @@ fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
         allow_compat_normalization,
         allow_effects,
         allow_report_codes,
-        auth_policy,
         auth_scheme,
     } = args;
 
@@ -168,7 +149,7 @@ fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
             exclude_operations,
         },
         policy,
-        auth_policy: auth_policy.into_policy(auth_scheme),
+        auth_policy: auth_policy_from_scheme(auth_scheme),
         backend_capabilities: crate::backend::BackendCapabilities::progenitor(),
     }
 }
@@ -239,7 +220,6 @@ impl Cli {
                 allow_compat_normalization,
                 allow_effects,
                 allow_report_codes,
-                auth_policy,
                 auth_scheme,
             } => {
                 let options = load_options(LoadOptionsArgs {
@@ -250,7 +230,6 @@ impl Cli {
                     allow_compat_normalization,
                     allow_effects,
                     allow_report_codes,
-                    auth_policy,
                     auth_scheme,
                 });
                 if list_operations {
@@ -300,7 +279,6 @@ impl Cli {
                 allow_compat_normalization,
                 allow_effects,
                 allow_report_codes,
-                auth_policy,
                 auth_scheme,
             } => {
                 let options = load_options(LoadOptionsArgs {
@@ -311,7 +289,6 @@ impl Cli {
                     allow_compat_normalization,
                     allow_effects,
                     allow_report_codes,
-                    auth_policy,
                     auth_scheme,
                 });
                 let _result = crate::pipeline::generate_with_progress(
@@ -347,7 +324,6 @@ mod tests {
             allow_compat_normalization: false,
             allow_effects: Vec::new(),
             allow_report_codes: Vec::new(),
-            auth_policy: AuthPolicyArg::FailAmbiguous,
             auth_scheme: Some("bearerAuth".to_string()),
         });
 
@@ -363,12 +339,7 @@ mod tests {
         let cli = Cli::parse_from(["pp", "inspect", "spec.yaml"]);
 
         match cli.command {
-            Command::Inspect {
-                auth_policy,
-                auth_scheme,
-                ..
-            } => {
-                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+            Command::Inspect { auth_scheme, .. } => {
                 assert!(auth_scheme.is_none());
             }
             _ => panic!("expected inspect command"),
@@ -380,12 +351,7 @@ mod tests {
         let cli = Cli::parse_from(["pp", "generate", "spec.yaml", "-o", "out"]);
 
         match cli.command {
-            Command::Generate {
-                auth_policy,
-                auth_scheme,
-                ..
-            } => {
-                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+            Command::Generate { auth_scheme, .. } => {
                 assert!(auth_scheme.is_none());
             }
             _ => panic!("expected generate command"),
@@ -393,20 +359,17 @@ mod tests {
     }
 
     #[test]
-    fn inspect_accepts_legacy_auth_policy_flag() {
-        let cli = Cli::parse_from(["pp", "inspect", "spec.yaml", "--auth-policy", "legacy"]);
+    fn inspect_rejects_removed_auth_policy_flag() {
+        let err = Cli::try_parse_from([
+            "pp",
+            "inspect",
+            "spec.yaml",
+            "--auth-policy",
+            "fail-ambiguous",
+        ])
+        .unwrap_err();
 
-        match cli.command {
-            Command::Inspect {
-                auth_policy,
-                auth_scheme,
-                ..
-            } => {
-                assert!(matches!(auth_policy, AuthPolicyArg::Legacy));
-                assert!(auth_scheme.is_none());
-            }
-            _ => panic!("expected inspect command"),
-        }
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -446,19 +409,12 @@ mod tests {
             "spec.yaml",
             "-o",
             "out",
-            "--auth-policy",
-            "fail-ambiguous",
             "--auth-scheme",
             "bearerAuth",
         ]);
 
         match cli.command {
-            Command::Generate {
-                auth_policy,
-                auth_scheme,
-                ..
-            } => {
-                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+            Command::Generate { auth_scheme, .. } => {
                 assert_eq!(auth_scheme.as_deref(), Some("bearerAuth"));
             }
             _ => panic!("expected generate command"),

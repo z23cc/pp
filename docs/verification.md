@@ -17,7 +17,7 @@ Purpose:
 - Rust formatting and lint health.
 - Unit and integration tests that do not build generated release workspaces.
 - Inspect/slicing/pipeline/model/backend behavior.
-- Auth-selection policy coverage for legacy, fail-ambiguous, and explicit `--auth-scheme` behavior.
+- Auth-selection coverage for fail-ambiguous defaults, removed auth-policy flag handling, and explicit `--auth-scheme` behavior.
 - Transform-plan audit JSON coverage, including structured audit fields and the runtime Progenitor CLI bridge audit.
 
 ## Standard
