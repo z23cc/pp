@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
 use openapiv3::OpenAPI;
 use regex::Regex;
-use report::{ReportEntry, ReportStage};
+use report::{ReportEffect, ReportEntry, ReportStage};
 use serde::Serialize;
 use std::path::Path;
 
@@ -49,9 +49,42 @@ pub struct LoadedSpec {
     pub normalization_warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LoadOptions {
     pub slice: slice::SliceOptions,
+    pub policy: NormalizationPolicy,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self {
+            slice: slice::SliceOptions::default(),
+            policy: NormalizationPolicy::strict(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NormalizationPolicy {
+    pub allow_compat_normalization: bool,
+}
+
+impl NormalizationPolicy {
+    pub fn strict() -> Self {
+        Self {
+            allow_compat_normalization: false,
+        }
+    }
+
+    pub fn compatibility() -> Self {
+        Self {
+            allow_compat_normalization: true,
+        }
+    }
+
+    fn allows(self, effect: ReportEffect) -> bool {
+        self.allow_compat_normalization || effect.allowed_without_compat_flag()
+    }
 }
 
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content),
@@ -65,11 +98,12 @@ pub fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpe
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let (mut spec, mut reports) =
         parse(&raw, path).with_context(|| format!("failed to parse spec: {}", path.display()))?;
-    reports.extend(normalize::normalize(&mut spec)?);
     if !options.slice.is_noop() {
         let slice_report = slice::slice_openapi(&mut spec, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
+    reports.extend(normalize::normalize(&mut spec)?);
+    enforce_normalization_policy(&reports, options.policy)?;
     let facts = inspect_openapi(&spec)?;
     let normalization_reports = reports
         .iter()
@@ -96,6 +130,39 @@ pub fn inspect(path: &Path) -> Result<SpecFacts> {
 #[allow(dead_code)]
 pub fn inspect_with_options(path: &Path, options: &LoadOptions) -> Result<SpecFacts> {
     Ok(load_with_options(path, options)?.facts)
+}
+
+fn enforce_normalization_policy(
+    reports: &[ReportEntry],
+    policy: NormalizationPolicy,
+) -> Result<()> {
+    let disallowed = reports
+        .iter()
+        .filter(|report| !policy.allows(report.effect))
+        .collect::<Vec<_>>();
+    if disallowed.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "strict normalization policy rejected {} compatibility normalization(s)",
+        disallowed.len()
+    );
+    for report in disallowed.iter().take(8) {
+        message.push_str(&format!(
+            "\n- {} [{}]: {}",
+            report.code,
+            report.effect,
+            report.formatted_warning()
+        ));
+    }
+    if disallowed.len() > 8 {
+        message.push_str(&format!("\n- ... {} more", disallowed.len() - 8));
+    }
+    message.push_str(
+        "\nPass --allow-compat-normalization to permit explicit compatibility rewrites/drops.",
+    );
+    Err(anyhow!(message))
 }
 
 fn inspect_openapi(spec: &OpenAPI) -> Result<SpecFacts> {

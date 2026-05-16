@@ -4,7 +4,7 @@
 //! compatibility warning searchable and gives future rule modules a stable place
 //! to declare which stage/group emitted a report.
 
-use super::report::{ReportEntry, ReportStage, ReportSubject};
+use super::report::{ReportEffect, ReportEntry, ReportStage, ReportSubject};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleGroup {
@@ -20,6 +20,7 @@ pub enum RuleGroup {
 pub struct NormalizationRule {
     pub code: &'static str,
     pub group: RuleGroup,
+    pub effect: ReportEffect,
     pub summary: &'static str,
 }
 
@@ -59,104 +60,128 @@ pub const RULES: &[NormalizationRule] = &[
     NormalizationRule {
         code: pre_parse::OPENAPI_31_DOWNGRADED,
         group: RuleGroup::OpenApiDowngrade,
+        effect: ReportEffect::LossyRewrite,
         summary: "downgrade supported OpenAPI 3.1 shapes into the 3.0 parser path",
     },
     NormalizationRule {
         code: pre_parse::NUMERIC_BOUNDS_CLAMPED,
         group: RuleGroup::PreParseTolerance,
+        effect: ReportEffect::LossyRewrite,
         summary: "clamp out-of-range numeric bounds before typed deserialization",
     },
     NormalizationRule {
         code: pre_parse::TAG_DESCRIPTIONS_REPLACED,
         group: RuleGroup::PreParseTolerance,
+        effect: ReportEffect::LossyRewrite,
         summary: "replace non-string top-level tag descriptions with empty strings",
     },
     NormalizationRule {
         code: pre_parse::REF_ONLY_OPERATIONS_REPLACED,
         group: RuleGroup::PreParseTolerance,
+        effect: ReportEffect::UnsafeFallback,
         summary: "replace ref-only operations with parseable placeholder operations",
     },
     NormalizationRule {
         code: typed::OPERATION_IDS_SHORTENED,
         group: RuleGroup::OperationNaming,
+        effect: ReportEffect::LosslessRepair,
         summary: "shorten verbose operation IDs while preserving uniqueness",
     },
     NormalizationRule {
         code: typed::SCHEMA_DEFAULTS_DROPPED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::BackendWorkaround,
         summary: "drop schema defaults that typify/progenitor may reject",
     },
     NormalizationRule {
         code: typed::UNSUPPORTED_REQUEST_BODIES_DROPPED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "drop operations whose request body has no supported media type",
     },
     NormalizationRule {
         code: typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::BackendWorkaround,
         summary: "rewrite unsupported deepObject query parameters to form style",
     },
     NormalizationRule {
         code: typed::RESPONSE_SCHEMAS_RELAXED,
         group: RuleGroup::ResponseRelaxation,
+        effect: ReportEffect::BackendWorkaround,
         summary: "relax output-only response schemas for tolerant deserialization",
     },
     NormalizationRule {
         code: typed::OPTIONAL_OBJECT_QUERY_PARAMS_DROPPED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "drop optional object-shaped query params that panic builder generation",
     },
     NormalizationRule {
         code: typed::SCHEMALESS_REQUEST_BODY_DROPPED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "drop schemaless request bodies from generated CLI input",
     },
     NormalizationRule {
         code: typed::RESPONSE_VARIANTS_PRUNED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "keep one response variant per operation before codegen",
     },
     NormalizationRule {
         code: typed::CONTENT_TYPES_PRUNED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "keep one supported request/response content type before codegen",
     },
     NormalizationRule {
         code: typed::ENUM_CONSTRAINT_DROPPED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "drop enum constraints whose values collide after Rust identifier sanitization",
     },
     NormalizationRule {
         code: typed::UNSUPPORTED_SCHEMA_TYPE_REPLACED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::UnsafeFallback,
         summary: "replace unsupported schema type names with a fallback schema",
     },
     NormalizationRule {
         code: typed::PROPERTIES_COLLIDING_DROPPED,
         group: RuleGroup::ProgenitorCompatibility,
+        effect: ReportEffect::SemanticDrop,
         summary: "drop object properties that collide after Rust field-name sanitization",
     },
     NormalizationRule {
         code: slicing::OPERATIONS_FILTERED,
         group: RuleGroup::Slicing,
+        effect: ReportEffect::ExplicitSelection,
         summary: "filter operations according to slice options",
     },
     NormalizationRule {
         code: slicing::COMPONENTS_PRUNED,
         group: RuleGroup::Slicing,
+        effect: ReportEffect::ExplicitSelection,
         summary: "prune components unreachable from the selected operations",
     },
 ];
 
-fn assert_rule_group(code: &'static str, allowed: &[RuleGroup]) {
-    let Some(rule) = RULES.iter().find(|rule| rule.code == code) else {
-        panic!("unregistered normalization report code: {code}");
-    };
+fn rule_for_code(code: &'static str) -> &'static NormalizationRule {
+    RULES
+        .iter()
+        .find(|rule| rule.code == code)
+        .unwrap_or_else(|| panic!("unregistered normalization report code: {code}"))
+}
+
+fn assert_rule_group(code: &'static str, allowed: &[RuleGroup]) -> ReportEffect {
+    let rule = rule_for_code(code);
     assert!(
         allowed.contains(&rule.group),
         "normalization report code {code} belongs to {:?}, expected one of {allowed:?}",
         rule.group
     );
+    rule.effect
 }
 
 pub fn pre_parse_warning(
@@ -164,11 +189,17 @@ pub fn pre_parse_warning(
     message: impl Into<String>,
     subject: Option<ReportSubject>,
 ) -> ReportEntry {
-    assert_rule_group(
+    let effect = assert_rule_group(
         code,
         &[RuleGroup::PreParseTolerance, RuleGroup::OpenApiDowngrade],
     );
-    ReportEntry::warning(ReportStage::PreParseTolerance, code, message, subject)
+    ReportEntry::warning(
+        ReportStage::PreParseTolerance,
+        effect,
+        code,
+        message,
+        subject,
+    )
 }
 
 pub fn typed_warning(
@@ -176,7 +207,7 @@ pub fn typed_warning(
     message: impl Into<String>,
     subject: Option<ReportSubject>,
 ) -> ReportEntry {
-    assert_rule_group(
+    let effect = assert_rule_group(
         code,
         &[
             RuleGroup::OperationNaming,
@@ -184,7 +215,13 @@ pub fn typed_warning(
             RuleGroup::ResponseRelaxation,
         ],
     );
-    ReportEntry::warning(ReportStage::TypedNormalization, code, message, subject)
+    ReportEntry::warning(
+        ReportStage::TypedNormalization,
+        effect,
+        code,
+        message,
+        subject,
+    )
 }
 
 pub fn slicing_warning(
@@ -192,8 +229,8 @@ pub fn slicing_warning(
     message: impl Into<String>,
     subject: Option<ReportSubject>,
 ) -> ReportEntry {
-    assert_rule_group(code, &[RuleGroup::Slicing]);
-    ReportEntry::warning(ReportStage::Slicing, code, message, subject)
+    let effect = assert_rule_group(code, &[RuleGroup::Slicing]);
+    ReportEntry::warning(ReportStage::Slicing, effect, code, message, subject)
 }
 
 #[cfg(test)]

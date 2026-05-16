@@ -20,6 +20,46 @@ pub enum ReportSeverity {
     Warning,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportEffect {
+    /// Deterministic repair that does not intentionally remove API surface.
+    LosslessRepair,
+    /// User-requested selection such as operation slicing.
+    ExplicitSelection,
+    /// Compatibility rewrite that changes how a spec shape is represented.
+    LossyRewrite,
+    /// Compatibility change that removes source spec information or API surface.
+    SemanticDrop,
+    /// Workaround for a known codegen/backend limitation.
+    BackendWorkaround,
+    /// Last-resort replacement where pp cannot preserve source semantics.
+    UnsafeFallback,
+}
+
+impl ReportEffect {
+    pub fn allowed_without_compat_flag(self) -> bool {
+        matches!(self, Self::LosslessRepair | Self::ExplicitSelection)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LosslessRepair => "lossless_repair",
+            Self::ExplicitSelection => "explicit_selection",
+            Self::LossyRewrite => "lossy_rewrite",
+            Self::SemanticDrop => "semantic_drop",
+            Self::BackendWorkaround => "backend_workaround",
+            Self::UnsafeFallback => "unsafe_fallback",
+        }
+    }
+}
+
+impl std::fmt::Display for ReportEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ReportSubject {
@@ -46,6 +86,7 @@ impl ReportSubject {
 pub struct ReportEntry {
     pub stage: ReportStage,
     pub severity: ReportSeverity,
+    pub effect: ReportEffect,
     pub code: &'static str,
     pub message: String,
     pub subject: Option<ReportSubject>,
@@ -74,6 +115,7 @@ impl PartialEq<ReportEntry> for &str {
 impl ReportEntry {
     pub fn warning(
         stage: ReportStage,
+        effect: ReportEffect,
         code: &'static str,
         message: impl Into<String>,
         subject: Option<ReportSubject>,
@@ -81,6 +123,7 @@ impl ReportEntry {
         Self {
             stage,
             severity: ReportSeverity::Warning,
+            effect,
             code,
             message: message.into(),
             subject,

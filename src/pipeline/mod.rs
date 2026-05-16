@@ -17,6 +17,7 @@ pub(crate) struct GenerateRequest {
     pub spec_path: PathBuf,
     pub output_path: PathBuf,
     pub bin_name: Option<String>,
+    pub base_url: Option<String>,
     pub validate: bool,
     pub load_options: LoadOptions,
 }
@@ -86,11 +87,7 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         spec_path: request.spec_path.clone(),
     });
 
-    let loaded = if request.load_options.slice.is_noop() {
-        crate::spec::load(&request.spec_path)?
-    } else {
-        crate::spec::load_with_options(&request.spec_path, &request.load_options)?
-    };
+    let loaded = crate::spec::load_with_options(&request.spec_path, &request.load_options)?;
 
     for report in &loaded.reports {
         progress(GenerateProgress::Warning {
@@ -108,10 +105,15 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         target_bin_name: target_bin_name.clone(),
     });
 
+    let (base_url, base_url_is_relative) = effective_base_url(
+        request.base_url.as_deref(),
+        facts.base_url.as_deref(),
+        facts.base_url_is_relative,
+    )?;
     let manifest = WrapperManifest::new(
         target_bin_name.clone(),
-        facts.base_url.clone(),
-        facts.base_url_is_relative,
+        base_url,
+        base_url_is_relative,
         facts.auth_kind.clone(),
         api_name.clone(),
     );
@@ -161,6 +163,23 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
     })
 }
 
+fn effective_base_url(
+    explicit: Option<&str>,
+    spec_base_url: Option<&str>,
+    spec_base_url_is_relative: bool,
+) -> Result<(String, bool)> {
+    if let Some(base_url) = explicit {
+        let is_relative = !(base_url.starts_with("http://") || base_url.starts_with("https://"));
+        return Ok((base_url.to_string(), is_relative));
+    }
+    let Some(base_url) = spec_base_url else {
+        return Err(anyhow!(
+            "spec has no servers[0].url; pass --base-url explicitly because pp no longer falls back to http://localhost"
+        ));
+    };
+    Ok((base_url.to_string(), spec_base_url_is_relative))
+}
+
 pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationResult> {
     let out = ProcessCommand::new("cargo")
         .arg("build")
@@ -190,6 +209,8 @@ openapi: 3.0.0
 info:
   title: Pipeline Fixture
   version: "1.0.0"
+servers:
+  - url: https://example.test
 paths:
   /pets:
     get:
@@ -212,6 +233,7 @@ paths:
                 spec_path,
                 output_path: output_path.clone(),
                 bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
                 validate: false,
                 load_options: LoadOptions::default(),
             },
@@ -246,6 +268,7 @@ paths:
                 spec_path: spec_path.clone(),
                 output_path: output_path.clone(),
                 bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
                 validate: false,
                 load_options: LoadOptions::default(),
             },

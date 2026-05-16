@@ -15,6 +15,8 @@ openapi: 3.0.0
 info:
   title: Reserved API
   version: "1.0.0"
+servers:
+  - url: https://example.test
 paths:
   /items:
     get:
@@ -196,6 +198,8 @@ fn many_tools_spec(count: usize) -> String {
 info:
   title: Many Tools API
   version: "1.0.0"
+servers:
+  - url: https://example.test
 paths:{paths}
 "#
     )

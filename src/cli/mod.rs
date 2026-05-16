@@ -37,6 +37,9 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
+        /// Permit compatibility rewrites/drops instead of failing strict normalization policy
+        #[arg(long)]
+        allow_compat_normalization: bool,
     },
     /// Generate a Rust CLI crate workspace from an OpenAPI spec
     Generate {
@@ -48,6 +51,9 @@ pub enum Command {
         /// Override the binary name (default: derived from info.title)
         #[arg(short, long)]
         name: Option<String>,
+        /// Explicit base URL when the spec has no servers[0].url or when overriding it
+        #[arg(long)]
+        base_url: Option<String>,
         /// Run `cargo build --release` after generation to validate
         #[arg(long)]
         build: bool,
@@ -63,6 +69,9 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
+        /// Permit compatibility rewrites/drops instead of failing strict normalization policy
+        #[arg(long)]
+        allow_compat_normalization: bool,
     },
     /// Run `cargo build` against an already-generated workspace
     Validate {
@@ -76,6 +85,7 @@ fn load_options(
     include_tags: Vec<String>,
     include_path_prefixes: Vec<String>,
     exclude_operations: Vec<String>,
+    allow_compat_normalization: bool,
 ) -> crate::spec::LoadOptions {
     crate::spec::LoadOptions {
         slice: crate::spec::slice::SliceOptions {
@@ -83,6 +93,11 @@ fn load_options(
             include_tags,
             include_path_prefixes,
             exclude_operations,
+        },
+        policy: if allow_compat_normalization {
+            crate::spec::NormalizationPolicy::compatibility()
+        } else {
+            crate::spec::NormalizationPolicy::strict()
         },
     }
 }
@@ -146,14 +161,18 @@ impl Cli {
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
+                allow_compat_normalization,
             } => {
                 let options = load_options(
                     include_operations,
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
+                    allow_compat_normalization,
                 );
                 if list_operations {
+                    let mut options = options.clone();
+                    options.policy = crate::spec::NormalizationPolicy::compatibility();
                     let loaded = crate::spec::load_with_options(&spec, &options)?;
                     for report in &loaded.reports {
                         eprintln!("pp: {}", report.formatted_warning());
@@ -162,11 +181,7 @@ impl Cli {
                         println!("{}", serde_json::to_string(&operation)?);
                     }
                 } else {
-                    let loaded = if options.slice.is_noop() {
-                        crate::spec::load(&spec)?
-                    } else {
-                        crate::spec::load_with_options(&spec, &options)?
-                    };
+                    let loaded = crate::spec::load_with_options(&spec, &options)?;
                     if reports {
                         println!(
                             "{}",
@@ -192,23 +207,27 @@ impl Cli {
                 spec,
                 output,
                 name,
+                base_url,
                 build,
                 include_operations,
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
+                allow_compat_normalization,
             } => {
                 let options = load_options(
                     include_operations,
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
+                    allow_compat_normalization,
                 );
                 let _result = crate::pipeline::generate_with_progress(
                     crate::pipeline::GenerateRequest {
                         spec_path: spec,
                         output_path: output,
                         bin_name: name,
+                        base_url,
                         validate: build,
                         load_options: options,
                     },

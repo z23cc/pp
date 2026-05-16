@@ -83,7 +83,7 @@ impl WrapperManifest {
     /// Build template data from inspected facts and the selected progenitor crate name.
     pub(crate) fn new(
         bin_name: String,
-        base_url: Option<String>,
+        base_url: String,
         base_url_is_relative: bool,
         auth_kind: AuthKind,
         progenitor_lib_name: String,
@@ -94,7 +94,7 @@ impl WrapperManifest {
         let temp_body_file_prefix = format!("{bin_name}-mcp");
         Self {
             bin_name,
-            base_url: base_url.unwrap_or_else(|| "http://localhost".to_string()),
+            base_url,
             base_url_is_relative,
             auth_kind: auth_kind.clone(),
             progenitor_lib_name,
@@ -282,7 +282,7 @@ paths:
         let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
-            Some("https://example.test".to_string()),
+            "https://example.test".to_string(),
             false,
             AuthKind::Bearer,
             "petstore-api".to_string(),
@@ -307,7 +307,7 @@ paths:
     fn mcp_template_uses_process_local_counter_for_temp_body_files() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
-            Some("https://example.test".to_string()),
+            "https://example.test".to_string(),
             false,
             AuthKind::None,
             "petstore-api".to_string(),
@@ -324,7 +324,7 @@ paths:
     fn cargo_template_contains_workspace_and_api_dependency() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
-            Some("https://example.test".to_string()),
+            "https://example.test".to_string(),
             false,
             AuthKind::None,
             "petstore-api".to_string(),

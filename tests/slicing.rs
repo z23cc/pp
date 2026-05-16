@@ -8,6 +8,8 @@ openapi: 3.0.0
 info:
   title: Slicing Fixture
   version: "1.0.0"
+servers:
+  - url: https://example.test
 paths:
   /pets:
     get:
@@ -149,6 +151,7 @@ fn petstore_store_slice_generates_and_builds() {
         .arg(&out_dir)
         .arg("--include-tag")
         .arg("store")
+        .arg("--allow-compat-normalization")
         .arg("--build")
         .output()
         .expect("failed to run sliced pp generate");

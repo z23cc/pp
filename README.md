@@ -23,13 +23,13 @@ pp --help
 Inspect the facts `pp` derives from a spec:
 
 ```bash
-pp inspect testdata/petstore.yaml
+pp inspect testdata/petstore.yaml --allow-compat-normalization
 ```
 
 Generate a CLI workspace and build it:
 
 ```bash
-pp generate testdata/petstore.yaml -o ./out/petstore --build
+pp generate testdata/petstore.yaml -o ./out/petstore --allow-compat-normalization --build
 ./out/petstore/target/release/swagger-petstore --help
 ```
 
@@ -46,7 +46,7 @@ pp generate testdata/petstore.yaml -o ./out/petstore --build
 Every generated binary supports human CLI commands and an MCP stdio server:
 
 ```bash
-pp generate stripe.yaml -o ./stripe --build
+pp generate stripe.yaml -o ./stripe --allow-compat-normalization --build
 cargo install --path ./stripe
 stripe charges_retrieve --id ch_123
 stripe mcp
@@ -97,21 +97,31 @@ These `_pp_` controls only apply to successful MCP tool results. CLI `--json` ou
 
 ## Spec normalization
 
-`pp` normalizes specs before handing them to `progenitor`. It prints each
-normalization to stderr so generation stays transparent.
+`pp` is strict by default: compatibility rewrites, lossy drops, backend workarounds,
+and unsafe fallback replacements fail generation instead of silently proceeding. Pass
+`--allow-compat-normalization` to explicitly permit these transformations for real-world
+specs that require progenitor compatibility.
 
-Current rules:
+Generated workspaces also require an explicit base URL. `pp` uses `servers[0].url` from
+the spec, or `--base-url <URL>` when the spec does not declare a server; it no longer
+falls back to `http://localhost`.
 
-- Request body media types: keep `application/json` when present, otherwise the
-  first available media type.
-- Response media types: keep `application/json` when present, otherwise the
-  first available media type.
+When compatibility normalization is allowed, `pp` prints each normalization to stderr
+and exposes structured report entries through `pp inspect --reports`.
+
+Current compatibility rules:
+
+- Request body media types: keep `application/json` when present, otherwise fail unless
+  compatibility normalization is explicitly allowed.
+- Response media types: keep `application/json` when present, otherwise fail unless
+  compatibility normalization is explicitly allowed.
 - Response variants: keep `200`, else the first 2xx response, else the first
-  available response such as `default`.
+  available response such as `default`; strict mode rejects this pruning by default.
 - Schemaless request bodies: drop CLI body input when no JSON Schema is present.
-- OpenAPI 3.1: downgrade supported 3.1 shapes into the 3.0 parser path.
+- OpenAPI 3.1: downgrade supported 3.1 shapes into the 3.0 parser path only when
+  compatibility normalization is explicitly allowed.
 - Enum collisions, property name collisions, and unsupported schema types are
-  rewritten when possible so codegen can continue.
+  rewritten when compatibility normalization is explicitly allowed so codegen can continue.
 
 ## Auth
 

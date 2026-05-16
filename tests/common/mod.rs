@@ -12,6 +12,7 @@ pub fn run_pp_generate(spec: &Path, out_dir: &Path) -> Output {
         .arg(spec)
         .arg("-o")
         .arg(out_dir)
+        .arg("--allow-compat-normalization")
         .arg("--build")
         .output()
         .expect("failed to run pp generate")
