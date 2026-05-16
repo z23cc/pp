@@ -33,7 +33,7 @@ Removal condition:
 Before publishing `0.1.0`:
 
 1. Run fast verification from `docs/verification.md`.
-2. Run the standard generated-workspace smoke profile.
+2. Run the standard generated-workspace smoke profile, including the generated sliced petstore smoke.
 3. Run the deep fixture dogfood profile.
 4. Re-run at least one large-spec or documented slice check when the fixture is available.
 5. Confirm `CHANGELOG.md` has the intended `0.1.0` entry.

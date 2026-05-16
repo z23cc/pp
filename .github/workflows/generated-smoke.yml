@@ -28,6 +28,7 @@ jobs:
       - name: Standard generated workspace smoke
         run: |
           cargo test --test petstore_smoke -- --ignored
+          cargo test --test slicing -- --ignored
           cargo test --test bearer_smoke -- --ignored
           cargo test --test apikey_smoke -- --ignored
           cargo test --test basic_smoke -- --ignored

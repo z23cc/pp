@@ -4,26 +4,33 @@
 //! operation names, descriptions, arguments, input schemas, and reserved wrapper
 //! inputs needed by the generated MCP wrapper.
 
+use crate::spec::traversal;
 use anyhow::Result;
 use heck::{ToKebabCase, ToSnakeCase};
 use openapiv3::{
-    OpenAPI, Operation, Parameter, ParameterData, ParameterSchemaOrContent, ReferenceOr,
-    RequestBody, Schema, SchemaKind, Type,
+    OpenAPI, Parameter, ParameterData, ParameterSchemaOrContent, ReferenceOr, RequestBody, Schema,
+    SchemaKind, Type,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MCP_RESERVED_ARG_PREFIX: &str = "_pp_";
+const MCP_FIELD_FILTER_ARG_NAME: &str = "_pp_fields";
+const MCP_COMPACT_ARG_NAME: &str = "_pp_compact";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModel {
     pub mcp_tools: Vec<McpTool>,
+    pub mcp_response_shaping: McpResponseShaping,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct McpTool {
     pub name: String,
+    pub name_literal: String,
+    pub schema_fn_name: String,
+    pub args_static_name: String,
     pub description: String,
     pub description_literal: String,
     pub input_schema: String,
@@ -40,10 +47,32 @@ pub struct McpArg {
     pub body_field: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct McpResponseShaping {
+    pub field_filter: McpResponseShapingArg,
+    pub compact: McpResponseShapingArg,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpResponseShapingArg {
+    pub json_name: String,
+    pub json_name_literal: String,
+    pub schema: Value,
+    pub invalid_type_message: String,
+    pub invalid_type_message_literal: String,
+}
+
+impl Default for McpResponseShaping {
+    fn default() -> Self {
+        mcp_response_shaping()
+    }
+}
+
 impl ApiModel {
     pub fn from_openapi(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Self> {
         Ok(Self {
             mcp_tools: mcp_tools(api, auth_env_var)?,
+            mcp_response_shaping: mcp_response_shaping(),
         })
     }
 }
@@ -55,75 +84,8 @@ pub(crate) fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec
         api,
         seen_tool_names: BTreeMap::new(),
     };
-    for (path, item) in &api.paths.paths {
-        let ReferenceOr::Item(item) = item else {
-            continue;
-        };
-        let path_params = item.parameters.clone();
-        push_operation(
-            &mut tools,
-            "GET",
-            path,
-            item.get.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "PUT",
-            path,
-            item.put.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "POST",
-            path,
-            item.post.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "DELETE",
-            path,
-            item.delete.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "OPTIONS",
-            path,
-            item.options.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "HEAD",
-            path,
-            item.head.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "PATCH",
-            path,
-            item.patch.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
-        push_operation(
-            &mut tools,
-            "TRACE",
-            path,
-            item.trace.as_ref(),
-            &path_params,
-            &mut ctx,
-        )?;
+    for operation in traversal::operations(api) {
+        push_operation(&mut tools, operation, &mut ctx)?;
     }
     Ok(tools)
 }
@@ -136,15 +98,13 @@ struct McpBuildContext<'a> {
 
 fn push_operation(
     tools: &mut Vec<McpTool>,
-    method: &str,
-    path: &str,
-    operation: Option<&Operation>,
-    path_params: &[ReferenceOr<Parameter>],
+    operation_ref: traversal::OperationRef<'_>,
     ctx: &mut McpBuildContext<'_>,
 ) -> Result<()> {
-    let Some(operation) = operation else {
-        return Ok(());
-    };
+    let method = operation_ref.method_uppercase;
+    let path = operation_ref.path;
+    let path_params = operation_ref.path_parameters;
+    let operation = operation_ref.operation;
     let Some(raw_name) = operation.operation_id.clone() else {
         return Ok(());
     };
@@ -204,7 +164,11 @@ fn push_operation(
     let input_schema = serde_json::to_string(&schema).expect("schema serializes");
     let input_schema_literal =
         serde_json::to_string(&input_schema).expect("schema literal serializes");
+    let tool_index = tools.len() + 1;
     tools.push(McpTool {
+        name_literal: serde_json::to_string(&name).expect("tool name serializes"),
+        schema_fn_name: format!("schema_{tool_index}"),
+        args_static_name: format!("ARGS_{tool_index}"),
         name,
         description_literal: serde_json::to_string(&description).expect("description serializes"),
         description,
@@ -219,22 +183,42 @@ fn operation_name(operation_id: &str) -> String {
     operation_id.to_snake_case()
 }
 
+fn mcp_response_shaping() -> McpResponseShaping {
+    let field_filter_message = "_pp_fields must be an array of dot paths".to_string();
+    let compact_message = "_pp_compact must be a boolean".to_string();
+    McpResponseShaping {
+        field_filter: McpResponseShapingArg {
+            json_name: MCP_FIELD_FILTER_ARG_NAME.to_string(),
+            json_name_literal: serde_json::to_string(MCP_FIELD_FILTER_ARG_NAME)
+                .expect("reserved arg name serializes"),
+            schema: json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "MCP-only response shaping: keep only these object dot paths."
+            }),
+            invalid_type_message_literal: serde_json::to_string(&field_filter_message)
+                .expect("reserved arg message serializes"),
+            invalid_type_message: field_filter_message,
+        },
+        compact: McpResponseShapingArg {
+            json_name: MCP_COMPACT_ARG_NAME.to_string(),
+            json_name_literal: serde_json::to_string(MCP_COMPACT_ARG_NAME)
+                .expect("reserved arg name serializes"),
+            schema: json!({
+                "type": "boolean",
+                "description": "MCP-only response shaping: remove nulls and empty arrays/objects from successful structured results."
+            }),
+            invalid_type_message_literal: serde_json::to_string(&compact_message)
+                .expect("reserved arg message serializes"),
+            invalid_type_message: compact_message,
+        },
+    }
+}
+
 fn add_mcp_reserved_properties(properties: &mut Map<String, Value>) {
-    properties.insert(
-        "_pp_fields".to_string(),
-        json!({
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "MCP-only response shaping: keep only these object dot paths."
-        }),
-    );
-    properties.insert(
-        "_pp_compact".to_string(),
-        json!({
-            "type": "boolean",
-            "description": "MCP-only response shaping: remove nulls and empty arrays/objects from successful structured results."
-        }),
-    );
+    let shaping = mcp_response_shaping();
+    properties.insert(shaping.field_filter.json_name, shaping.field_filter.schema);
+    properties.insert(shaping.compact.json_name, shaping.compact.schema);
 }
 
 fn reject_reserved_arg(name: &str, tool_name: &str, operation_id: &str) -> Result<()> {
@@ -531,6 +515,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn api_model_exposes_response_shaping_runtime_inputs() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Shape Metadata API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let model = ApiModel::from_openapi(&api, None).unwrap();
+
+        assert_eq!(
+            model.mcp_response_shaping.field_filter.json_name,
+            "_pp_fields"
+        );
+        assert_eq!(
+            model.mcp_response_shaping.field_filter.json_name_literal,
+            "\"_pp_fields\""
+        );
+        assert_eq!(
+            model.mcp_response_shaping.field_filter.schema["items"]["type"],
+            "string"
+        );
+        assert_eq!(model.mcp_response_shaping.compact.json_name, "_pp_compact");
+        assert_eq!(model.mcp_response_shaping.compact.schema["type"], "boolean");
+    }
+
+    #[test]
+    fn mcp_tools_assign_stable_runtime_metadata() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Runtime Metadata API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+  /items/{id}:
+    get:
+      operationId: getItem
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let tools = mcp_tools(&api, None).unwrap();
+
+        assert_eq!(tools[0].name, "list_items");
+        assert_eq!(tools[0].name_literal, "\"list_items\"");
+        assert_eq!(tools[0].schema_fn_name, "schema_1");
+        assert_eq!(tools[0].args_static_name, "ARGS_1");
+        assert_eq!(tools[1].name, "get_item");
+        assert_eq!(tools[1].schema_fn_name, "schema_2");
+        assert_eq!(tools[1].args_static_name, "ARGS_2");
+    }
+
+    #[test]
     fn mcp_petstore_request_body_ref_is_flattened() {
         let spec = std::fs::read_to_string("testdata/petstore.yaml").unwrap();
         let mut api: OpenAPI = serde_yaml::from_str(&spec).unwrap();
@@ -618,6 +669,43 @@ components:
             .args
             .iter()
             .any(|arg| arg.json_name.starts_with("_pp_")));
+    }
+
+    #[test]
+    fn mcp_includes_path_level_parameters() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Path Parameters API
+  version: "1.0.0"
+paths:
+  /items/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getItem
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let tools = mcp_tools(&api, None).unwrap();
+        let tool = tools.iter().find(|tool| tool.name == "get_item").unwrap();
+        let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
+
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("id")));
+        assert!(tool
+            .args
+            .iter()
+            .any(|arg| arg.json_name == "id" && arg.cli_name == "id"));
     }
 
     #[test]

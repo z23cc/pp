@@ -1,14 +1,10 @@
-use anyhow::{bail, Result};
-use openapiv3::{
-    AdditionalProperties, Header, MediaType, OpenAPI, Operation, Parameter, ParameterData,
-    ParameterSchemaOrContent, PathItem, ReferenceOr, RequestBody, Response, Schema, SchemaKind,
-    Type,
-};
-use serde::Serialize;
-use std::collections::BTreeSet;
-
 use super::normalization_rules::{self as rules, slicing};
+use super::references::{collect_reachable_components, ComponentRefs};
 use super::report::{ReportEntry, ReportSubject};
+use super::traversal;
+use anyhow::{bail, Result};
+use openapiv3::{OpenAPI, Operation, PathItem, ReferenceOr, Response};
+use serde::Serialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SliceOptions {
@@ -99,21 +95,19 @@ pub struct PrunedComponents {
 }
 
 pub fn list_operations(api: &OpenAPI) -> Vec<OperationListing> {
-    let mut out = Vec::new();
-    for (path, path_item) in api.paths.iter() {
-        let ReferenceOr::Item(item) = path_item else {
-            continue;
-        };
-        for (method, operation) in item.iter() {
-            out.push(OperationListing {
-                id: operation_identifier(method, path, operation),
-                method: method.to_string(),
-                path: path.clone(),
-                tags: operation.tags.clone(),
-            });
-        }
-    }
-    out
+    traversal::operations(api)
+        .into_iter()
+        .map(|operation| OperationListing {
+            id: traversal::operation_identifier(
+                operation.method,
+                operation.path,
+                operation.operation,
+            ),
+            method: operation.method.to_string(),
+            path: operation.path.to_string(),
+            tags: operation.operation.tags.clone(),
+        })
+        .collect()
 }
 
 pub fn slice_openapi(api: &mut OpenAPI, options: &SliceOptions) -> Result<SliceReport> {
@@ -247,7 +241,7 @@ fn operation_matches(
     operation: &Operation,
     options: &SliceOptions,
 ) -> bool {
-    let id = operation_identifier(method, path, operation);
+    let id = traversal::operation_identifier(method, path, operation);
     if options
         .exclude_operations
         .iter()
@@ -274,13 +268,6 @@ fn operation_matches(
             .any(|prefix| path.starts_with(prefix))
 }
 
-fn operation_identifier(method: &str, path: &str, operation: &Operation) -> String {
-    operation
-        .operation_id
-        .clone()
-        .unwrap_or_else(|| format!("{method} {path}"))
-}
-
 fn path_item_has_operations(item: &PathItem) -> bool {
     item.get.is_some()
         || item.put.is_some()
@@ -290,33 +277,6 @@ fn path_item_has_operations(item: &PathItem) -> bool {
         || item.head.is_some()
         || item.patch.is_some()
         || item.trace.is_some()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComponentKind {
-    Schema,
-    Response,
-    Parameter,
-    RequestBody,
-    Header,
-    SecurityScheme,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkItem {
-    kind: ComponentKind,
-    name_index: usize,
-}
-
-#[derive(Default)]
-struct Refs {
-    schemas: BTreeSet<String>,
-    responses: BTreeSet<String>,
-    parameters: BTreeSet<String>,
-    request_bodies: BTreeSet<String>,
-    headers: BTreeSet<String>,
-    security_schemes: BTreeSet<String>,
-    names: Vec<String>,
 }
 
 fn drop_codegen_ignored_graph_roots(api: &mut OpenAPI) {
@@ -380,329 +340,7 @@ fn operations_mut(item: &mut PathItem) -> Vec<&mut Operation> {
     operations
 }
 
-fn collect_reachable_components(api: &OpenAPI) -> Refs {
-    let mut refs = Refs::default();
-    let mut worklist = Vec::new();
-    let mut inherits_root_security = false;
-
-    for path_item in api.paths.paths.values() {
-        let ReferenceOr::Item(item) = path_item else {
-            continue;
-        };
-        for parameter in &item.parameters {
-            scan_parameter_ref(parameter, &mut refs, &mut worklist);
-        }
-        for (_method, operation) in item.iter() {
-            scan_operation(operation, &mut refs, &mut worklist);
-            match &operation.security {
-                Some(requirements) => {
-                    scan_security_requirements(requirements, &mut refs, &mut worklist)
-                }
-                None => inherits_root_security = true,
-            }
-        }
-    }
-
-    if inherits_root_security {
-        if let Some(requirements) = &api.security {
-            scan_security_requirements(requirements, &mut refs, &mut worklist);
-        }
-    }
-
-    while let Some(item) = worklist.pop() {
-        let Some(components) = &api.components else {
-            continue;
-        };
-        let name = refs.names[item.name_index].clone();
-        match item.kind {
-            ComponentKind::Schema => {
-                if let Some(schema) = components.schemas.get(&name) {
-                    scan_schema_ref(schema, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::Response => {
-                if let Some(response) = components.responses.get(&name) {
-                    scan_response_ref(response, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::Parameter => {
-                if let Some(parameter) = components.parameters.get(&name) {
-                    scan_parameter_ref(parameter, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::RequestBody => {
-                if let Some(request_body) = components.request_bodies.get(&name) {
-                    scan_request_body_ref(request_body, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::Header => {
-                if let Some(header) = components.headers.get(&name) {
-                    scan_header_ref(header, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::SecurityScheme => {}
-        }
-    }
-
-    refs
-}
-
-fn scan_operation(operation: &Operation, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    for parameter in &operation.parameters {
-        scan_parameter_ref(parameter, refs, worklist);
-    }
-    if let Some(request_body) = &operation.request_body {
-        scan_request_body_ref(request_body, refs, worklist);
-    }
-    scan_responses(&operation.responses, refs, worklist);
-}
-
-fn scan_responses(responses: &openapiv3::Responses, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    if let Some(response) = &responses.default {
-        scan_response_ref(response, refs, worklist);
-    }
-    for response in responses.responses.values() {
-        scan_response_ref(response, refs, worklist);
-    }
-}
-
-fn scan_security_requirements(
-    requirements: &[openapiv3::SecurityRequirement],
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    for requirement in requirements {
-        for name in requirement.keys() {
-            add_named_ref(ComponentKind::SecurityScheme, name, refs, worklist);
-        }
-    }
-}
-
-fn scan_parameter_ref(
-    parameter: &ReferenceOr<Parameter>,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match parameter {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(parameter) => scan_parameter(parameter, refs, worklist),
-    }
-}
-
-fn scan_parameter(parameter: &Parameter, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    scan_parameter_data(parameter.parameter_data_ref(), refs, worklist);
-}
-
-fn scan_parameter_data(data: &ParameterData, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    scan_parameter_format(&data.format, refs, worklist);
-}
-
-fn scan_parameter_format(
-    format: &ParameterSchemaOrContent,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match format {
-        ParameterSchemaOrContent::Schema(schema) => scan_schema_ref(schema, refs, worklist),
-        ParameterSchemaOrContent::Content(content) => scan_content(content, refs, worklist),
-    }
-}
-
-fn scan_request_body_ref(
-    request_body: &ReferenceOr<RequestBody>,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match request_body {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(request_body) => scan_request_body(request_body, refs, worklist),
-    }
-}
-
-fn scan_request_body(request_body: &RequestBody, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    scan_content(&request_body.content, refs, worklist);
-}
-
-fn scan_response_ref(
-    response: &ReferenceOr<Response>,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match response {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(response) => scan_response(response, refs, worklist),
-    }
-}
-
-fn scan_response(response: &Response, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    for header in response.headers.values() {
-        scan_header_ref(header, refs, worklist);
-    }
-    scan_content(&response.content, refs, worklist);
-}
-
-fn scan_header_ref(header: &ReferenceOr<Header>, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    match header {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(header) => scan_header(header, refs, worklist),
-    }
-}
-
-fn scan_header(header: &Header, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    scan_parameter_format(&header.format, refs, worklist);
-}
-
-fn scan_content(
-    content: &indexmap::IndexMap<String, MediaType>,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    for media_type in content.values() {
-        scan_media_type(media_type, refs, worklist);
-    }
-}
-
-fn scan_media_type(media_type: &MediaType, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    if let Some(schema) = &media_type.schema {
-        scan_schema_ref(schema, refs, worklist);
-    }
-    for encoding in media_type.encoding.values() {
-        for header in encoding.headers.values() {
-            scan_header_ref(header, refs, worklist);
-        }
-    }
-}
-
-fn scan_schema_ref(schema: &ReferenceOr<Schema>, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    match schema {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(schema) => scan_schema(schema, refs, worklist),
-    }
-}
-
-fn scan_boxed_schema_ref(
-    schema: &ReferenceOr<Box<Schema>>,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match schema {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(schema) => scan_schema(schema, refs, worklist),
-    }
-}
-
-fn scan_schema(schema: &Schema, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    match &schema.schema_kind {
-        SchemaKind::Type(typ) => scan_type(typ, refs, worklist),
-        SchemaKind::OneOf { one_of } => scan_schema_refs(one_of, refs, worklist),
-        SchemaKind::AllOf { all_of } => scan_schema_refs(all_of, refs, worklist),
-        SchemaKind::AnyOf { any_of } => scan_schema_refs(any_of, refs, worklist),
-        SchemaKind::Not { not } => scan_schema_ref(not, refs, worklist),
-        SchemaKind::Any(any) => {
-            for property in any.properties.values() {
-                scan_boxed_schema_ref(property, refs, worklist);
-            }
-            if let Some(additional) = &any.additional_properties {
-                scan_additional_properties(additional, refs, worklist);
-            }
-            if let Some(items) = &any.items {
-                scan_boxed_schema_ref(items, refs, worklist);
-            }
-            scan_schema_refs(&any.one_of, refs, worklist);
-            scan_schema_refs(&any.all_of, refs, worklist);
-            scan_schema_refs(&any.any_of, refs, worklist);
-            if let Some(not) = &any.not {
-                scan_schema_ref(not, refs, worklist);
-            }
-        }
-    }
-}
-
-fn scan_schema_refs(
-    schemas: &[ReferenceOr<Schema>],
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    for schema in schemas {
-        scan_schema_ref(schema, refs, worklist);
-    }
-}
-
-fn scan_type(typ: &Type, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    match typ {
-        Type::Object(object) => {
-            for property in object.properties.values() {
-                scan_boxed_schema_ref(property, refs, worklist);
-            }
-            if let Some(additional) = &object.additional_properties {
-                scan_additional_properties(additional, refs, worklist);
-            }
-        }
-        Type::Array(array) => {
-            if let Some(items) = &array.items {
-                scan_boxed_schema_ref(items, refs, worklist);
-            }
-        }
-        Type::String(_) | Type::Number(_) | Type::Integer(_) | Type::Boolean(_) => {}
-    }
-}
-
-fn scan_additional_properties(
-    additional: &AdditionalProperties,
-    refs: &mut Refs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match additional {
-        AdditionalProperties::Any(_) => {}
-        AdditionalProperties::Schema(schema) => scan_schema_ref(schema, refs, worklist),
-    }
-}
-
-fn add_component_ref(reference: &str, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    let Some((kind, name)) = parse_component_ref(reference) else {
-        return;
-    };
-    add_named_ref(kind, &name, refs, worklist);
-}
-
-fn add_named_ref(kind: ComponentKind, name: &str, refs: &mut Refs, worklist: &mut Vec<WorkItem>) {
-    let inserted = match kind {
-        ComponentKind::Schema => refs.schemas.insert(name.to_string()),
-        ComponentKind::Response => refs.responses.insert(name.to_string()),
-        ComponentKind::Parameter => refs.parameters.insert(name.to_string()),
-        ComponentKind::RequestBody => refs.request_bodies.insert(name.to_string()),
-        ComponentKind::Header => refs.headers.insert(name.to_string()),
-        ComponentKind::SecurityScheme => refs.security_schemes.insert(name.to_string()),
-    };
-    if inserted {
-        refs.names.push(name.to_string());
-        worklist.push(WorkItem {
-            kind,
-            name_index: refs.names.len() - 1,
-        });
-    }
-}
-
-fn parse_component_ref(reference: &str) -> Option<(ComponentKind, String)> {
-    let rest = reference.strip_prefix("#/components/")?;
-    let (category, raw_name) = rest.split_once('/')?;
-    let kind = match category {
-        "schemas" => ComponentKind::Schema,
-        "responses" => ComponentKind::Response,
-        "parameters" => ComponentKind::Parameter,
-        "requestBodies" => ComponentKind::RequestBody,
-        "headers" => ComponentKind::Header,
-        "securitySchemes" => ComponentKind::SecurityScheme,
-        _ => return None,
-    };
-    Some((kind, decode_json_pointer(raw_name)))
-}
-
-fn decode_json_pointer(input: &str) -> String {
-    input.replace("~1", "/").replace("~0", "~")
-}
-
-fn prune_components(api: &mut OpenAPI, refs: &Refs) -> PrunedComponents {
+fn prune_components(api: &mut OpenAPI, refs: &ComponentRefs) -> PrunedComponents {
     let Some(components) = api.components.as_mut() else {
         return PrunedComponents::default();
     };
@@ -752,6 +390,30 @@ fn prune_components(api: &mut OpenAPI, refs: &Refs) -> PrunedComponents {
 mod tests {
     use super::*;
     use crate::spec::report::ReportStage;
+
+    #[test]
+    fn list_operations_uses_method_path_fallback_id_without_operation_id() {
+        let api: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info: { title: Fallback Operation IDs, version: '1.0' }
+paths:
+  /items/{id}:
+    patch:
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        let operations = list_operations(&api);
+
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].id, "patch /items/{id}");
+        assert_eq!(operations[0].method, "patch");
+        assert_eq!(operations[0].path, "/items/{id}");
+    }
 
     #[test]
     fn filters_and_prunes_components() {

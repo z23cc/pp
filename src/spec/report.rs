@@ -4,19 +4,24 @@
 //! by formatting each warning report back to its original message at CLI and
 //! pipeline boundaries.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ReportStage {
     PreParseTolerance,
     TypedNormalization,
     Slicing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ReportSeverity {
     Warning,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ReportSubject {
     Operation(String),
     Schema(String),
@@ -37,7 +42,7 @@ impl ReportSubject {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReportEntry {
     pub stage: ReportStage,
     pub severity: ReportSeverity,

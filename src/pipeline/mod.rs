@@ -4,7 +4,7 @@
 //! argument handling and the current spec/progenitor/render implementation
 //! without committing to a public library API.
 
-use crate::backend::{ApiBackend, ApiCrateRequest, ProgenitorBackend};
+use crate::backend::{ApiBackend, ApiCrateRequest, BackendDiagnostic, ProgenitorBackend};
 use crate::model::ApiModel;
 use crate::render::WrapperManifest;
 use crate::spec::{report::ReportEntry, AuthKind, LoadOptions, SpecFacts};
@@ -27,6 +27,7 @@ pub(crate) struct GenerateResult {
     pub facts: SpecFacts,
     pub reports: Vec<ReportEntry>,
     pub formatted_warnings: Vec<String>,
+    pub backend_diagnostics: Vec<BackendDiagnostic>,
     pub output_path: PathBuf,
     pub target_bin_name: String,
     pub validation: Option<ValidationResult>,
@@ -70,6 +71,15 @@ pub(crate) fn generate(request: GenerateRequest) -> Result<GenerateResult> {
 
 pub(crate) fn generate_with_progress(
     request: GenerateRequest,
+    progress: impl FnMut(GenerateProgress),
+) -> Result<GenerateResult> {
+    let backend = ProgenitorBackend;
+    generate_with_backend_and_progress(request, &backend, progress)
+}
+
+pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
+    request: GenerateRequest,
+    backend: &B,
     mut progress: impl FnMut(GenerateProgress),
 ) -> Result<GenerateResult> {
     progress(GenerateProgress::Inspecting {
@@ -106,7 +116,7 @@ pub(crate) fn generate_with_progress(
         api_name.clone(),
     );
     let api_model = ApiModel::from_openapi(&loaded.api, manifest.auth_env_var.as_deref())?;
-    let manifest = manifest.with_mcp_tools(api_model.mcp_tools);
+    let manifest = manifest.with_api_model(api_model);
 
     if let AuthKind::QueryApiKey { param_name } = &manifest.auth_kind {
         progress(GenerateProgress::QueryApiKeyAutoInjectionLimited {
@@ -116,8 +126,7 @@ pub(crate) fn generate_with_progress(
 
     progress(GenerateProgress::GeneratingApiCrate);
     let api_out_dir = request.output_path.join("api");
-    let backend = ProgenitorBackend;
-    backend
+    let api_output = backend
         .generate_api_crate(ApiCrateRequest {
             api: &loaded.api,
             out_dir: &api_out_dir,
@@ -145,6 +154,7 @@ pub(crate) fn generate_with_progress(
         facts,
         reports: loaded.reports,
         formatted_warnings: loaded.normalization_warnings,
+        backend_diagnostics: api_output.diagnostics,
         output_path: request.output_path,
         target_bin_name,
         validation,
@@ -173,6 +183,7 @@ pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::ApiCrateOutput;
 
     const MINIMAL_SPEC: &str = r#"
 openapi: 3.0.0
@@ -194,19 +205,37 @@ paths:
         let spec_path = write_minimal_spec(temp.path());
         let output_path = temp.path().join("out");
 
-        let result = generate(GenerateRequest {
-            spec_path,
-            output_path: output_path.clone(),
-            bin_name: Some("fixture-cli".to_string()),
-            validate: false,
-            load_options: LoadOptions::default(),
-        })
+        let backend = FakeBackend::with_diagnostics(vec![BackendDiagnostic::SourceTransform {
+            name: "fake_transform",
+            changed: true,
+            replacement_count: 2,
+        }]);
+
+        let result = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path: output_path.clone(),
+                bin_name: Some("fixture-cli".to_string()),
+                validate: false,
+                load_options: LoadOptions::default(),
+            },
+            &backend,
+            |_| {},
+        )
         .expect("generate succeeds");
 
         assert_eq!(result.facts.operation_count, 1);
         assert_eq!(result.target_bin_name, "fixture-cli");
         assert_eq!(result.output_path, output_path);
         assert!(result.validation.is_none());
+        assert_eq!(
+            result.backend_diagnostics,
+            vec![BackendDiagnostic::SourceTransform {
+                name: "fake_transform",
+                changed: true,
+                replacement_count: 2,
+            }]
+        );
         assert!(result.output_path.join("Cargo.toml").exists());
         assert!(result.output_path.join("api/src/lib.rs").exists());
     }
@@ -218,7 +247,9 @@ paths:
         let output_path = temp.path().join("out");
         let mut events = Vec::new();
 
-        generate_with_progress(
+        let backend = FakeBackend::default();
+
+        generate_with_backend_and_progress(
             GenerateRequest {
                 spec_path: spec_path.clone(),
                 output_path: output_path.clone(),
@@ -226,6 +257,7 @@ paths:
                 validate: false,
                 load_options: LoadOptions::default(),
             },
+            &backend,
             |event| match event {
                 GenerateProgress::Inspecting { spec_path: path } => {
                     assert_eq!(path, spec_path);
@@ -267,5 +299,44 @@ paths:
         let spec_path = dir.join("spec.yaml");
         std::fs::write(&spec_path, MINIMAL_SPEC).expect("write spec");
         spec_path
+    }
+
+    #[derive(Default)]
+    struct FakeBackend {
+        output: ApiCrateOutput,
+    }
+
+    impl FakeBackend {
+        fn with_diagnostics(diagnostics: Vec<BackendDiagnostic>) -> Self {
+            Self {
+                output: ApiCrateOutput { diagnostics },
+            }
+        }
+    }
+
+    impl ApiBackend for FakeBackend {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<ApiCrateOutput> {
+            assert_eq!(request.crate_name, "fixture-cli-api");
+            assert_eq!(request.api.paths.paths.len(), 1);
+
+            std::fs::create_dir_all(request.out_dir.join("src"))?;
+            std::fs::write(
+                request.out_dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                    request.crate_name
+                ),
+            )?;
+            std::fs::write(
+                request.out_dir.join("src/lib.rs"),
+                "pub fn fake_backend_marker() {}\n",
+            )?;
+
+            Ok(self.output.clone())
+        }
     }
 }

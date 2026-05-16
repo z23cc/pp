@@ -1,6 +1,6 @@
 //! Render the wrapper crate around progenitor's generated API crate.
 
-use crate::model::McpTool;
+use crate::model::{ApiModel, McpResponseShaping, McpTool};
 use crate::spec::AuthKind;
 use anyhow::{Context, Result};
 use heck::ToShoutySnakeCase;
@@ -33,6 +33,16 @@ pub struct WrapperManifest {
     pub basic_password_env_var: String,
     pub auth_env_var: Option<String>,
     pub mcp_tools: Vec<McpTool>,
+    pub mcp_runtime: McpRuntimeManifest,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpRuntimeManifest {
+    pub tools_page_size: usize,
+    pub temp_body_file_prefix: String,
+    pub temp_body_file_prefix_literal: String,
+    pub auth_missing_env_literal: Option<String>,
+    pub response_shaping: McpResponseShaping,
 }
 
 impl WrapperManifest {
@@ -46,6 +56,8 @@ impl WrapperManifest {
     ) -> Self {
         let env_prefix = bin_name.to_shouty_snake_case();
         let progenitor_crate_name = progenitor_lib_name.replace('-', "_");
+        let auth_env_var = auth_env_var(&auth_kind, &env_prefix);
+        let temp_body_file_prefix = format!("{bin_name}-mcp");
         Self {
             bin_name,
             base_url: base_url.unwrap_or_else(|| "http://localhost".to_string()),
@@ -57,13 +69,24 @@ impl WrapperManifest {
             api_key_env_var: format!("{env_prefix}_API_KEY"),
             basic_user_env_var: format!("{env_prefix}_USER"),
             basic_password_env_var: format!("{env_prefix}_PASSWORD"),
-            auth_env_var: auth_env_var(&auth_kind, &env_prefix),
+            auth_env_var: auth_env_var.clone(),
             mcp_tools: Vec::new(),
+            mcp_runtime: McpRuntimeManifest {
+                tools_page_size: 100,
+                temp_body_file_prefix_literal: serde_json::to_string(&temp_body_file_prefix)
+                    .expect("temp body file prefix serializes"),
+                temp_body_file_prefix,
+                auth_missing_env_literal: auth_env_var
+                    .as_ref()
+                    .map(|env| serde_json::to_string(env).expect("auth env var serializes")),
+                response_shaping: McpResponseShaping::default(),
+            },
         }
     }
 
-    pub fn with_mcp_tools(mut self, mcp_tools: Vec<McpTool>) -> Self {
-        self.mcp_tools = mcp_tools;
+    pub fn with_api_model(mut self, api_model: ApiModel) -> Self {
+        self.mcp_tools = api_model.mcp_tools;
+        self.mcp_runtime.response_shaping = api_model.mcp_response_shaping;
         self
     }
 }
@@ -149,6 +172,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_template_uses_manifest_runtime_metadata() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Metadata API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let manifest = WrapperManifest::new(
+            "petstore".to_string(),
+            Some("https://example.test".to_string()),
+            false,
+            AuthKind::Bearer,
+            "petstore-api".to_string(),
+        );
+        let api_model = ApiModel::from_openapi(&api, manifest.auth_env_var.as_deref()).unwrap();
+        let manifest = manifest.with_api_model(api_model);
+
+        let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("const TOOLS_PAGE_SIZE: usize = 100;"));
+        assert!(rendered.contains("fn schema_1() -> rmcp::model::JsonObject"));
+        assert!(rendered.contains("static ARGS_1: &[ArgDef]"));
+        assert!(rendered.contains("name: \"list_items\""));
+        assert!(rendered.contains("parse_field_filter(arguments.get(\"_pp_fields\"))"));
+        assert!(rendered.contains(".get(\"_pp_compact\")"));
+        assert!(rendered.contains("McpError::invalid_params(\"_pp_compact must be a boolean\""));
+        assert!(rendered.contains("\"env\": \"PETSTORE_TOKEN\""));
+        assert!(rendered.contains("\"petstore-mcp\""));
+    }
+
+    #[test]
     fn mcp_template_uses_process_local_counter_for_temp_body_files() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
@@ -162,7 +224,7 @@ mod tests {
 
         assert!(rendered.contains("static MCP_BODY_FILE_COUNTER: AtomicU64"));
         assert!(rendered.contains("MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)"));
-        assert!(rendered.contains("{}-{}-{}-body.json"));
+        assert!(rendered.contains("{}-{}-{}-{}-body.json"));
     }
 
     #[test]

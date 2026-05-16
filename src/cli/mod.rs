@@ -22,6 +22,9 @@ pub enum Command {
         /// Print stable JSONL rows for operations after any slice filters
         #[arg(long)]
         list_operations: bool,
+        /// Print JSON with facts plus structured preparation report entries
+        #[arg(long, conflicts_with = "list_operations")]
+        reports: bool,
         /// Include an operation by operationId (repeatable)
         #[arg(long = "include-operation")]
         include_operations: Vec<String>,
@@ -138,6 +141,7 @@ impl Cli {
             Command::Inspect {
                 spec,
                 list_operations,
+                reports,
                 include_operations,
                 include_tags,
                 include_path_prefixes,
@@ -163,14 +167,24 @@ impl Cli {
                     } else {
                         crate::spec::load_with_options(&spec, &options)?
                     };
-                    for report in loaded.reports.iter().filter(|report| {
-                        report.stage == crate::spec::report::ReportStage::PreParseTolerance
-                            || report.code
-                                == crate::spec::normalization_rules::typed::OPERATION_IDS_SHORTENED
-                    }) {
-                        eprintln!("pp: {}", report.formatted_warning());
+                    if reports {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "facts": loaded.facts,
+                                "reports": loaded.reports,
+                            }))?
+                        );
+                    } else {
+                        for report in loaded.reports.iter().filter(|report| {
+                            report.stage == crate::spec::report::ReportStage::PreParseTolerance
+                                || report.code
+                                    == crate::spec::normalization_rules::typed::OPERATION_IDS_SHORTENED
+                        }) {
+                            eprintln!("pp: {}", report.formatted_warning());
+                        }
+                        println!("{}", serde_json::to_string_pretty(&loaded.facts)?);
                     }
-                    println!("{}", serde_json::to_string_pretty(&loaded.facts)?);
                 }
                 Ok(())
             }

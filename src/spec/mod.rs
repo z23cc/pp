@@ -4,12 +4,14 @@
 pub(crate) mod normalization_rules;
 pub mod normalize;
 mod pre_parse;
+pub(crate) mod references;
 pub mod report;
 pub mod slice;
+pub(crate) mod traversal;
 
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
-use openapiv3::{OpenAPI, Operation, Parameter, ReferenceOr, SecurityScheme};
+use openapiv3::{OpenAPI, Parameter, ReferenceOr, SecurityScheme};
 use regex::Regex;
 use report::{ReportEntry, ReportStage};
 use serde::Serialize;
@@ -154,26 +156,7 @@ fn parse(raw: &str, _path: &Path) -> Result<(OpenAPI, Vec<ReportEntry>)> {
 }
 
 fn count_operations(spec: &OpenAPI) -> usize {
-    let mut n = 0;
-    for (_, path_item) in spec.paths.iter() {
-        if let ReferenceOr::Item(item) = path_item {
-            for op in [
-                &item.get,
-                &item.put,
-                &item.post,
-                &item.delete,
-                &item.options,
-                &item.head,
-                &item.patch,
-                &item.trace,
-            ] {
-                if op.is_some() {
-                    n += 1;
-                }
-            }
-        }
-    }
-    n
+    traversal::operations(spec).len()
 }
 
 fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
@@ -223,29 +206,7 @@ fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
 }
 
 fn derive_query_api_key_auth(spec: &OpenAPI) -> Option<AuthKind> {
-    let mut operations = Vec::new();
-    for (_, path_item) in spec.paths.iter() {
-        let ReferenceOr::Item(item) = path_item else {
-            continue;
-        };
-        for operation in [
-            &item.get,
-            &item.put,
-            &item.post,
-            &item.delete,
-            &item.options,
-            &item.head,
-            &item.patch,
-            &item.trace,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let mut params = item.parameters.clone();
-            params.extend(operation.parameters.clone());
-            operations.push((operation, params));
-        }
-    }
+    let operations = traversal::operations(spec);
 
     if operations.is_empty() {
         return None;
@@ -254,8 +215,13 @@ fn derive_query_api_key_auth(spec: &OpenAPI) -> Option<AuthKind> {
     let mut candidates: indexmap::IndexMap<String, QueryAuthStats> = indexmap::IndexMap::new();
     let mut first_required_query_names = Vec::new();
 
-    for (operation, params) in operations {
-        let required_query_params = required_query_params(operation, &params);
+    for operation_ref in operations {
+        let required_query_params = required_query_params(
+            operation_ref
+                .path_parameters
+                .iter()
+                .chain(operation_ref.operation.parameters.iter()),
+        );
         let Some(first_param) = required_query_params.first() else {
             first_required_query_names.push(None);
             continue;
@@ -298,11 +264,9 @@ struct QueryAuthStats {
 }
 
 fn required_query_params<'a>(
-    _operation: &'a Operation,
-    params: &'a [ReferenceOr<Parameter>],
+    params: impl Iterator<Item = &'a ReferenceOr<Parameter>>,
 ) -> Vec<&'a openapiv3::ParameterData> {
     params
-        .iter()
         .filter_map(|param| match param {
             ReferenceOr::Item(Parameter::Query { parameter_data, .. })
                 if parameter_data.required =>
@@ -689,6 +653,42 @@ paths:
             derive_auth_kind(&spec).unwrap(),
             AuthKind::QueryApiKey {
                 param_name: "license".into()
+            }
+        );
+    }
+
+    #[test]
+    fn path_level_query_api_key_detects_query_api_key() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Path Level Auth API
+  version: "1.0.0"
+paths:
+  /weather:
+    parameters:
+      - in: query
+        name: api_key
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: ok
+    post:
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            derive_auth_kind(&spec).unwrap(),
+            AuthKind::QueryApiKey {
+                param_name: "api_key".into()
             }
         );
     }

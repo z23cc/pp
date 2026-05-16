@@ -9,6 +9,20 @@ use anyhow::Result;
 use openapiv3::OpenAPI;
 use std::path::Path;
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ApiCrateOutput {
+    pub diagnostics: Vec<BackendDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BackendDiagnostic {
+    SourceTransform {
+        name: &'static str,
+        changed: bool,
+        replacement_count: usize,
+    },
+}
+
 pub(crate) struct ApiCrateRequest<'a> {
     pub api: &'a OpenAPI,
     pub out_dir: &'a Path,
@@ -17,7 +31,7 @@ pub(crate) struct ApiCrateRequest<'a> {
 
 pub(crate) trait ApiBackend {
     fn name(&self) -> &'static str;
-    fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<()>;
+    fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<ApiCrateOutput>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -28,7 +42,7 @@ impl ApiBackend for ProgenitorBackend {
         "progenitor"
     }
 
-    fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<()> {
+    fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<ApiCrateOutput> {
         crate::progenitor_driver::generate(request.api, request.out_dir, request.crate_name)
     }
 }

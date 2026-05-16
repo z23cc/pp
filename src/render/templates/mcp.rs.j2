@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-const TOOLS_PAGE_SIZE: usize = 100;
+const TOOLS_PAGE_SIZE: usize = {{ mcp_runtime.tools_page_size }};
 static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -28,14 +28,14 @@ struct ArgDef {
 }
 
 {% for tool in mcp_tools %}
-fn schema_{{ loop.index }}() -> rmcp::model::JsonObject {
+fn {{ tool.schema_fn_name }}() -> rmcp::model::JsonObject {
     match serde_json::from_str::<Value>({{ tool.input_schema_literal }}) {
         Ok(Value::Object(object)) => object,
         _ => rmcp::model::JsonObject::new(),
     }
 }
 
-static ARGS_{{ loop.index }}: &[ArgDef] = &[
+static {{ tool.args_static_name }}: &[ArgDef] = &[
 {% for arg in tool.args %}
     ArgDef { json_name: {{ arg.json_name_literal }}, cli_name: {{ arg.cli_name_literal }}, body_field: {{ arg.body_field }} },
 {% endfor %}
@@ -45,10 +45,10 @@ static ARGS_{{ loop.index }}: &[ArgDef] = &[
 static TOOLS: &[ToolDef] = &[
 {% for tool in mcp_tools %}
     ToolDef {
-        name: "{{ tool.name }}",
+        name: {{ tool.name_literal }},
         description: {{ tool.description_literal }},
-        input_schema: schema_{{ loop.index }},
-        args: ARGS_{{ loop.index }},
+        input_schema: {{ tool.schema_fn_name }},
+        args: {{ tool.args_static_name }},
     },
 {% endfor %}
 ];
@@ -67,19 +67,19 @@ impl ApiMcpServer {
         let mut argv = vec![tool.name.to_string()];
         let mut temp_files = Vec::new();
 
-{% if auth_env_var %}
+{% if mcp_runtime.auth_missing_env_literal %}
         if context.auth.is_none() {
             return Ok(CallToolResult::structured_error(json!({
                 "kind": "auth_missing",
                 "message": "missing required auth env var",
-                "env": "{{ auth_env_var }}"
+                "env": {{ mcp_runtime.auth_missing_env_literal }}
             })));
         }
 
 {% endif %}
-        let field_filter = parse_field_filter(arguments.get("_pp_fields"))?;
+        let field_filter = parse_field_filter(arguments.get({{ mcp_runtime.response_shaping.field_filter.json_name_literal }}))?;
         let compact = arguments
-            .get("_pp_compact")
+            .get({{ mcp_runtime.response_shaping.compact.json_name_literal }})
             .map(parse_compact)
             .transpose()?
             .unwrap_or(false);
@@ -134,7 +134,7 @@ fn parse_field_filter(value: Option<&Value>) -> Result<Option<Vec<String>>, McpE
         return Ok(None);
     };
     let Some(values) = value.as_array() else {
-        return Err(McpError::invalid_params("_pp_fields must be an array of dot paths", None));
+        return Err(McpError::invalid_params({{ mcp_runtime.response_shaping.field_filter.invalid_type_message_literal }}, None));
     };
     let mut fields = Vec::new();
     for value in values {
@@ -152,7 +152,7 @@ fn parse_field_filter(value: Option<&Value>) -> Result<Option<Vec<String>>, McpE
 fn parse_compact(value: &Value) -> Result<bool, McpError> {
     value
         .as_bool()
-        .ok_or_else(|| McpError::invalid_params("_pp_compact must be a boolean", None))
+        .ok_or_else(|| McpError::invalid_params({{ mcp_runtime.response_shaping.compact.invalid_type_message_literal }}, None))
 }
 
 fn shape_success(mut value: Value, fields: Option<&[String]>, compact: bool) -> Value {
@@ -255,7 +255,8 @@ fn status_from_body(body: &Value) -> Option<u16> {
 fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
     let counter = MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "{{ bin_name }}-mcp-{}-{}-{}-body.json",
+        "{}-{}-{}-{}-body.json",
+        {{ mcp_runtime.temp_body_file_prefix_literal }},
         tool_name,
         std::process::id(),
         counter

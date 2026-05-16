@@ -24,6 +24,7 @@ Run manually or by the weekly `Generated Workspace Smoke` workflow.
 
 ```bash
 cargo test --test petstore_smoke -- --ignored
+cargo test --test slicing -- --ignored
 cargo test --test bearer_smoke -- --ignored
 cargo test --test apikey_smoke -- --ignored
 cargo test --test basic_smoke -- --ignored
@@ -34,6 +35,7 @@ cargo test --test mcp_usability -- --ignored
 Purpose:
 
 - Prove representative generated workspaces compile with `cargo build --release`.
+- Preflight sliced generation with the petstore `store` tag so pruning remains covered outside fast PR CI.
 - Exercise bearer, API key, and basic auth header behavior against local `mockito` servers.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
 

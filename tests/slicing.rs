@@ -79,6 +79,37 @@ fn inspect_list_operations_prints_filtered_jsonl_rows() {
 }
 
 #[test]
+fn inspect_reports_outputs_facts_and_structured_reports() {
+    let output = run_inspect(&["--reports", "--include-tag", "pets"]);
+    assert!(
+        output.status.success(),
+        "inspect --reports failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).expect("inspect reports stdout is JSON");
+    assert_eq!(payload["facts"]["operation_count"].as_u64(), Some(2));
+
+    let reports = payload["reports"].as_array().expect("reports is an array");
+    assert!(
+        reports.iter().any(|report| report["stage"] == "slicing"
+            && report["severity"] == "warning"
+            && report["code"] == "spec.slice.operations_filtered"),
+        "missing structured slicing report: {reports:#?}"
+    );
+    assert!(
+        reports
+            .iter()
+            .any(|report| report["code"] == "spec.slice.components_pruned"
+                && report["subject"]["kind"] == "component"
+                && report["subject"]["value"] == "components"),
+        "missing structured component-pruning subject: {reports:#?}"
+    );
+}
+
+#[test]
 fn inspect_empty_slice_fails_with_discovery_hint() {
     let output = run_inspect(&["--include-tag", "missing"]);
     assert!(
@@ -102,6 +133,44 @@ fn assert_operation_count(args: &[&str], expected: u64) {
     );
     let facts: Value = serde_json::from_slice(&output.stdout).expect("inspect stdout is JSON");
     assert_eq!(facts["operation_count"].as_u64(), Some(expected));
+}
+
+#[test]
+#[ignore = "expensive smoke test: generates and builds a sliced wrapper CLI; run with `cargo test --test slicing -- --ignored`"]
+fn petstore_store_slice_generates_and_builds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/petstore.yaml");
+    let out_dir = temp.path().join("out");
+
+    let output = Command::new(common::pp_bin())
+        .arg("generate")
+        .arg(&spec)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--include-tag")
+        .arg("store")
+        .arg("--build")
+        .output()
+        .expect("failed to run sliced pp generate");
+    common::assert_success(output, "pp generate --include-tag store --build");
+
+    let bin = common::generated_bin(&out_dir, "swagger-petstore");
+    let mut command = Command::new(&bin);
+    let output = common::disable_proxy(&mut command)
+        .env("SWAGGER_PETSTORE_API_KEY", "dummy")
+        .arg("--help")
+        .output()
+        .expect("failed to run sliced generated help");
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+    common::assert_success(output, "sliced generated --help");
+    assert!(
+        help.contains("get-inventory") || help.contains("get_inventory"),
+        "store slice help did not list get-inventory/get_inventory:\n{help}"
+    );
+    assert!(
+        !help.contains("get-pet-by-id") && !help.contains("get_pet_by_id"),
+        "store slice help unexpectedly listed pet operations:\n{help}"
+    );
 }
 
 fn run_inspect(args: &[&str]) -> Output {

@@ -1,5 +1,6 @@
 //! In-process driver around the `progenitor` library.
 
+use crate::backend::{ApiCrateOutput, BackendDiagnostic};
 use anyhow::{Context, Result};
 use openapiv3::OpenAPI;
 use progenitor::{GenerationSettings, Generator, InterfaceStyle};
@@ -33,7 +34,7 @@ const UNEXPECTED_RESPONSE_REPLACEMENT: &str = r#"_ => {
             }"#;
 
 /// Generate a complete API crate containing progenitor's client and CLI tokens.
-pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<()> {
+pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<ApiCrateOutput> {
     let mut settings = GenerationSettings::default();
     settings
         .with_interface(InterfaceStyle::Builder)
@@ -57,37 +58,82 @@ pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<()> {
     };
     let syntax = syn::parse2(file_tokens)?;
     let formatted = prettyplease::unparse(&syntax);
-    let formatted = apply_generated_source_transforms(&formatted);
+    let transformed = apply_generated_source_transforms(&formatted);
 
     fs::create_dir_all(out_dir.join("src"))
         .with_context(|| format!("failed to create API src dir: {}", out_dir.display()))?;
-    fs::write(out_dir.join("src/lib.rs"), formatted)
-        .with_context(|| format!("failed to write {}", out_dir.join("src/lib.rs").display()))
-}
+    fs::write(out_dir.join("src/lib.rs"), transformed.source)
+        .with_context(|| format!("failed to write {}", out_dir.join("src/lib.rs").display()))?;
 
-fn apply_generated_source_transforms(source: &str) -> String {
-    [
-        (
-            TRANSFORM_STRING_VEC_VALUE_PARSER,
-            patch_string_vec_value_parser as fn(&str) -> String,
-        ),
-        (
-            TRANSFORM_UNEXPECTED_RESPONSE_BODY,
-            patch_unexpected_response_body as fn(&str) -> String,
-        ),
-        (
-            TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
-            patch_complex_clap_value_parsers as fn(&str) -> String,
-        ),
-    ]
-    .into_iter()
-    .fold(source.to_string(), |source, (_name, transform)| {
-        transform(&source)
+    Ok(ApiCrateOutput {
+        diagnostics: transformed.diagnostics,
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedSourceTransformOutput {
+    source: String,
+    diagnostics: Vec<BackendDiagnostic>,
+}
+
+fn apply_generated_source_transforms(source: &str) -> GeneratedSourceTransformOutput {
+    let mut source = source.to_string();
+    let mut diagnostics = Vec::new();
+
+    let (next, replacement_count) = patch_string_vec_value_parser_with_count(&source);
+    diagnostics.push(source_transform_diagnostic(
+        TRANSFORM_STRING_VEC_VALUE_PARSER,
+        &source,
+        &next,
+        replacement_count,
+    ));
+    source = next;
+
+    let (next, replacement_count) = patch_unexpected_response_body_with_count(&source);
+    diagnostics.push(source_transform_diagnostic(
+        TRANSFORM_UNEXPECTED_RESPONSE_BODY,
+        &source,
+        &next,
+        replacement_count,
+    ));
+    source = next;
+
+    let (next, replacement_count) = patch_complex_clap_value_parsers_with_count(&source);
+    diagnostics.push(source_transform_diagnostic(
+        TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
+        &source,
+        &next,
+        replacement_count,
+    ));
+
+    GeneratedSourceTransformOutput {
+        source: next,
+        diagnostics,
+    }
+}
+
+fn source_transform_diagnostic(
+    name: &'static str,
+    before: &str,
+    after: &str,
+    replacement_count: usize,
+) -> BackendDiagnostic {
+    BackendDiagnostic::SourceTransform {
+        name,
+        changed: before != after,
+        replacement_count,
+    }
+}
+
+#[cfg(test)]
 fn patch_string_vec_value_parser(source: &str) -> String {
-    source
+    patch_string_vec_value_parser_with_count(source).0
+}
+
+fn patch_string_vec_value_parser_with_count(source: &str) -> (String, usize) {
+    let replacement_count = source.matches(STRING_VEC_VALUE_PARSER_INLINE).count()
+        + source.matches(STRING_VEC_VALUE_PARSER_PRETTY).count();
+    let patched = source
         .replace(
             STRING_VEC_VALUE_PARSER_INLINE,
             STRING_VEC_VALUE_PARSER_REPLACEMENT,
@@ -95,29 +141,45 @@ fn patch_string_vec_value_parser(source: &str) -> String {
         .replace(
             STRING_VEC_VALUE_PARSER_PRETTY,
             STRING_VEC_VALUE_PARSER_REPLACEMENT,
-        )
+        );
+    (patched, replacement_count)
 }
 
+#[cfg(test)]
 fn patch_unexpected_response_body(source: &str) -> String {
-    source.replace(UNEXPECTED_RESPONSE_NEEDLE, UNEXPECTED_RESPONSE_REPLACEMENT)
+    patch_unexpected_response_body_with_count(source).0
 }
 
+fn patch_unexpected_response_body_with_count(source: &str) -> (String, usize) {
+    let replacement_count = source.matches(UNEXPECTED_RESPONSE_NEEDLE).count();
+    let patched = source.replace(UNEXPECTED_RESPONSE_NEEDLE, UNEXPECTED_RESPONSE_REPLACEMENT);
+    (patched, replacement_count)
+}
+
+#[cfg(test)]
 fn patch_complex_clap_value_parsers(source: &str) -> String {
+    patch_complex_clap_value_parsers_with_count(source).0
+}
+
+fn patch_complex_clap_value_parsers_with_count(source: &str) -> (String, usize) {
     let vec_re = Regex::new(
         r"::clap::value_parser!\(\s*::std::vec::Vec\s*<\s*types::([A-Za-z][A-Za-z0-9_]*)\s*>\s*\)",
     )
     .expect("valid vec value parser regex");
+    let vec_count = vec_re.find_iter(source).count();
     let source = vec_re.replace_all(source, |caps: &regex::Captures<'_>| {
         complex_vec_value_parser(&caps[1])
     });
 
     let single_re = Regex::new(r"::clap::value_parser!\(\s*types::([A-Za-z][A-Za-z0-9_]*)\s*\)")
         .expect("valid single value parser regex");
-    single_re
+    let single_count = single_re.find_iter(&source).count();
+    let patched = single_re
         .replace_all(&source, |caps: &regex::Captures<'_>| {
             complex_single_value_parser(&caps[1])
         })
-        .into_owned()
+        .into_owned();
+    (patched, vec_count + single_count)
 }
 
 fn complex_single_value_parser(typ: &str) -> String {
@@ -198,14 +260,63 @@ mod tests {
     }
 
     #[test]
-    fn all_generated_source_transforms_compose() {
+    fn all_generated_source_transforms_compose_and_report_applied_counts() {
         let source = format!(
             "{STRING_VEC_VALUE_PARSER_INLINE}\n{UNEXPECTED_RESPONSE_NEEDLE}\n::clap::value_parser!(types::Widget)"
         );
-        let patched = apply_generated_source_transforms(&source);
+        let transformed = apply_generated_source_transforms(&source);
+        let patched = &transformed.source;
 
         assert!(patched.contains("s.split(',')"));
         assert!(patched.contains("body={body}"));
         assert!(patched.contains("serde_json::from_value::<types::Widget>"));
+        assert_eq!(
+            transformed.diagnostics,
+            vec![
+                BackendDiagnostic::SourceTransform {
+                    name: TRANSFORM_STRING_VEC_VALUE_PARSER,
+                    changed: true,
+                    replacement_count: 1,
+                },
+                BackendDiagnostic::SourceTransform {
+                    name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
+                    changed: true,
+                    replacement_count: 1,
+                },
+                BackendDiagnostic::SourceTransform {
+                    name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
+                    changed: true,
+                    replacement_count: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_source_transforms_report_skipped_counts() {
+        let source = "pub fn untouched() {}";
+        let transformed = apply_generated_source_transforms(source);
+
+        assert_eq!(transformed.source, source);
+        assert_eq!(
+            transformed.diagnostics,
+            vec![
+                BackendDiagnostic::SourceTransform {
+                    name: TRANSFORM_STRING_VEC_VALUE_PARSER,
+                    changed: false,
+                    replacement_count: 0,
+                },
+                BackendDiagnostic::SourceTransform {
+                    name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
+                    changed: false,
+                    replacement_count: 0,
+                },
+                BackendDiagnostic::SourceTransform {
+                    name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
+                    changed: false,
+                    replacement_count: 0,
+                },
+            ]
+        );
     }
 }
