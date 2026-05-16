@@ -43,6 +43,10 @@ pub(crate) struct McpRuntimeManifest {
     pub temp_body_file_prefix: String,
     pub temp_body_file_prefix_literal: String,
     pub auth_missing_env_literal: Option<String>,
+    pub invocation_adapter_kind: String,
+    pub invocation_adapter_kind_literal: String,
+    pub invocation_adapter_reason: String,
+    pub invocation_adapter_reason_literal: String,
     pub response_shaping: RenderMcpResponseShaping,
 }
 
@@ -93,6 +97,8 @@ impl WrapperManifest {
         let progenitor_crate_name = progenitor_lib_name.replace('-', "_");
         let auth_env_var = auth_env_var(&auth_kind, &env_prefix);
         let temp_body_file_prefix = format!("{bin_name}-mcp");
+        let invocation_adapter_kind = "progenitor_cli_bridge".to_string();
+        let invocation_adapter_reason = "MCP tool calls are still adapted through generated Progenitor CLI argv/Clap dispatch until direct typed invocation is implemented".to_string();
         Self {
             bin_name,
             base_url,
@@ -114,6 +120,14 @@ impl WrapperManifest {
                 auth_missing_env_literal: auth_env_var
                     .as_ref()
                     .map(|env| serde_json::to_string(env).expect("auth env var serializes")),
+                invocation_adapter_kind_literal: serde_json::to_string(&invocation_adapter_kind)
+                    .expect("invocation adapter kind serializes"),
+                invocation_adapter_kind,
+                invocation_adapter_reason_literal: serde_json::to_string(
+                    &invocation_adapter_reason,
+                )
+                .expect("invocation adapter reason serializes"),
+                invocation_adapter_reason,
                 response_shaping: render_response_shaping(McpResponseShaping::default()),
             },
         }
@@ -325,6 +339,13 @@ paths:
 
         assert!(rendered.contains("pub async fn invoke_operation"));
         assert!(rendered.contains("struct ProgenitorCliInvocationAdapter"));
+        assert!(rendered
+            .contains("pub const INVOCATION_ADAPTER_KIND: &str = \"progenitor_cli_bridge\";"));
+        assert!(rendered.contains("generated Progenitor CLI argv/Clap dispatch"));
+        assert_eq!(
+            manifest.mcp_runtime.invocation_adapter_kind,
+            "progenitor_cli_bridge"
+        );
         assert!(rendered.contains(".create_new(true)"));
         assert!(rendered.contains("static MCP_BODY_FILE_COUNTER: AtomicU64"));
         assert!(rendered.contains("MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)"));

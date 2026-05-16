@@ -356,6 +356,22 @@ fn generate_writes_transform_plan_with_approval_metadata() {
             decision["code"] == "spec.normalize.response_variants_pruned"
                 && decision["allowed_by"] == "effect_allowlist"
         }));
+    let audits = value["audits"].as_array().expect("audits array");
+    assert!(audits.iter().any(|audit| {
+        audit["code"] == "spec.normalize.response_variants_pruned"
+            && audit["target_pointer"] == "/paths/~1items/get/responses"
+            && audit["action_kind"] == "prune"
+            && audit["backend_requirement_id"] == "progenitor.response.single_variant"
+            && audit.get("before_json").is_some()
+            && audit.get("after_json").is_some()
+    }));
+    assert!(audits.iter().any(|audit| {
+        audit["code"] == "runtime.mcp_invocation.progenitor_cli_bridge"
+            && audit["source_stage"] == "runtime_generation"
+            && audit["action_kind"] == "runtime_bridge"
+            && audit["backend_requirement_id"] == "progenitor.cli_bridge.mcp_invocation"
+            && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
+    }));
 }
 
 #[test]

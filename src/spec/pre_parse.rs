@@ -8,7 +8,7 @@ use regex::Regex;
 
 use super::normalization_rules::{self as rules, pre_parse};
 use super::report::ReportEntry;
-use super::transform::TransformAuditEntry;
+use super::transform::{TransformActionKind, TransformAuditEntry};
 
 type DowngradeReport = Option<(String, usize)>;
 
@@ -148,6 +148,7 @@ impl RawSpecRepairAction {
                 "raw.openapi.version",
                 format!("downgrade OpenAPI 3.1-compatible source ({transforms} raw rewrite steps)"),
             )
+            .with_action_kind(TransformActionKind::RawRepair)
             .with_before_after(format!("openapi: {version}"), "openapi: 3.0.3"),
             Self::ClampNumericBounds { count } => TransformAuditEntry::new(
                 "pre_parse_tolerance",
@@ -155,6 +156,7 @@ impl RawSpecRepairAction {
                 "raw.numeric_bounds",
                 format!("clamp {count} out-of-range numeric bound literals"),
             )
+            .with_action_kind(TransformActionKind::RawRepair)
             .with_before_after("integer literal outside i64 range", "nearest i64 bound"),
             Self::ReplaceTagDescriptions { count } => TransformAuditEntry::new(
                 "pre_parse_tolerance",
@@ -162,6 +164,7 @@ impl RawSpecRepairAction {
                 "raw.tags[].description",
                 format!("replace {count} non-string tag descriptions"),
             )
+            .with_action_kind(TransformActionKind::RawRepair)
             .with_before_after("mapping-valued tag description", "empty string description"),
             Self::ReplaceRefOnlyOperations { count } => TransformAuditEntry::new(
                 "pre_parse_tolerance",
@@ -169,6 +172,7 @@ impl RawSpecRepairAction {
                 "raw.paths.*.$ref_operation",
                 format!("replace {count} ref-only operations with parseable placeholders"),
             )
+            .with_action_kind(TransformActionKind::RawRepair)
             .with_before_after(
                 "operation containing only $ref",
                 "placeholder operationId/responses",

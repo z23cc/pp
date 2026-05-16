@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -11,6 +11,25 @@ use std::path::PathBuf;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum AuthPolicyArg {
+    Legacy,
+    FailAmbiguous,
+}
+
+impl AuthPolicyArg {
+    fn into_policy(self, auth_scheme: Option<String>) -> crate::spec::AuthSelectionPolicy {
+        if let Some(name) = auth_scheme {
+            return crate::spec::AuthSelectionPolicy::ExplicitScheme { name };
+        }
+
+        match self {
+            Self::Legacy => crate::spec::AuthSelectionPolicy::LegacyCompatible,
+            Self::FailAmbiguous => crate::spec::AuthSelectionPolicy::FailAmbiguous,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -46,6 +65,12 @@ pub enum Command {
         /// Permit one transform report code in strict policy (repeatable)
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
+        /// Auth selection behavior when multiple component security schemes are selectable
+        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::Legacy)]
+        auth_policy: AuthPolicyArg,
+        /// Explicit component security scheme name to use for generated auth
+        #[arg(long = "auth-scheme")]
+        auth_scheme: Option<String>,
     },
     /// Generate a Rust CLI crate workspace from an OpenAPI spec
     Generate {
@@ -84,6 +109,12 @@ pub enum Command {
         /// Permit one transform report code in strict policy (repeatable)
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
+        /// Auth selection behavior when multiple component security schemes are selectable
+        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::Legacy)]
+        auth_policy: AuthPolicyArg,
+        /// Explicit component security scheme name to use for generated auth
+        #[arg(long = "auth-scheme")]
+        auth_scheme: Option<String>,
     },
     /// Run `cargo build` against an already-generated workspace
     Validate {
@@ -92,7 +123,7 @@ pub enum Command {
     },
 }
 
-fn load_options(
+struct LoadOptionsArgs {
     include_operations: Vec<String>,
     include_tags: Vec<String>,
     include_path_prefixes: Vec<String>,
@@ -100,7 +131,23 @@ fn load_options(
     allow_compat_normalization: bool,
     allow_effects: Vec<crate::spec::report::ReportEffect>,
     allow_report_codes: Vec<String>,
-) -> crate::spec::LoadOptions {
+    auth_policy: AuthPolicyArg,
+    auth_scheme: Option<String>,
+}
+
+fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
+    let LoadOptionsArgs {
+        include_operations,
+        include_tags,
+        include_path_prefixes,
+        exclude_operations,
+        allow_compat_normalization,
+        allow_effects,
+        allow_report_codes,
+        auth_policy,
+        auth_scheme,
+    } = args;
+
     let mut policy = if allow_compat_normalization {
         crate::spec::transform::TransformPolicy::compatibility()
     } else {
@@ -121,6 +168,7 @@ fn load_options(
             exclude_operations,
         },
         policy,
+        auth_policy: auth_policy.into_policy(auth_scheme),
         backend_capabilities: crate::backend::BackendCapabilities::progenitor(),
     }
 }
@@ -191,8 +239,10 @@ impl Cli {
                 allow_compat_normalization,
                 allow_effects,
                 allow_report_codes,
+                auth_policy,
+                auth_scheme,
             } => {
-                let options = load_options(
+                let options = load_options(LoadOptionsArgs {
                     include_operations,
                     include_tags,
                     include_path_prefixes,
@@ -200,7 +250,9 @@ impl Cli {
                     allow_compat_normalization,
                     allow_effects,
                     allow_report_codes,
-                );
+                    auth_policy,
+                    auth_scheme,
+                });
                 if list_operations {
                     let mut options = options.clone();
                     options.policy = crate::spec::transform::TransformPolicy::compatibility();
@@ -248,8 +300,10 @@ impl Cli {
                 allow_compat_normalization,
                 allow_effects,
                 allow_report_codes,
+                auth_policy,
+                auth_scheme,
             } => {
-                let options = load_options(
+                let options = load_options(LoadOptionsArgs {
                     include_operations,
                     include_tags,
                     include_path_prefixes,
@@ -257,7 +311,9 @@ impl Cli {
                     allow_compat_normalization,
                     allow_effects,
                     allow_report_codes,
-                );
+                    auth_policy,
+                    auth_scheme,
+                });
                 let _result = crate::pipeline::generate_with_progress(
                     crate::pipeline::GenerateRequest {
                         spec_path: spec,
@@ -272,6 +328,83 @@ impl Cli {
                 Ok(())
             }
             Command::Validate { workspace } => validate_workspace_build(&workspace),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn load_options_auth_scheme_overrides_policy() {
+        let options = load_options(LoadOptionsArgs {
+            include_operations: Vec::new(),
+            include_tags: Vec::new(),
+            include_path_prefixes: Vec::new(),
+            exclude_operations: Vec::new(),
+            allow_compat_normalization: false,
+            allow_effects: Vec::new(),
+            allow_report_codes: Vec::new(),
+            auth_policy: AuthPolicyArg::FailAmbiguous,
+            auth_scheme: Some("bearerAuth".to_string()),
+        });
+
+        assert!(matches!(
+            options.auth_policy,
+            crate::spec::AuthSelectionPolicy::ExplicitScheme { ref name }
+                if name == "bearerAuth"
+        ));
+    }
+
+    #[test]
+    fn inspect_accepts_fail_ambiguous_auth_policy_flag() {
+        let cli = Cli::parse_from([
+            "pp",
+            "inspect",
+            "spec.yaml",
+            "--auth-policy",
+            "fail-ambiguous",
+        ]);
+
+        match cli.command {
+            Command::Inspect {
+                auth_policy,
+                auth_scheme,
+                ..
+            } => {
+                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+                assert!(auth_scheme.is_none());
+            }
+            _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn generate_accepts_explicit_auth_scheme_flag() {
+        let cli = Cli::parse_from([
+            "pp",
+            "generate",
+            "spec.yaml",
+            "-o",
+            "out",
+            "--auth-policy",
+            "fail-ambiguous",
+            "--auth-scheme",
+            "bearerAuth",
+        ]);
+
+        match cli.command {
+            Command::Generate {
+                auth_policy,
+                auth_scheme,
+                ..
+            } => {
+                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+                assert_eq!(auth_scheme.as_deref(), Some("bearerAuth"));
+            }
+            _ => panic!("expected generate command"),
         }
     }
 }

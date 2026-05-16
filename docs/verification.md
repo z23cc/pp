@@ -17,6 +17,8 @@ Purpose:
 - Rust formatting and lint health.
 - Unit and integration tests that do not build generated release workspaces.
 - Inspect/slicing/pipeline/model/backend behavior.
+- Auth-selection policy coverage for legacy, fail-ambiguous, and explicit `--auth-scheme` behavior.
+- Transform-plan audit JSON coverage, including structured audit fields and the runtime Progenitor CLI bridge audit.
 
 ## Standard
 
@@ -38,12 +40,13 @@ Purpose:
 - Preflight sliced generation with the petstore `store` tag so pruning remains covered outside fast PR CI.
 - Exercise bearer, API key, and basic auth header behavior against local `mockito` servers.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
+- Rebuild generated runtimes that currently expose MCP through the audited Progenitor CLI bridge.
 
 These are the first ignored tests promoted to scheduled/manual CI because they cover generated artifact correctness without external network dependencies.
 
 ## Deep
 
-Run manually before release candidates or after large generator/backend changes.
+Run manually before release candidates or after large generator/backend changes, especially changes to transform audits, auth selection, or generated MCP invocation.
 
 ```bash
 cargo test --test dogfood -- --ignored

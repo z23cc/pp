@@ -11,10 +11,11 @@ use crate::model::ApiModel;
 use crate::render::WrapperManifest;
 use crate::spec::{
     report::ReportEntry,
-    transform::{TransformAuditEntry, TransformPlan},
+    transform::{TransformActionKind, TransformAuditEntry, TransformPlan},
     AuthKind, LoadOptions, SpecFacts,
 };
 use anyhow::{anyhow, Context, Result};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -151,6 +152,7 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         backend.name(),
         &api_output.diagnostics,
     ));
+    transform_plan.add_audits(runtime_generation_audits(&manifest));
     write_transform_plan(&request.output_path, &transform_plan)?;
 
     progress(GenerateProgress::RenderingWrapperCrate);
@@ -224,16 +226,58 @@ fn backend_diagnostic_audits(
                     format!("{backend_name} generated source"),
                     action,
                 )
+                .with_action_kind(TransformActionKind::BackendSourceTransform)
+                .with_backend_requirement_id(format!(
+                    "{backend_name}.source_transform.{}",
+                    source_transform.name
+                ))
                 .with_backend_requirement(format!(
                     "{}; upstream assumption: {}; source shape: {}",
                     source_transform.precondition,
                     source_transform.upstream_assumption,
                     source_transform.upstream_version
                 ))
-                .with_before_after(before, after)
+                .with_before_after(before.clone(), after.clone())
+                .with_before_after_json(
+                    json!({
+                        "precondition": source_transform.precondition,
+                        "matched": source_transform.changed,
+                    }),
+                    json!({
+                        "changed": source_transform.changed,
+                        "replacement_count": source_transform.replacement_count,
+                        "outcome": after,
+                    }),
+                )
             }
         })
         .collect()
+}
+
+fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEntry> {
+    vec![TransformAuditEntry::new(
+        "runtime_generation",
+        "runtime.mcp_invocation.progenitor_cli_bridge",
+        "generated src/invoke.rs",
+        "route MCP tool calls through generated Progenitor CLI dispatcher",
+    )
+    .with_action_kind(TransformActionKind::RuntimeBridge)
+    .with_backend_requirement_id("progenitor.cli_bridge.mcp_invocation")
+    .with_backend_requirement(
+        "transitional MCP runtime uses generated Progenitor CLI argv/Clap dispatch until direct typed invocation is implemented",
+    )
+    .with_before_after(
+        "no explicit runtime-generation bridge audit",
+        manifest.mcp_runtime.invocation_adapter_kind.as_str(),
+    )
+    .with_before_after_json(
+        json!(null),
+        json!({
+            "invocation_adapter_kind": &manifest.mcp_runtime.invocation_adapter_kind,
+            "invocation_adapter_reason": &manifest.mcp_runtime.invocation_adapter_reason,
+            "preserves_runtime_behavior": true,
+        }),
+    )]
 }
 
 fn source_transform_purpose_label(purpose: SourceTransformPurpose) -> &'static str {
@@ -412,6 +456,16 @@ paths:
             audit.source_stage == "backend_source_transform"
                 && audit.code == "backend.fake.source_transform.fake_transform"
                 && audit.backend_requirement.is_some()
+                && audit.action_kind == Some(TransformActionKind::BackendSourceTransform)
+                && audit.backend_requirement_id.as_deref()
+                    == Some("fake.source_transform.fake_transform")
+        }));
+        assert!(result.transform_plan.audits.iter().any(|audit| {
+            audit.source_stage == "runtime_generation"
+                && audit.code == "runtime.mcp_invocation.progenitor_cli_bridge"
+                && audit.action_kind == Some(TransformActionKind::RuntimeBridge)
+                && audit.backend_requirement_id.as_deref()
+                    == Some("progenitor.cli_bridge.mcp_invocation")
         }));
         let transform_plan_json: serde_json::Value = serde_json::from_slice(
             &std::fs::read(transform_plan_path).expect("read transform plan"),
@@ -425,8 +479,23 @@ paths:
                 audit["source_stage"] == "backend_source_transform"
                     && audit["code"] == "backend.fake.source_transform.fake_transform"
                     && audit["target"] == "fake generated source"
+                    && audit["action_kind"] == "backend_source_transform"
+                    && audit["backend_requirement_id"] == "fake.source_transform.fake_transform"
                     && audit.get("before").is_some()
                     && audit.get("after").is_some()
+                    && audit.get("before_json").is_some()
+                    && audit.get("after_json").is_some()
+            }));
+        assert!(transform_plan_json["audits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|audit| {
+                audit["source_stage"] == "runtime_generation"
+                    && audit["code"] == "runtime.mcp_invocation.progenitor_cli_bridge"
+                    && audit["action_kind"] == "runtime_bridge"
+                    && audit["backend_requirement_id"] == "progenitor.cli_bridge.mcp_invocation"
+                    && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
             }));
     }
 

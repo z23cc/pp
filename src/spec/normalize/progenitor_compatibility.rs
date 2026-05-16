@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use crate::backend::BackendCapabilities;
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
-use crate::spec::transform::TransformAuditEntry;
+use crate::spec::transform::{json_pointer_escape, TransformActionKind, TransformAuditEntry};
 use crate::spec::traversal;
+use serde_json::json;
 
 pub(super) const JSON_MIME: &str = "application/json";
 #[cfg(test)]
@@ -531,8 +532,12 @@ impl CompatibilityTransformAction {
                     format!("operation {} responses", target.label()),
                     format!("prune response variants to {kept}"),
                 )
+                .with_target_pointer(format!("{}/responses", operation_target_pointer(target)))
+                .with_action_kind(TransformActionKind::Prune)
+                .with_backend_requirement_id("progenitor.response.single_variant")
                 .with_backend_requirement("backend requires one response variant per operation")
-                .with_before_after("multiple response variants", format!("kept {kept}")),
+                .with_before_after("multiple response variants", format!("kept {kept}"))
+                .with_before_after_json(json!({ "variants": "multiple" }), json!({ "kept": kept })),
             ],
             Self::PruneContentTypes { target, kept, .. } => vec![
                 TransformAuditEntry::new(
@@ -541,8 +546,12 @@ impl CompatibilityTransformAction {
                     content_target_label(target),
                     format!("prune content types to {kept}"),
                 )
+                .with_target_pointer(content_target_pointer(target))
+                .with_action_kind(TransformActionKind::Prune)
+                .with_backend_requirement_id("progenitor.content_type.single_supported")
                 .with_backend_requirement("backend requires one supported content type per message")
-                .with_before_after("multiple content types", format!("kept {kept}")),
+                .with_before_after("multiple content types", format!("kept {kept}"))
+                .with_before_after_json(json!({ "content_types": "multiple" }), json!({ "kept": kept })),
             ],
             Self::DropUnsupportedRequestBody { target, .. } => vec![
                 TransformAuditEntry::new(
@@ -551,8 +560,12 @@ impl CompatibilityTransformAction {
                     content_target_label(target),
                     "drop requestBody with only unsupported content types",
                 )
+                .with_target_pointer(content_target_pointer(target))
+                .with_action_kind(TransformActionKind::Drop)
+                .with_backend_requirement_id("progenitor.request_body.supported_content_type")
                 .with_backend_requirement("backend request body content-type support is limited")
-                .with_before_after("requestBody with unsupported content", "requestBody removed"),
+                .with_before_after("requestBody with unsupported content", "requestBody removed")
+                .with_before_after_json(json!({ "requestBody": "unsupported_content" }), json!(null)),
             ],
             Self::DropSchemaDefaults { targets, .. } => vec![
                 TransformAuditEntry::new(
@@ -561,8 +574,11 @@ impl CompatibilityTransformAction {
                     summarize_targets(targets),
                     format!("drop default values from {} schemas", targets.len()),
                 )
+                .with_action_kind(TransformActionKind::Drop)
+                .with_backend_requirement_id("progenitor.schema.defaults_unsupported")
                 .with_backend_requirement("backend/typify path does not accept schema default values reliably")
-                .with_before_after("schema.default present", "schema.default removed"),
+                .with_before_after("schema.default present", "schema.default removed")
+                .with_before_after_json(json!({ "default": "present" }), json!({ "default": "removed" })),
             ],
             Self::DropUnsupportedRequestBodyOperations { targets, .. } => vec![
                 TransformAuditEntry::new(
@@ -576,8 +592,11 @@ impl CompatibilityTransformAction {
                     ),
                     format!("drop {} operations with unsupported request bodies", targets.len()),
                 )
+                .with_action_kind(TransformActionKind::Drop)
+                .with_backend_requirement_id("progenitor.operation.request_body_supported_content_type")
                 .with_backend_requirement("backend cannot generate operations whose request body has no supported media type")
-                .with_before_after("operation requestBody unsupported", "operation removed"),
+                .with_before_after("operation requestBody unsupported", "operation removed")
+                .with_before_after_json(json!({ "operation": "requestBody unsupported" }), json!(null)),
             ],
             Self::RewriteDeepObjectQueryParams { targets, .. } => targets
                 .iter()
@@ -588,8 +607,11 @@ impl CompatibilityTransformAction {
                         format!("{}.query.{}", target.operation.label(), target.param_name),
                         "rewrite query parameter style",
                     )
+                    .with_action_kind(TransformActionKind::Rewrite)
+                    .with_backend_requirement_id("progenitor.query.deep_object_unsupported")
                     .with_backend_requirement("backend does not support deepObject query parameters")
                     .with_before_after("style: deepObject", "style: form")
+                    .with_before_after_json(json!({ "style": "deepObject" }), json!({ "style": "form" }))
                 })
                 .collect(),
             Self::DropOptionalObjectQueryParams { targets, .. } => targets
@@ -601,8 +623,11 @@ impl CompatibilityTransformAction {
                         format!("{}.query.{}", target.operation.label(), target.param_name),
                         "drop optional object-shaped query parameter",
                     )
+                    .with_action_kind(TransformActionKind::Drop)
+                    .with_backend_requirement_id("progenitor.query.optional_object_unsupported")
                     .with_backend_requirement("backend builder shape does not support optional object query parameters")
                     .with_before_after("optional object query parameter", "parameter removed")
+                    .with_before_after_json(json!({ "parameter": &target.param_name }), json!(null))
                 })
                 .collect(),
             Self::DropSchemalessRequestBody { target, .. } => vec![
@@ -612,8 +637,12 @@ impl CompatibilityTransformAction {
                     format!("operation {} requestBody", target.label()),
                     "drop schemaless requestBody",
                 )
+                .with_target_pointer(format!("{}/requestBody", operation_target_pointer(target)))
+                .with_action_kind(TransformActionKind::Drop)
+                .with_backend_requirement_id("progenitor.request_body.schema_required")
                 .with_backend_requirement("backend requires request body content to declare schemas")
-                .with_before_after("requestBody content without schema", "requestBody removed"),
+                .with_before_after("requestBody content without schema", "requestBody removed")
+                .with_before_after_json(json!({ "requestBody": "schemaless" }), json!(null)),
             ],
             Self::DropEnumConstraint { target, .. } => vec![
                 TransformAuditEntry::new(
@@ -622,8 +651,11 @@ impl CompatibilityTransformAction {
                     target.clone(),
                     "drop enum constraint with colliding generated identifiers",
                 )
+                .with_action_kind(TransformActionKind::Drop)
+                .with_backend_requirement_id("progenitor.schema.unique_sanitized_enum_variants")
                 .with_backend_requirement("backend requires unique sanitized Rust enum variants")
-                .with_before_after("constrained enum", "free-form string/schema"),
+                .with_before_after("constrained enum", "free-form string/schema")
+                .with_before_after_json(json!({ "enum": "constrained" }), json!({ "enum": "removed" })),
             ],
             Self::ReplaceUnsupportedSchemaType { target, .. } => vec![
                 TransformAuditEntry::new(
@@ -632,8 +664,11 @@ impl CompatibilityTransformAction {
                     target.clone(),
                     "replace unsupported schema type with fallback",
                 )
+                .with_action_kind(TransformActionKind::Replace)
+                .with_backend_requirement_id("progenitor.schema.supported_types")
                 .with_backend_requirement("backend supports a limited set of OpenAPI schema types")
-                .with_before_after("unsupported schema type", "fallback schema"),
+                .with_before_after("unsupported schema type", "fallback schema")
+                .with_before_after_json(json!({ "type": "unsupported" }), json!({ "schema": "fallback" })),
             ],
             Self::DropCollidingProperties {
                 target, dropped, ..
@@ -644,8 +679,11 @@ impl CompatibilityTransformAction {
                     target.clone(),
                     format!("drop colliding properties: {}", dropped.join(", ")),
                 )
+                .with_action_kind(TransformActionKind::Drop)
+                .with_backend_requirement_id("progenitor.schema.unique_sanitized_object_properties")
                 .with_backend_requirement("backend requires unique sanitized Rust field names")
-                .with_before_after("colliding object properties", "kept first property; removed collisions"),
+                .with_before_after("colliding object properties", "kept first property; removed collisions")
+                .with_before_after_json(json!({ "properties": "colliding" }), json!({ "dropped": dropped })),
             ],
         }
     }
@@ -663,6 +701,36 @@ fn content_target_label(target: &ContentTarget) -> String {
         }
         ContentTarget::OperationDefaultResponse(operation) => {
             format!("operation {} default response", operation.label())
+        }
+    }
+}
+
+fn operation_target_pointer(target: &OperationTarget) -> String {
+    format!(
+        "/paths/{}/{}",
+        json_pointer_escape(&target.path),
+        target.method.to_ascii_lowercase()
+    )
+}
+
+fn content_target_pointer(target: &ContentTarget) -> String {
+    match target {
+        ContentTarget::ComponentRequestBody(name) => {
+            format!("/components/requestBodies/{}", json_pointer_escape(name))
+        }
+        ContentTarget::ComponentResponse(name) => {
+            format!("/components/responses/{}", json_pointer_escape(name))
+        }
+        ContentTarget::OperationRequestBody(operation) => {
+            format!("{}/requestBody", operation_target_pointer(operation))
+        }
+        ContentTarget::OperationResponse { operation, status } => format!(
+            "{}/responses/{}",
+            operation_target_pointer(operation),
+            json_pointer_escape(status)
+        ),
+        ContentTarget::OperationDefaultResponse(operation) => {
+            format!("{}/responses/default", operation_target_pointer(operation))
         }
     }
 }

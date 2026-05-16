@@ -2,7 +2,7 @@
 //! to drive progenitor + wrapper templates.
 
 mod auth;
-pub(crate) use auth::AuthPlan;
+pub(crate) use auth::{AuthPlan, AuthSelectionPolicy};
 pub(crate) mod normalization_rules;
 pub mod normalize;
 mod pre_parse;
@@ -58,6 +58,7 @@ pub(crate) struct LoadedSpec {
 pub(crate) struct LoadOptions {
     pub slice: slice::SliceOptions,
     pub policy: transform::TransformPolicy,
+    pub auth_policy: AuthSelectionPolicy,
     pub backend_capabilities: BackendCapabilities,
 }
 
@@ -66,6 +67,7 @@ impl Default for LoadOptions {
         Self {
             slice: slice::SliceOptions::default(),
             policy: transform::TransformPolicy::default(),
+            auth_policy: AuthSelectionPolicy::default(),
             backend_capabilities: BackendCapabilities::progenitor(),
         }
     }
@@ -125,7 +127,7 @@ pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<Lo
     audits.extend(typed_audits);
     let mut transform_plan = transform::TransformPlan::from_reports_with_audits(&reports, audits);
     transform_plan.approve(&options.policy)?;
-    let (facts, auth_plan) = inspect_openapi(&spec)?;
+    let (facts, auth_plan) = inspect_openapi(&spec, &options.auth_policy)?;
     let normalization_reports = reports
         .iter()
         .filter(|report| report.stage != ReportStage::PreParseTolerance)
@@ -155,7 +157,10 @@ pub(crate) fn inspect_with_options(path: &Path, options: &LoadOptions) -> Result
     Ok(load_with_options(path, options)?.facts)
 }
 
-fn inspect_openapi(spec: &OpenAPI) -> Result<(SpecFacts, AuthPlan)> {
+fn inspect_openapi(
+    spec: &OpenAPI,
+    auth_policy: &AuthSelectionPolicy,
+) -> Result<(SpecFacts, AuthPlan)> {
     let title = spec.info.title.clone();
     let bin_name = bin_name_from_title(&title);
 
@@ -168,7 +173,7 @@ fn inspect_openapi(spec: &OpenAPI) -> Result<(SpecFacts, AuthPlan)> {
     };
 
     let operation_count = count_operations(spec);
-    let auth_plan = auth::derive_auth_plan(spec)?;
+    let auth_plan = auth::derive_auth_plan_with_policy(spec, auth_policy)?;
     let auth_kind = auth_plan.selected.clone();
 
     Ok((
@@ -465,7 +470,12 @@ paths:
             audit["source_stage"] == "typed_normalization"
                 && audit["code"] == "spec.normalize.response_variants_pruned"
                 && audit["target"] == "operation GET /pets responses"
+                && audit["target_pointer"] == "/paths/~1pets/get/responses"
+                && audit["action_kind"] == "prune"
+                && audit["backend_requirement_id"] == "progenitor.response.single_variant"
                 && audit.get("backend_requirement").is_some()
+                && audit.get("before_json").is_some()
+                && audit.get("after_json").is_some()
         }));
     }
 

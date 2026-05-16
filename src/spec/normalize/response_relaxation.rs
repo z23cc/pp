@@ -5,8 +5,9 @@ use crate::backend::BackendCapabilities;
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::references;
 use crate::spec::report::ReportEntry;
-use crate::spec::transform::TransformAuditEntry;
+use crate::spec::transform::{TransformActionKind, TransformAuditEntry};
 use crate::spec::traversal;
+use serde_json::json;
 
 type ReplaceCount = usize;
 
@@ -48,12 +49,18 @@ impl RelaxResponseSchemas {
                 self.count
             ),
         )
+        .with_action_kind(TransformActionKind::Relax)
+        .with_backend_requirement_id("progenitor.response_deserialization_tolerance")
         .with_backend_requirement(
             "backend requires response-only schemas to deserialize missing/null fields tolerantly",
         )
         .with_before_after(
             "required response fields / strict property schemas",
             "optional nullable response fields",
+        )
+        .with_before_after_json(
+            json!({ "required_fields": "strict", "property_schemas": "typed" }),
+            json!({ "required_fields": "optional", "property_schemas": "nullable_any" }),
         )
     }
 }

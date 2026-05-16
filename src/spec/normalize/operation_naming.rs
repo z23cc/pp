@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
-use crate::spec::transform::TransformAuditEntry;
+use crate::spec::transform::{json_pointer_escape, TransformActionKind, TransformAuditEntry};
 use crate::spec::traversal;
+use serde_json::json;
 
 const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
     "plausible_web_plugins_api_controllers_",
@@ -51,7 +52,14 @@ impl OperationNamingAction {
             format!("operation {} {} operationId", self.method, self.path),
             "shorten operationId",
         )
+        .with_target_pointer(format!(
+            "/paths/{}/{}/operationId",
+            json_pointer_escape(&self.path),
+            self.method
+        ))
+        .with_action_kind(TransformActionKind::Rename)
         .with_before_after(&self.old, &self.new)
+        .with_before_after_json(json!(&self.old), json!(&self.new))
     }
 }
 

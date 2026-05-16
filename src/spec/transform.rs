@@ -7,6 +7,7 @@
 use super::report::{ReportEffect, ReportEntry};
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +152,20 @@ impl PolicyProfile {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransformActionKind {
+    RawRepair,
+    Rename,
+    Prune,
+    Drop,
+    Rewrite,
+    Replace,
+    Relax,
+    BackendSourceTransform,
+    RuntimeBridge,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct TransformAuditEntry {
     pub source_stage: &'static str,
@@ -163,6 +178,16 @@ pub(crate) struct TransformAuditEntry {
     pub before: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_pointer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_kind: Option<TransformActionKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_requirement_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_json: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_json: Option<Value>,
 }
 
 impl TransformAuditEntry {
@@ -180,11 +205,31 @@ impl TransformAuditEntry {
             backend_requirement: None,
             before: None,
             after: None,
+            target_pointer: None,
+            action_kind: None,
+            backend_requirement_id: None,
+            before_json: None,
+            after_json: None,
         }
     }
 
     pub fn with_backend_requirement(mut self, value: impl Into<String>) -> Self {
         self.backend_requirement = Some(value.into());
+        self
+    }
+
+    pub fn with_target_pointer(mut self, value: impl Into<String>) -> Self {
+        self.target_pointer = Some(value.into());
+        self
+    }
+
+    pub fn with_action_kind(mut self, value: TransformActionKind) -> Self {
+        self.action_kind = Some(value);
+        self
+    }
+
+    pub fn with_backend_requirement_id(mut self, value: impl Into<String>) -> Self {
+        self.backend_requirement_id = Some(value.into());
         self
     }
 
@@ -197,6 +242,16 @@ impl TransformAuditEntry {
         self.after = Some(after.into());
         self
     }
+
+    pub fn with_before_after_json(mut self, before: Value, after: Value) -> Self {
+        self.before_json = Some(before);
+        self.after_json = Some(after);
+        self
+    }
+}
+
+pub(crate) fn json_pointer_escape(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
 }
 
 #[derive(Debug, Clone, Serialize)]

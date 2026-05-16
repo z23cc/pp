@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex};
 
 static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub const INVOCATION_ADAPTER_KIND: &str = {{ mcp_runtime.invocation_adapter_kind_literal }};
+pub const INVOCATION_ADAPTER_REASON: &str = {{ mcp_runtime.invocation_adapter_reason_literal }};
+
 pub struct ArgDef {
     pub json_name: &'static str,
     pub cli_name: &'static str,

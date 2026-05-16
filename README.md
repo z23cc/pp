@@ -88,6 +88,8 @@ Human-readable progress and diagnostics stay on stderr.
 MCP `tools/list` uses standard cursor pagination with a server-defined page size.
 Clients should follow `nextCursor` until it is absent to discover every generated tool.
 
+MCP tool calls currently use an audited transitional Progenitor CLI bridge: MCP JSON arguments are adapted into generated CLI argv/Clap dispatch before reaching the generated operation executor. This keeps CLI and MCP behavior aligned today, and each generated workspace records the bridge in `pp-transform-plan.json` as `runtime.mcp_invocation.progenitor_cli_bridge`; direct typed invocation remains future backend/runtime work.
+
 MCP tool calls return the full structured JSON response by default. Agent clients can opt into response shaping with reserved MCP-only parameters:
 
 - `_pp_fields`: array of object dot paths to keep, for example `["name", "types", "stats"]`.
@@ -117,6 +119,11 @@ exposes structured report entries through `pp inspect --reports`, and writes
 `--allow-effect <effect>` or `--allow-report-code <code>` when only one transform class
 or report code is acceptable.
 
+The transform plan also includes machine-readable audit entries for applied raw repairs,
+typed normalization, backend source transforms, and runtime-generation seams. Audit entries
+keep their existing text fields and may include structured fields such as `target_pointer`,
+`action_kind`, `backend_requirement_id`, `before_json`, and `after_json`.
+
 Available transform effects are `lossless_repair`, `explicit_selection`, `lossy_rewrite`,
 `semantic_drop`, `backend_workaround`, and `unsafe_fallback`.
 
@@ -143,6 +150,13 @@ Generated CLIs currently support:
 - header `apiKey` via `<BIN>_API_KEY`
 - HTTP basic via `<BIN>_USER` and `<BIN>_PASSWORD`
 - OAuth2 treated as bearer token input
+
+By default, auth selection remains legacy-compatible: when multiple supported component
+security schemes are present, `pp` keeps the first supported scheme in component order.
+Use `--auth-policy fail-ambiguous` with `inspect` or `generate` to fail instead when more
+than one supported component scheme is selectable. Use `--auth-scheme <NAME>` to select a
+specific `components.securitySchemes` entry; this overrides `--auth-policy` and does not
+fall back to query-parameter heuristics.
 
 Example:
 

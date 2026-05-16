@@ -146,7 +146,9 @@ mod tests {
     use crate::backend::BackendCapabilities;
     use crate::spec::normalization_rules::typed;
     use crate::spec::report::{ReportStage, ReportSubject};
-    use crate::spec::transform::{TransformAuditEntry, TransformPlan, TransformPolicy};
+    use crate::spec::transform::{
+        TransformActionKind, TransformAuditEntry, TransformPlan, TransformPolicy,
+    };
 
     fn assert_strict_rejects_typed_proposal_without_mutating_spec(
         yaml: &str,
@@ -213,9 +215,15 @@ paths:
                 "operation get /capabilities operationId",
                 "shorten operationId",
             )
+            .with_target_pointer("/paths/~1capabilities/get/operationId")
+            .with_action_kind(TransformActionKind::Rename)
             .with_before_after(
                 "PlausibleWeb.Plugins.API.Controllers.Capabilities.index",
                 "capabilities_index",
+            )
+            .with_before_after_json(
+                serde_json::json!("PlausibleWeb.Plugins.API.Controllers.Capabilities.index"),
+                serde_json::json!("capabilities_index"),
             )
         );
         assert_eq!(
