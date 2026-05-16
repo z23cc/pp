@@ -58,7 +58,7 @@ impl TransformPlan {
                 message.push_str(&format!("\n- ... {} more", rejected.len() - 8));
             }
             message.push_str(
-                "\nPass --allow-effect, --allow-report-code, or --allow-compat-normalization to approve explicit compatibility transforms.",
+                "\nPass --allow-effect or --allow-report-code to approve explicit compatibility transforms.",
             );
             return Err(anyhow!(message));
         }

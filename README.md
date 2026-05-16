@@ -20,16 +20,16 @@ cargo install --path .
 pp --help
 ```
 
-Inspect the facts `pp` derives from a spec:
+List operations in a spec for discovery and slicing:
 
 ```bash
-pp inspect testdata/petstore.yaml --allow-compat-normalization
+pp inspect testdata/petstore.yaml --list-operations
 ```
 
 Generate a CLI workspace and build it:
 
 ```bash
-pp generate testdata/petstore.yaml -o ./out/petstore --allow-compat-normalization --build
+pp generate testdata/petstore.yaml -o ./out/petstore --allow-effect semantic_drop --build
 ./out/petstore/target/release/swagger-petstore --help
 ```
 
@@ -46,7 +46,7 @@ pp generate testdata/petstore.yaml -o ./out/petstore --allow-compat-normalizatio
 Every generated binary supports human CLI commands and an MCP stdio server:
 
 ```bash
-pp generate stripe.yaml -o ./stripe --allow-compat-normalization --build
+pp generate stripe.yaml -o ./stripe --allow-effect semantic_drop --build
 cargo install --path ./stripe
 stripe charges_retrieve --id ch_123
 stripe mcp
@@ -100,9 +100,9 @@ These `_pp_` controls only apply to successful MCP tool results. CLI `--json` ou
 ## Spec normalization
 
 `pp` is strict by default: compatibility rewrites, lossy drops, backend workarounds,
-and unsafe fallback replacements fail generation instead of silently proceeding. Pass
-`--allow-compat-normalization` to explicitly permit these transformations for real-world
-specs that require progenitor compatibility.
+and unsafe fallback replacements fail generation instead of silently proceeding. Approve
+only the required compatibility work with `--allow-effect <effect>` or
+`--allow-report-code <code>`.
 
 Generated workspaces also require an explicit base URL. `pp` uses `servers[0].url` from
 the spec, or `--base-url <URL>` when the spec does not declare a server; it no longer
@@ -113,11 +113,11 @@ stable `operationId`. `pp inspect --list-operations` still shows discovery-only 
 IDs for unnamed operations, but generation fails until those operations are given an
 `operationId` or excluded from the generated surface.
 
-When compatibility normalization is allowed, `pp` prints each normalization to stderr,
-exposes structured report entries through `pp inspect --reports`, and writes
-`pp-transform-plan.json` into generated workspaces. Prefer targeted approval with
-`--allow-effect <effect>` or `--allow-report-code <code>` when only one transform class
-or report code is acceptable.
+When compatibility normalization is allowed by effect or report code, `pp` prints each
+normalization to stderr, exposes structured report entries through `pp inspect --reports`,
+and writes `pp-transform-plan.json` into generated workspaces. Use
+`pp inspect --reports --allow-report-code <code>` to approve a single known rule, or
+`--allow-effect <effect>` to approve a narrow class of transforms.
 
 The transform plan also includes machine-readable audit entries for applied raw repairs,
 typed normalization, backend source transforms, and runtime-generation seams. Audit entries
@@ -132,16 +132,16 @@ not an implicit fallback path in strict mode.
 Current compatibility rules:
 
 - Request body media types: keep `application/json` when present, otherwise fail unless
-  compatibility normalization is explicitly allowed.
+  the specific report code or effect is explicitly allowed.
 - Response media types: keep `application/json` when present, otherwise fail unless
-  compatibility normalization is explicitly allowed.
+  the specific report code or effect is explicitly allowed.
 - Response variants: keep `200`, else the first 2xx response, else the first
   available response such as `default`; strict mode rejects this pruning by default.
-- Schemaless request bodies: drop CLI body input when no JSON Schema is present.
+- Schemaless request bodies: dropping CLI body input when no JSON Schema is present requires explicit approval by report code or effect.
 - OpenAPI 3.1: downgrade supported 3.1 shapes into the 3.0 parser path only when
-  compatibility normalization is explicitly allowed.
+  the specific report code or effect is explicitly allowed.
 - Enum collisions, property name collisions, and unsupported schema types are
-  rewritten when compatibility normalization is explicitly allowed so codegen can continue.
+  rewritten only when the specific report code or effect is explicitly allowed so codegen can continue.
 
 ## Auth
 
@@ -153,12 +153,11 @@ Generated CLIs currently support:
 - HTTP basic via `<BIN>_USER` and `<BIN>_PASSWORD`
 - OAuth2 treated as bearer token input
 
-By default, auth selection remains compatibility-preserving: when multiple supported component
-security schemes are present, the `legacy` policy keeps the first supported scheme in component order.
-Use `--auth-policy fail-ambiguous` with `inspect` or `generate` to fail instead when more
-than one supported component scheme is selectable. Use `--auth-scheme <NAME>` to select a
-specific `components.securitySchemes` entry; this overrides `--auth-policy` and does not
-fall back to query-parameter heuristics.
+By default, auth selection fails when multiple supported component security schemes are
+selectable. Use `--auth-scheme <NAME>` to select a specific
+`components.securitySchemes` entry; this overrides `--auth-policy` and does not fall back
+to query-parameter heuristics. Use `--auth-policy legacy` only when you intentionally want
+the previous component-order compatibility behavior.
 
 Example:
 
@@ -197,6 +196,6 @@ Issues and PRs are welcome. Before submitting, run:
 
 ```bash
 cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```

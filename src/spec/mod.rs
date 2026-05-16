@@ -54,6 +54,11 @@ pub(crate) struct LoadedSpec {
     pub normalization_warnings: Vec<String>,
 }
 
+pub(crate) struct LoadedOperationListingSpec {
+    pub api: OpenAPI,
+    pub reports: Vec<ReportEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoadOptions {
     pub slice: slice::SliceOptions,
@@ -90,6 +95,44 @@ pub(crate) fn load(path: &Path) -> Result<LoadedSpec> {
 }
 
 pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
+    let prepared = prepare_openapi(path, options)?;
+    let (facts, auth_plan) = inspect_openapi(&prepared.api, &options.auth_policy)?;
+    let normalization_reports = prepared
+        .reports
+        .iter()
+        .filter(|report| report.stage != ReportStage::PreParseTolerance)
+        .cloned()
+        .collect::<Vec<_>>();
+    let normalization_warnings = report::formatted_warnings(&normalization_reports);
+
+    Ok(LoadedSpec {
+        api: prepared.api,
+        facts,
+        auth_plan,
+        reports: prepared.reports,
+        transform_plan: prepared.transform_plan,
+        normalization_warnings,
+    })
+}
+
+pub(crate) fn load_for_operation_listing(
+    path: &Path,
+    options: &LoadOptions,
+) -> Result<LoadedOperationListingSpec> {
+    let prepared = prepare_openapi(path, options)?;
+    Ok(LoadedOperationListingSpec {
+        api: prepared.api,
+        reports: prepared.reports,
+    })
+}
+
+struct PreparedOpenApi {
+    api: OpenAPI,
+    reports: Vec<ReportEntry>,
+    transform_plan: transform::TransformPlan,
+}
+
+fn prepare_openapi(path: &Path, options: &LoadOptions) -> Result<PreparedOpenApi> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let raw_repair_plan = pre_parse::RawSpecRepairPlan::propose(&raw)?;
@@ -103,15 +146,15 @@ pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<Lo
         Some(raw_repair_plan.apply(&raw)?)
     };
     let parse_raw = repaired_raw.as_deref().unwrap_or(&raw);
-    let mut spec = parse_prepared(parse_raw)
+    let mut api = parse_prepared(parse_raw)
         .with_context(|| format!("failed to parse spec: {}", path.display()))?;
     let mut reports = raw_reports;
     if !options.slice.is_noop() {
-        let slice_report = slice::slice_openapi(&mut spec, &options.slice)?;
+        let slice_report = slice::slice_openapi(&mut api, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
     let approved_typed_normalization_transforms =
-        normalize::propose_typed_normalization_transforms(&spec, &options.backend_capabilities);
+        normalize::propose_typed_normalization_transforms(&api, &options.backend_capabilities);
     let proposed_reports = approved_typed_normalization_transforms.report_entries();
     let typed_audits = approved_typed_normalization_transforms.audit_entries();
     let mut proposed_plan = transform::TransformPlan::from_reports(&proposed_reports);
@@ -119,7 +162,7 @@ pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<Lo
 
     reports.extend(
         normalize::normalize_with_approved_typed_normalization_transforms(
-            &mut spec,
+            &mut api,
             &options.backend_capabilities,
             &approved_typed_normalization_transforms,
         )?,
@@ -127,21 +170,11 @@ pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<Lo
     audits.extend(typed_audits);
     let mut transform_plan = transform::TransformPlan::from_reports_with_audits(&reports, audits);
     transform_plan.approve(&options.policy)?;
-    let (facts, auth_plan) = inspect_openapi(&spec, &options.auth_policy)?;
-    let normalization_reports = reports
-        .iter()
-        .filter(|report| report.stage != ReportStage::PreParseTolerance)
-        .cloned()
-        .collect::<Vec<_>>();
-    let normalization_warnings = report::formatted_warnings(&normalization_reports);
 
-    Ok(LoadedSpec {
-        api: spec,
-        facts,
-        auth_plan,
+    Ok(PreparedOpenApi {
+        api,
         reports,
         transform_plan,
-        normalization_warnings,
     })
 }
 

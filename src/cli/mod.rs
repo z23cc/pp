@@ -56,8 +56,8 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit all compatibility transforms instead of strict transform-policy rejection
-        #[arg(long)]
+        /// Deprecated hidden escape hatch: permit all compatibility transforms.
+        #[arg(long, hide = true)]
         allow_compat_normalization: bool,
         /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
         #[arg(long = "allow-effect", value_parser = parse_report_effect)]
@@ -66,7 +66,7 @@ pub enum Command {
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
         /// Auth selection behavior when multiple component security schemes are selectable
-        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::Legacy)]
+        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::FailAmbiguous)]
         auth_policy: AuthPolicyArg,
         /// Explicit component security scheme name to use for generated auth
         #[arg(long = "auth-scheme")]
@@ -100,8 +100,8 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit all compatibility transforms instead of strict transform-policy rejection
-        #[arg(long)]
+        /// Deprecated hidden escape hatch: permit all compatibility transforms.
+        #[arg(long, hide = true)]
         allow_compat_normalization: bool,
         /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
         #[arg(long = "allow-effect", value_parser = parse_report_effect)]
@@ -110,7 +110,7 @@ pub enum Command {
         #[arg(long = "allow-report-code")]
         allow_report_codes: Vec<String>,
         /// Auth selection behavior when multiple component security schemes are selectable
-        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::Legacy)]
+        #[arg(long = "auth-policy", value_enum, default_value_t = AuthPolicyArg::FailAmbiguous)]
         auth_policy: AuthPolicyArg,
         /// Explicit component security scheme name to use for generated auth
         #[arg(long = "auth-scheme")]
@@ -256,7 +256,7 @@ impl Cli {
                 if list_operations {
                     let mut options = options.clone();
                     options.policy = crate::spec::transform::TransformPolicy::compatibility();
-                    let loaded = crate::spec::load_with_options(&spec, &options)?;
+                    let loaded = crate::spec::load_for_operation_listing(&spec, &options)?;
                     for report in &loaded.reports {
                         eprintln!("pp: {}", report.formatted_warning());
                     }
@@ -335,7 +335,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn load_options_auth_scheme_overrides_policy() {
@@ -359,8 +359,42 @@ mod tests {
     }
 
     #[test]
-    fn inspect_defaults_to_legacy_compatible_auth_policy() {
+    fn inspect_defaults_to_fail_ambiguous_auth_policy() {
         let cli = Cli::parse_from(["pp", "inspect", "spec.yaml"]);
+
+        match cli.command {
+            Command::Inspect {
+                auth_policy,
+                auth_scheme,
+                ..
+            } => {
+                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+                assert!(auth_scheme.is_none());
+            }
+            _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn generate_defaults_to_fail_ambiguous_auth_policy() {
+        let cli = Cli::parse_from(["pp", "generate", "spec.yaml", "-o", "out"]);
+
+        match cli.command {
+            Command::Generate {
+                auth_policy,
+                auth_scheme,
+                ..
+            } => {
+                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
+                assert!(auth_scheme.is_none());
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn inspect_accepts_legacy_auth_policy_flag() {
+        let cli = Cli::parse_from(["pp", "inspect", "spec.yaml", "--auth-policy", "legacy"]);
 
         match cli.command {
             Command::Inspect {
@@ -376,41 +410,30 @@ mod tests {
     }
 
     #[test]
-    fn generate_defaults_to_legacy_compatible_auth_policy() {
-        let cli = Cli::parse_from(["pp", "generate", "spec.yaml", "-o", "out"]);
-
-        match cli.command {
-            Command::Generate {
-                auth_policy,
-                auth_scheme,
-                ..
-            } => {
-                assert!(matches!(auth_policy, AuthPolicyArg::Legacy));
-                assert!(auth_scheme.is_none());
-            }
-            _ => panic!("expected generate command"),
-        }
+    fn help_hides_deprecated_compat_normalization_flag() {
+        let mut command = Cli::command();
+        let inspect = command
+            .find_subcommand_mut("inspect")
+            .expect("inspect subcommand");
+        let mut help = Vec::new();
+        inspect
+            .write_long_help(&mut help)
+            .expect("render inspect help");
+        let help = String::from_utf8(help).expect("help is UTF-8");
+        assert!(!help.contains("--allow-compat-normalization"));
+        assert!(help.contains("--allow-effect"));
+        assert!(help.contains("--allow-report-code"));
     }
 
     #[test]
-    fn inspect_accepts_fail_ambiguous_auth_policy_flag() {
-        let cli = Cli::parse_from([
-            "pp",
-            "inspect",
-            "spec.yaml",
-            "--auth-policy",
-            "fail-ambiguous",
-        ]);
+    fn hidden_compat_normalization_flag_remains_explicit_opt_in() {
+        let cli = Cli::parse_from(["pp", "inspect", "spec.yaml", "--allow-compat-normalization"]);
 
         match cli.command {
             Command::Inspect {
-                auth_policy,
-                auth_scheme,
+                allow_compat_normalization,
                 ..
-            } => {
-                assert!(matches!(auth_policy, AuthPolicyArg::FailAmbiguous));
-                assert!(auth_scheme.is_none());
-            }
+            } => assert!(allow_compat_normalization),
             _ => panic!("expected inspect command"),
         }
     }

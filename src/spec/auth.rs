@@ -6,8 +6,8 @@ use crate::spec::{traversal, AuthKind};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum AuthSelectionPolicy {
-    #[default]
     LegacyCompatible,
+    #[default]
     FailAmbiguous,
     ExplicitScheme {
         name: String,
@@ -107,7 +107,7 @@ pub(super) fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
 }
 
 pub(super) fn derive_auth_plan(spec: &OpenAPI) -> Result<AuthPlan> {
-    derive_auth_plan_with_policy(spec, &AuthSelectionPolicy::LegacyCompatible)
+    derive_auth_plan_with_policy(spec, &AuthSelectionPolicy::default())
 }
 
 pub(crate) fn derive_auth_plan_with_policy(
@@ -678,14 +678,17 @@ components:
         )
         .unwrap();
 
-        let plan = derive_auth_plan(&spec).unwrap();
+        let err = derive_auth_plan(&spec).unwrap_err().to_string();
+        assert!(err.contains("ambiguous auth schemes: apiKeyAuth, bearerAuth"));
+
+        let plan =
+            derive_auth_plan_with_policy(&spec, &AuthSelectionPolicy::LegacyCompatible).unwrap();
         assert_eq!(
             plan.selected,
             AuthKind::ApiKey {
                 header_name: "X-API-Key".into()
             }
         );
-        assert_eq!(derive_auth_kind(&spec).unwrap(), plan.selected);
         assert_eq!(
             plan.decision,
             AuthDecision::AmbiguousSelectedForCompatibility {
@@ -698,6 +701,14 @@ components:
                 selection_basis: AuthSelectionBasis::LegacyComponentOrderCompatibility,
             }
         );
+    }
+
+    #[test]
+    fn default_auth_policy_is_fail_ambiguous() {
+        assert!(matches!(
+            AuthSelectionPolicy::default(),
+            AuthSelectionPolicy::FailAmbiguous
+        ));
     }
 
     #[test]
@@ -848,13 +859,14 @@ components:
         )
         .unwrap();
 
-        let plan = derive_auth_plan(&spec).unwrap();
+        let plan =
+            derive_auth_plan_with_policy(&spec, &AuthSelectionPolicy::LegacyCompatible).unwrap();
         assert_eq!(
             plan.selected,
             AuthKind::ApiKey {
                 header_name: "X-API-Key".into()
             },
-            "selected auth remains component-order compatible even when requirements are inspectable"
+            "legacy policy preserves component-order compatibility even when requirements are inspectable"
         );
         assert_eq!(
             plan.requirements.global,
@@ -867,7 +879,7 @@ components:
     }
 
     #[test]
-    fn oauth2_first_bearer_second_detects_bearer() {
+    fn oauth2_first_bearer_second_fails_ambiguous_by_default() {
         let spec: OpenAPI = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
@@ -887,7 +899,12 @@ components:
         )
         .unwrap();
 
-        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
+        let err = derive_auth_kind(&spec).unwrap_err().to_string();
+        assert!(err.contains("ambiguous auth schemes: oauth2, bearerAuth"));
+
+        let legacy_plan =
+            derive_auth_plan_with_policy(&spec, &AuthSelectionPolicy::LegacyCompatible).unwrap();
+        assert_eq!(legacy_plan.selected, AuthKind::Bearer);
     }
 
     #[test]
@@ -912,9 +929,12 @@ components:
         )
         .unwrap();
 
-        let plan = derive_auth_plan(&spec).unwrap();
+        let err = derive_auth_plan(&spec).unwrap_err().to_string();
+        assert!(err.contains("ambiguous auth schemes: oauth2, apiKeyAuth"));
+
+        let plan =
+            derive_auth_plan_with_policy(&spec, &AuthSelectionPolicy::LegacyCompatible).unwrap();
         assert_eq!(plan.selected, AuthKind::Bearer);
-        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
         assert_eq!(
             plan.decision,
             AuthDecision::AmbiguousSelectedForCompatibility {

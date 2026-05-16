@@ -7,15 +7,26 @@ pub fn pp_bin() -> &'static str {
 
 #[allow(dead_code)]
 pub fn run_pp_generate(spec: &Path, out_dir: &Path) -> Output {
-    Command::new(pp_bin())
-        .arg("generate")
-        .arg(spec)
-        .arg("-o")
-        .arg(out_dir)
-        .arg("--allow-compat-normalization")
+    pp_generate_command(spec, out_dir)
         .arg("--build")
         .output()
         .expect("failed to run pp generate")
+}
+
+#[allow(dead_code)]
+pub fn run_pp_generate_allow_semantic_drop(spec: &Path, out_dir: &Path) -> Output {
+    pp_generate_command(spec, out_dir)
+        .arg("--allow-effect")
+        .arg("semantic_drop")
+        .arg("--build")
+        .output()
+        .expect("failed to run pp generate")
+}
+
+fn pp_generate_command(spec: &Path, out_dir: &Path) -> Command {
+    let mut command = Command::new(pp_bin());
+    command.arg("generate").arg(spec).arg("-o").arg(out_dir);
+    command
 }
 
 pub fn assert_success(output: Output, label: &str) {

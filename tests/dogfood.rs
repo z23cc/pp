@@ -24,7 +24,7 @@ fn fixture_clis_expose_mcp_tools() {
             .join(fixture);
         let out_dir = temp.path().join("out");
         common::assert_success(
-            common::run_pp_generate(&spec, &out_dir),
+            common::run_pp_generate_allow_semantic_drop(&spec, &out_dir),
             &format!("pp generate --build {fixture}"),
         );
         let tools = list_tools(&common::generated_bin(&out_dir, bin_name), env);

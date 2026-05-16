@@ -10,7 +10,7 @@ fn petstore_generate_builds_and_lists_real_path_and_query_param_ops() {
     let out_dir = temp.path().join("out");
 
     common::assert_success(
-        common::run_pp_generate(&spec, &out_dir),
+        common::run_pp_generate_allow_semantic_drop(&spec, &out_dir),
         "pp generate --build",
     );
 

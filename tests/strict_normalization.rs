@@ -130,6 +130,29 @@ components:
             type: object
 "##;
 
+const AMBIGUOUS_AUTH_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Ambiguous Auth Fixture
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    bearerAuth:
+      type: http
+      scheme: bearer
+"#;
+
 const MISSING_OPERATION_ID_SPEC: &str = r#"
 openapi: 3.0.0
 info:
@@ -162,8 +185,12 @@ fn inspect_rejects_compat_normalization_by_default() {
         "stderr did not name response pruning report:\n{stderr}"
     );
     assert!(
-        stderr.contains("--allow-compat-normalization"),
-        "stderr did not include opt-in hint:\n{stderr}"
+        stderr.contains("--allow-effect") && stderr.contains("--allow-report-code"),
+        "stderr did not include granular opt-in hint:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("--allow-compat-normalization"),
+        "stderr should not advertise broad compat opt-in:\n{stderr}"
     );
 }
 
@@ -176,6 +203,41 @@ fn list_operations_supports_discovery_without_opt_in() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listItems"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn list_operations_skips_auth_derivation_for_discovery() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(temp.path(), "ambiguous-auth.yaml", AMBIGUOUS_AUTH_SPEC);
+
+    let default_output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(&spec)
+        .output()
+        .expect("failed to run pp inspect");
+    assert!(
+        !default_output.status.success(),
+        "normal strict inspect should reject ambiguous auth"
+    );
+    let stderr = String::from_utf8_lossy(&default_output.stderr);
+    assert!(
+        stderr.contains("ambiguous auth schemes: apiKeyAuth, bearerAuth"),
+        "stderr did not explain auth ambiguity:\n{stderr}"
+    );
+
+    let listing_output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(spec)
+        .arg("--list-operations")
+        .output()
+        .expect("failed to run pp inspect --list-operations");
+    assert!(
+        listing_output.status.success(),
+        "operation listing should remain a discovery path despite auth ambiguity\nstderr:\n{}",
+        String::from_utf8_lossy(&listing_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listing_output.stdout);
     assert!(stdout.contains("listItems"), "stdout:\n{stdout}");
 }
 
@@ -277,14 +339,12 @@ fn inspect_allows_component_multipart_only_request_body_when_explicit() {
         .arg("inspect")
         .arg(spec)
         .arg("--reports")
-        .arg("--allow-compat-normalization")
+        .arg("--allow-report-code")
+        .arg("spec.normalize.unsupported_request_bodies_dropped")
         .output()
         .expect("failed to run pp inspect");
 
-    common::assert_success(
-        output,
-        "pp inspect component multipart --allow-compat-normalization",
-    );
+    common::assert_success(output, "pp inspect component multipart --allow-report-code");
 }
 
 #[test]
@@ -310,9 +370,12 @@ fn inspect_allows_specific_report_code_when_explicit() {
 }
 
 #[test]
-fn inspect_allows_compat_normalization_when_explicit() {
+fn hidden_compat_normalization_still_approves_transforms_when_explicit() {
     let output = run_inspect(&["--reports", "--allow-compat-normalization"]);
-    common::assert_success(output, "pp inspect --allow-compat-normalization --reports");
+    common::assert_success(
+        output,
+        "pp inspect hidden --allow-compat-normalization --reports",
+    );
 }
 
 #[test]
@@ -428,7 +491,7 @@ fn generate_rejects_missing_server_without_explicit_base_url() {
 
 #[test]
 fn report_json_exposes_effect_classification() {
-    let output = run_inspect(&["--reports", "--allow-compat-normalization"]);
+    let output = run_inspect(&["--reports", "--allow-effect", "semantic_drop"]);
     assert!(
         output.status.success(),
         "pp inspect --reports failed\nstdout:\n{}\nstderr:\n{}",
