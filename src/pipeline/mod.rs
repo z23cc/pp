@@ -90,7 +90,10 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         spec_path: request.spec_path.clone(),
     });
 
-    let loaded = crate::spec::load_with_options(&request.spec_path, &request.load_options)?;
+    let load_options = request
+        .load_options
+        .with_backend_capabilities(backend.capabilities());
+    let loaded = crate::spec::load_with_options(&request.spec_path, &load_options)?;
 
     for report in &loaded.reports {
         progress(GenerateProgress::Warning {
@@ -217,7 +220,10 @@ pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{ApiCrateOutput, SourceTransformDiagnostic, SourceTransformPurpose};
+    use crate::backend::{
+        ApiCrateOutput, BackendCapabilities, SourceTransformDiagnostic, SourceTransformPurpose,
+    };
+    use crate::spec::normalization_rules::typed;
 
     const MINIMAL_SPEC: &str = r#"
 openapi: 3.0.0
@@ -230,6 +236,68 @@ paths:
   /pets:
     get:
       operationId: listPets
+      responses:
+        '200':
+          description: ok
+"#;
+
+    const DEEP_OBJECT_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Backend Capability Fixture
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /search:
+    get:
+      operationId: searchThings
+      parameters:
+        - name: filter
+          in: query
+          required: true
+          style: deepObject
+          schema:
+            type: object
+            properties:
+              name:
+                type: string
+      responses:
+        '200':
+          description: ok
+"#;
+
+    const MISSING_OPERATION_ID_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Missing Operation ID Fixture
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /pets/{id}:
+    get:
+      responses:
+        '200':
+          description: ok
+"#;
+
+    const MIXED_OPERATION_ID_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Mixed Operation ID Fixture
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+  /pets/{id}:
+    get:
       responses:
         '200':
           description: ok
@@ -268,6 +336,94 @@ paths:
         assert!(result.output_path.join("Cargo.toml").exists());
         assert!(result.output_path.join("api/src/lib.rs").exists());
         assert!(result.output_path.join("pp-transform-plan.json").exists());
+    }
+
+    #[test]
+    fn generate_rejects_selected_operation_missing_operation_id_before_backend() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = temp.path().join("spec.yaml");
+        std::fs::write(&spec_path, MISSING_OPERATION_ID_SPEC).expect("write spec");
+        let output_path = temp.path().join("out");
+        let backend = FakeBackend::default();
+
+        let error = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path,
+                bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
+                validate: false,
+                load_options: LoadOptions::default(),
+            },
+            &backend,
+            |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("operation GET /pets/{id} is missing operationId"));
+        assert!(error.contains("explicit operationId is required for codegen/MCP identity"));
+    }
+
+    #[test]
+    fn generate_succeeds_when_missing_operation_id_operation_is_excluded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = temp.path().join("spec.yaml");
+        std::fs::write(&spec_path, MIXED_OPERATION_ID_SPEC).expect("write spec");
+        let output_path = temp.path().join("out");
+        let backend = FakeBackend::default();
+
+        let result = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path,
+                bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
+                validate: false,
+                load_options: LoadOptions {
+                    slice: crate::spec::slice::SliceOptions {
+                        exclude_operations: vec!["get /pets/{id}".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+            &backend,
+            |_| {},
+        )
+        .expect("excluded unnamed operation is not selected for generation");
+
+        assert_eq!(result.facts.operation_count, 1);
+    }
+
+    #[test]
+    fn generate_uses_backend_capabilities_during_spec_preparation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = temp.path().join("spec.yaml");
+        std::fs::write(&spec_path, DEEP_OBJECT_SPEC).expect("write spec");
+        let output_path = temp.path().join("out");
+        let mut capabilities = BackendCapabilities::progenitor();
+        capabilities.supports_deep_object_query_parameters = true;
+        let backend = FakeBackend::with_capabilities(capabilities);
+
+        let result = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path,
+                bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
+                validate: false,
+                load_options: LoadOptions::default(),
+            },
+            &backend,
+            |_| {},
+        )
+        .expect("backend capability avoids deepObject compatibility rewrite");
+
+        assert!(result
+            .reports
+            .iter()
+            .all(|report| report.code != typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN));
     }
 
     #[test]
@@ -344,15 +500,32 @@ paths:
         spec_path
     }
 
-    #[derive(Default)]
     struct FakeBackend {
         output: ApiCrateOutput,
+        capabilities: BackendCapabilities,
+    }
+
+    impl Default for FakeBackend {
+        fn default() -> Self {
+            Self {
+                output: ApiCrateOutput::default(),
+                capabilities: BackendCapabilities::progenitor(),
+            }
+        }
     }
 
     impl FakeBackend {
         fn with_diagnostics(diagnostics: Vec<BackendDiagnostic>) -> Self {
             Self {
                 output: ApiCrateOutput { diagnostics },
+                capabilities: BackendCapabilities::progenitor(),
+            }
+        }
+
+        fn with_capabilities(capabilities: BackendCapabilities) -> Self {
+            Self {
+                output: ApiCrateOutput::default(),
+                capabilities,
             }
         }
     }
@@ -360,6 +533,10 @@ paths:
     impl ApiBackend for FakeBackend {
         fn name(&self) -> &'static str {
             "fake"
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            self.capabilities.clone()
         }
 
         fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<ApiCrateOutput> {

@@ -31,10 +31,19 @@ impl SliceOptions {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OperationListing {
+    /// Back-compatible discovery identifier: explicit operationId when present,
+    /// otherwise a derived method/path label.
     pub id: String,
     pub method: String,
     pub path: String,
     pub tags: Vec<String>,
+    /// The explicit OpenAPI operationId used by codegen/MCP identity.
+    pub operation_id: Option<String>,
+    /// A discovery-only identifier derived from method and path.
+    pub derived_id: String,
+    /// Whether this operation can be used by generation/model paths without
+    /// first adding an explicit operationId to the source spec.
+    pub generatable: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -97,15 +106,20 @@ pub struct PrunedComponents {
 pub fn list_operations(api: &OpenAPI) -> Vec<OperationListing> {
     traversal::operations(api)
         .into_iter()
-        .map(|operation| OperationListing {
-            id: traversal::operation_identifier(
-                operation.method,
-                operation.path,
-                operation.operation,
-            ),
-            method: operation.method.to_string(),
-            path: operation.path.to_string(),
-            tags: operation.operation.tags.clone(),
+        .map(|operation| {
+            let derived_id =
+                traversal::derived_operation_identifier(operation.method, operation.path);
+            let operation_id =
+                traversal::explicit_operation_id(operation.operation).map(str::to_string);
+            OperationListing {
+                id: operation_id.clone().unwrap_or_else(|| derived_id.clone()),
+                method: operation.method.to_string(),
+                path: operation.path.to_string(),
+                tags: operation.operation.tags.clone(),
+                generatable: operation_id.is_some(),
+                operation_id,
+                derived_id,
+            }
         })
         .collect()
 }
@@ -413,6 +427,9 @@ paths:
         assert_eq!(operations[0].id, "patch /items/{id}");
         assert_eq!(operations[0].method, "patch");
         assert_eq!(operations[0].path, "/items/{id}");
+        assert_eq!(operations[0].operation_id, None);
+        assert_eq!(operations[0].derived_id, "patch /items/{id}");
+        assert!(!operations[0].generatable);
     }
 
     #[test]

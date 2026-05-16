@@ -1,6 +1,8 @@
 use anyhow::Result;
 use openapiv3::OpenAPI;
 
+use crate::backend::BackendCapabilities;
+
 use super::normalization_rules::{self as rules, typed};
 use super::report::ReportEntry;
 
@@ -13,12 +15,28 @@ use openapiv3::{QueryStyle, ReferenceOr, SchemaKind, StatusCode, Type};
 #[cfg(test)]
 use progenitor_compatibility::{FORM_MIME, JSON_MIME};
 
-pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<ReportEntry>> {
+pub(crate) fn propose_compatibility_transforms(
+    spec: &OpenAPI,
+    backend_capabilities: &BackendCapabilities,
+) -> progenitor_compatibility::CompatibilityTransformPlan {
+    progenitor_compatibility::propose_transforms(spec, backend_capabilities)
+}
+
+pub(crate) fn normalize_with_approved_compatibility_transforms(
+    spec: &mut OpenAPI,
+    backend_capabilities: &BackendCapabilities,
+    approved_compatibility_transforms: &progenitor_compatibility::CompatibilityTransformPlan,
+) -> Result<Vec<ReportEntry>> {
     let mut reports = Vec::new();
     apply_operation_naming_rules(spec, &mut reports);
-    let compatibility_stats = progenitor_compatibility::apply(spec, &mut reports)?;
+    let compatibility_stats = progenitor_compatibility::apply_approved(
+        spec,
+        &mut reports,
+        backend_capabilities,
+        approved_compatibility_transforms,
+    )?;
     progenitor_compatibility::emit_summary_reports(&mut reports, &compatibility_stats);
-    apply_response_relaxation_rules(spec, &mut reports);
+    apply_response_relaxation_rules(spec, &mut reports, backend_capabilities);
     progenitor_compatibility::emit_optional_object_query_param_report(
         &mut reports,
         &compatibility_stats,
@@ -27,11 +45,33 @@ pub fn normalize(spec: &mut OpenAPI) -> Result<Vec<ReportEntry>> {
     Ok(reports)
 }
 
+#[cfg(test)]
+fn normalize_unchecked_for_tests(
+    spec: &mut OpenAPI,
+    backend_capabilities: &BackendCapabilities,
+) -> Result<Vec<ReportEntry>> {
+    let approved_compatibility_transforms =
+        propose_compatibility_transforms(spec, backend_capabilities);
+    normalize_with_approved_compatibility_transforms(
+        spec,
+        backend_capabilities,
+        &approved_compatibility_transforms,
+    )
+}
+
 fn apply_operation_naming_rules(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
     operation_naming::apply(spec, reports);
 }
 
-fn apply_response_relaxation_rules(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
+fn apply_response_relaxation_rules(
+    spec: &mut OpenAPI,
+    reports: &mut Vec<ReportEntry>,
+    backend_capabilities: &BackendCapabilities,
+) {
+    if !backend_capabilities.requires_relaxed_response_schemas {
+        return;
+    }
+
     let relaxed_responses = response_relaxation::relax_response_schemas(spec);
     if relaxed_responses > 0 {
         reports.push(rules::typed_warning(
@@ -44,7 +84,172 @@ fn apply_response_relaxation_rules(spec: &mut OpenAPI, reports: &mut Vec<ReportE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BackendCapabilities;
+    use crate::spec::normalization_rules::typed;
     use crate::spec::report::{ReportStage, ReportSubject};
+    use crate::spec::transform::{TransformPlan, TransformPolicy};
+
+    #[test]
+    fn planned_pruning_reports_are_policy_checked_without_mutating_spec() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Planned Pruning
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+            application/xml:
+              schema:
+                type: object
+        '404':
+          description: missing
+"#,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&spec).unwrap();
+
+        let proposals = propose_compatibility_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = proposals.report_entries();
+        let mut plan = TransformPlan::from_reports(&proposal_reports);
+
+        assert!(plan.approve(&TransformPolicy::strict()).is_err());
+        assert_eq!(serde_json::to_value(&spec).unwrap(), before);
+        assert_eq!(proposal_reports.len(), 2);
+        assert!(proposal_reports
+            .iter()
+            .any(|report| report.code == typed::RESPONSE_VARIANTS_PRUNED));
+        assert!(proposal_reports
+            .iter()
+            .any(|report| report.code == typed::CONTENT_TYPES_PRUNED));
+    }
+
+    #[test]
+    fn component_content_pruning_reports_component_subjects() {
+        let spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Component Pruning
+  version: "1.0.0"
+paths: {}
+components:
+  requestBodies:
+    Upload:
+      content:
+        application/json:
+          schema:
+            type: object
+        application/xml:
+          schema:
+            type: object
+  responses:
+    Pet:
+      description: ok
+      content:
+        application/json:
+          schema:
+            type: object
+        application/xml:
+          schema:
+            type: object
+"#,
+        )
+        .unwrap();
+
+        let proposals = propose_compatibility_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = proposals.report_entries();
+
+        assert!(proposal_reports.iter().any(|report| {
+            report.code == typed::CONTENT_TYPES_PRUNED
+                && report.subject == Some(ReportSubject::component("component requestBody Upload"))
+        }));
+        assert!(proposal_reports.iter().any(|report| {
+            report.code == typed::CONTENT_TYPES_PRUNED
+                && report.subject == Some(ReportSubject::component("component response Pet"))
+        }));
+    }
+
+    #[test]
+    fn approved_pruning_actions_apply_and_can_be_recorded_in_plan() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Approved Pruning
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+            application/xml:
+              schema:
+                type: object
+        '404':
+          description: missing
+"#,
+        )
+        .unwrap();
+
+        let proposals = propose_compatibility_transforms(&spec, &BackendCapabilities::progenitor());
+        let proposal_reports = proposals.report_entries();
+        let mut proposal_plan = TransformPlan::from_reports(&proposal_reports);
+        proposal_plan
+            .approve(&TransformPolicy::compatibility())
+            .expect("compatibility policy approves proposed pruning");
+
+        let reports = normalize_with_approved_compatibility_transforms(
+            &mut spec,
+            &BackendCapabilities::progenitor(),
+            &proposals,
+        )
+        .unwrap();
+        let mut transform_plan = TransformPlan::from_reports(&reports);
+        transform_plan
+            .approve(&TransformPolicy::compatibility())
+            .expect("applied reports remain approvable");
+
+        let path = spec.paths.paths.get("/items").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let responses = &path.get.as_ref().unwrap().responses;
+        assert!(responses.responses.contains_key(&StatusCode::Code(200)));
+        assert_eq!(responses.responses.len(), 1);
+        let ReferenceOr::Item(response) = responses.responses.get(&StatusCode::Code(200)).unwrap()
+        else {
+            panic!("expected inline response");
+        };
+        assert_eq!(
+            response.content.keys().cloned().collect::<Vec<_>>(),
+            vec![JSON_MIME]
+        );
+        assert!(transform_plan
+            .approval
+            .unwrap()
+            .decisions
+            .iter()
+            .any(|decision| {
+                decision.code == typed::RESPONSE_VARIANTS_PRUNED
+                    && decision.allowed_by == "compatibility_profile"
+            }));
+    }
 
     #[test]
     fn response_variants_prefer_200_and_warn() {
@@ -69,7 +274,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -103,7 +309,8 @@ components:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let components = spec.components.unwrap();
         let ReferenceOr::Item(schema) = components.schemas.get("Mystery").unwrap() else {
             panic!("expected inline schema");
@@ -171,7 +378,8 @@ components:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0], "normalized 4 schemas — dropped default values");
 
@@ -222,7 +430,8 @@ components:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let components = spec.components.unwrap();
         let ReferenceOr::Item(schema) = components.schemas.get("Reaction").unwrap() else {
             panic!("expected inline schema");
@@ -275,7 +484,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -370,7 +580,7 @@ components:
         )
         .unwrap();
 
-        normalize(&mut spec).unwrap();
+        normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let components = spec.components.unwrap();
         let ReferenceOr::Item(schema) = components.schemas.get("Pet").unwrap() else {
             panic!("expected inline schema");
@@ -421,7 +631,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -476,7 +687,8 @@ components:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/search").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -523,7 +735,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/search").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -566,7 +779,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/files").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -578,6 +792,58 @@ paths:
             warnings[0],
             "dropped 1 operations with progenitor-unsupported request body: uploadFile"
         );
+    }
+
+    #[test]
+    fn approved_component_unsupported_request_body_ref_drops_operation_and_component() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r##"
+openapi: 3.0.0
+info:
+  title: Component Multipart Body
+  version: "1.0.0"
+paths:
+  /files:
+    post:
+      operationId: uploadFile
+      requestBody:
+        $ref: "#/components/requestBodies/Upload"
+      responses:
+        '200':
+          description: ok
+components:
+  requestBodies:
+    Upload:
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+"##,
+        )
+        .unwrap();
+
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
+        let path = spec.paths.paths.get("/files").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+
+        assert!(path.post.is_none());
+        assert!(!spec
+            .components
+            .as_ref()
+            .unwrap()
+            .request_bodies
+            .contains_key("Upload"));
+        assert!(warnings.iter().any(|warning| warning.contains(
+            "normalized component requestBody Upload — dropped requestBody with only unsupported content types: multipart/form-data"
+        )));
+        assert!(warnings.iter().any(|warning| {
+            warning.contains(
+                "dropped 1 operations with progenitor-unsupported request body: uploadFile",
+            )
+        }));
     }
 
     #[test]
@@ -607,7 +873,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/tokens").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");
@@ -624,6 +891,54 @@ paths:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("kept application/x-www-form-urlencoded"));
         assert!(warnings[0].contains("dropped multipart/form-data"));
+    }
+
+    #[test]
+    fn request_body_does_not_prefer_json_when_backend_does_not_support_json() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Form Only Body
+  version: "1.0.0"
+paths:
+  /tokens:
+    post:
+      operationId: createToken
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+"#,
+        )
+        .unwrap();
+        let mut capabilities = BackendCapabilities::progenitor();
+        capabilities.supported_request_body_content_types = &[FORM_MIME];
+
+        let warnings = normalize_unchecked_for_tests(&mut spec, &capabilities).unwrap();
+        let path = spec.paths.paths.get("/tokens").unwrap();
+        let ReferenceOr::Item(path) = path else {
+            panic!("expected inline path item");
+        };
+        let request_body = path.post.as_ref().unwrap().request_body.as_ref().unwrap();
+        let ReferenceOr::Item(request_body) = request_body else {
+            panic!("expected inline request body");
+        };
+
+        assert_eq!(
+            request_body.content.keys().cloned().collect::<Vec<_>>(),
+            vec![FORM_MIME]
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("kept application/x-www-form-urlencoded"));
+        assert!(warnings[0].contains("dropped application/json"));
     }
 
     #[test]
@@ -648,7 +963,8 @@ paths:
         )
         .unwrap();
 
-        let warnings = normalize(&mut spec).unwrap();
+        let warnings =
+            normalize_unchecked_for_tests(&mut spec, &BackendCapabilities::progenitor()).unwrap();
         let path = spec.paths.paths.get("/pets").unwrap();
         let ReferenceOr::Item(path) = path else {
             panic!("expected inline path item");

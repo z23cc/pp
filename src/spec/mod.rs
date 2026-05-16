@@ -11,6 +11,7 @@ pub mod slice;
 pub(crate) mod transform;
 pub(crate) mod traversal;
 
+use crate::backend::BackendCapabilities;
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
 use openapiv3::OpenAPI;
@@ -51,10 +52,31 @@ pub(crate) struct LoadedSpec {
     pub normalization_warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct LoadOptions {
     pub slice: slice::SliceOptions,
     pub policy: transform::TransformPolicy,
+    pub backend_capabilities: BackendCapabilities,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self {
+            slice: slice::SliceOptions::default(),
+            policy: transform::TransformPolicy::default(),
+            backend_capabilities: BackendCapabilities::progenitor(),
+        }
+    }
+}
+
+impl LoadOptions {
+    pub(crate) fn with_backend_capabilities(
+        mut self,
+        backend_capabilities: BackendCapabilities,
+    ) -> Self {
+        self.backend_capabilities = backend_capabilities;
+        self
+    }
 }
 
 /// Parse the spec at `path` (YAML or JSON, detected by extension and content),
@@ -72,7 +94,17 @@ pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<Lo
         let slice_report = slice::slice_openapi(&mut spec, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
-    reports.extend(normalize::normalize(&mut spec)?);
+    let approved_compatibility_transforms =
+        normalize::propose_compatibility_transforms(&spec, &options.backend_capabilities);
+    let proposed_reports = approved_compatibility_transforms.report_entries();
+    let mut proposed_plan = transform::TransformPlan::from_reports(&proposed_reports);
+    proposed_plan.approve(&options.policy)?;
+
+    reports.extend(normalize::normalize_with_approved_compatibility_transforms(
+        &mut spec,
+        &options.backend_capabilities,
+        &approved_compatibility_transforms,
+    )?);
     let mut transform_plan = transform::TransformPlan::from_reports(&reports);
     transform_plan.approve(&options.policy)?;
     let facts = inspect_openapi(&spec)?;

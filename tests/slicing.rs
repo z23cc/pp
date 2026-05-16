@@ -76,8 +76,51 @@ fn inspect_list_operations_prints_filtered_jsonl_rows() {
     assert_eq!(rows[0]["method"], "get");
     assert_eq!(rows[0]["path"], "/pets");
     assert_eq!(rows[0]["tags"], serde_json::json!(["pets"]));
+    assert_eq!(rows[0]["operation_id"], "listPets");
+    assert_eq!(rows[0]["derived_id"], "get /pets");
+    assert_eq!(rows[0]["generatable"], true);
     assert_eq!(rows[1]["id"], "getPet");
     assert_eq!(rows[1]["path"], "/pets/{id}");
+}
+
+#[test]
+fn inspect_list_operations_marks_missing_operation_id_as_not_generatable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "missing-operation-id.yaml",
+        r#"
+openapi: 3.0.0
+info:
+  title: Missing Operation ID Fixture
+  version: "1.0.0"
+paths:
+  /items/{id}:
+    patch:
+      tags: [items]
+      responses:
+        '200':
+          description: ok
+"#,
+    );
+    let output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(spec)
+        .arg("--list-operations")
+        .output()
+        .expect("failed to run pp inspect --list-operations");
+    assert!(
+        output.status.success(),
+        "pp inspect --list-operations missing operationId failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let row: Value = serde_json::from_slice(&output.stdout).expect("operation listing row is JSON");
+    assert_eq!(row["id"], "patch /items/{id}");
+    assert_eq!(row["operation_id"], Value::Null);
+    assert_eq!(row["derived_id"], "patch /items/{id}");
+    assert_eq!(row["generatable"], false);
 }
 
 #[test]

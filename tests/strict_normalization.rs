@@ -85,6 +85,44 @@ paths:
           description: ok
 "#;
 
+const COMPONENT_MULTIPART_ONLY_SPEC: &str = r##"
+openapi: 3.0.0
+info:
+  title: Component Multipart Fixture
+  version: "1.0.0"
+paths:
+  /files:
+    post:
+      operationId: uploadFile
+      requestBody:
+        $ref: "#/components/requestBodies/Upload"
+      responses:
+        '200':
+          description: ok
+components:
+  requestBodies:
+    Upload:
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+"##;
+
+const MISSING_OPERATION_ID_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Missing OperationId Fixture
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /items/{id}:
+    patch:
+      responses:
+        '200':
+          description: ok
+"#;
+
 #[test]
 fn inspect_rejects_compat_normalization_by_default() {
     let output = run_inspect(&[]);
@@ -136,6 +174,61 @@ fn strict_slice_ignores_lossy_reports_from_unselected_operations() {
         "strict sliced inspect failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn strict_policy_rejects_component_multipart_only_request_body() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "component-multipart.yaml",
+        COMPONENT_MULTIPART_ONLY_SPEC,
+    );
+    let output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(spec)
+        .output()
+        .expect("failed to run pp inspect");
+
+    assert!(
+        !output.status.success(),
+        "strict inspect unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("strict transform policy rejected"),
+        "stderr did not explain strict rejection:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("spec.normalize.unsupported_request_bodies_dropped"),
+        "stderr did not name unsupported request-body report:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("component requestBody Upload"),
+        "stderr did not identify component request body:\n{stderr}"
+    );
+}
+
+#[test]
+fn inspect_allows_component_multipart_only_request_body_when_explicit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "component-multipart.yaml",
+        COMPONENT_MULTIPART_ONLY_SPEC,
+    );
+    let output = Command::new(common::pp_bin())
+        .arg("inspect")
+        .arg(spec)
+        .arg("--reports")
+        .arg("--allow-compat-normalization")
+        .output()
+        .expect("failed to run pp inspect");
+
+    common::assert_success(
+        output,
+        "pp inspect component multipart --allow-compat-normalization",
     );
 }
 
@@ -208,6 +301,38 @@ fn generate_writes_transform_plan_with_approval_metadata() {
             decision["code"] == "spec.normalize.response_variants_pruned"
                 && decision["allowed_by"] == "effect_allowlist"
         }));
+}
+
+#[test]
+fn generate_rejects_missing_explicit_operation_id_with_exclude_hint() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "missing-operation-id.yaml",
+        MISSING_OPERATION_ID_SPEC,
+    );
+    let output = Command::new(common::pp_bin())
+        .arg("generate")
+        .arg(spec)
+        .arg("-o")
+        .arg(temp.path().join("out"))
+        .output()
+        .expect("failed to run pp generate");
+
+    assert!(!output.status.success(), "generate unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("operation PATCH /items/{id} is missing operationId"),
+        "stderr did not explain missing operationId:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("explicit operationId is required for codegen/MCP identity"),
+        "stderr did not explain explicit operationId requirement:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--exclude-operation \"patch /items/{id}\""),
+        "stderr did not include exclude hint:\n{stderr}"
+    );
 }
 
 #[test]

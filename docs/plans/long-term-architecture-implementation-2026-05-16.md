@@ -52,8 +52,12 @@ Design choices for this plan:
 - [x] Work item 10 — named generated-source transforms: `src/progenitor_driver/mod.rs` now applies named source transforms with focused tests for string-vector parsers, complex Clap parsers, and unexpected-response body preservation.
 - [x] Work item 11 — verification profiles and CI shape: documented in `docs/verification.md`, with a manual/scheduled generated-workspace smoke workflow at `.github/workflows/generated-smoke.yml`.
 - [x] Work item 12 — release metadata and dependency-status cleanup: README, CHANGELOG, Cargo metadata, and `docs/release-status.md` now describe the 0.1.0 candidate, verification checklist, and temporary typify patch removal condition.
+- [x] Work item 13 — explicit backend capabilities seam: `src/backend/mod.rs` now advertises Progenitor limits, and spec preparation receives backend capabilities through the pipeline while preserving Progenitor behavior.
+- [x] Packet 3 — first plan-before-apply transform exemplar: response variant pruning and request/response content-type pruning now produce narrow internal compatibility proposals before typed mutation; `LoadOptions.policy` approves those proposal reports before the approved actions are applied.
 
-Latest focused verification: `cargo test --all` (61 passed, 9 ignored), `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` passed on 2026-05-16 after Work Items 11–12; `pp generate testdata/petstore.yaml` also passed after Work Item 10.
+Current Packet 3 limit: only the response/content pruning family uses plan-before-apply, and the exemplar still models Progenitor's singleton response/content cardinality rather than generalized `keep N` pruning for arbitrary future backends. Schema defaults, unsupported request bodies, deepObject query rewrites, optional object query drops, enum/property collision drops, unsupported schema type replacement, and response relaxation remain on the existing report-derived transition path.
+
+Latest focused verification: `cargo test normalize::tests` (15 passed), `cargo test --test strict_normalization` (9 passed), `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --all` (102 passed, 10 ignored) passed on 2026-05-16 after Packet 3.
 
 ## Work Items
 
@@ -266,6 +270,23 @@ Latest focused verification: `cargo test --all` (61 passed, 9 ignored), `cargo c
 **Key files:** `README.md`, `CHANGELOG.md`, `Cargo.toml`, `docs/plans/typify-patch-and-slicing-2026-05-16.md` or a newer release plan.
 
 **Dependencies:** Work item 11 for verification language. This item should not gate pipeline/model/backend implementation.
+
+**Size:** S.
+
+### 13. Add explicit backend capabilities to spec preparation
+
+**Goal:** Make Progenitor-driven normalization depend on an advertised backend capability model instead of implicit assumptions embedded in rule code.
+
+**Done when:**
+
+- `ProgenitorBackend` advertises concrete limits for request media types, response/content cardinality, schema defaults, query parameter shapes, sanitized-name collisions, and response schema relaxation.
+- The pipeline passes the selected backend's capabilities into spec loading before normalization.
+- Current Progenitor behavior and strict-by-default transform policy are preserved.
+- Focused tests prove both Progenitor's capabilities and a pipeline/spec-loading path using non-Progenitor capabilities.
+
+**Key files:** `src/backend/mod.rs`, `src/pipeline/mod.rs`, `src/spec/mod.rs`, `src/spec/normalize.rs`, `src/spec/normalize/progenitor_compatibility.rs`.
+
+**Dependencies:** Work items 5 and 9.
 
 **Size:** S.
 

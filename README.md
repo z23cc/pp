@@ -106,6 +106,11 @@ Generated workspaces also require an explicit base URL. `pp` uses `servers[0].ur
 the spec, or `--base-url <URL>` when the spec does not declare a server; it no longer
 falls back to `http://localhost`.
 
+Generated commands and MCP tools require every selected operation to declare an explicit,
+stable `operationId`. `pp inspect --list-operations` still shows discovery-only derived
+IDs for unnamed operations, but generation fails until those operations are given an
+`operationId` or excluded from the generated surface.
+
 When compatibility normalization is allowed, `pp` prints each normalization to stderr,
 exposes structured report entries through `pp inspect --reports`, and writes
 `pp-transform-plan.json` into generated workspaces. Prefer targeted approval with

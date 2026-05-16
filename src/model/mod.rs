@@ -126,8 +126,11 @@ fn push_operation(
     let path = operation_ref.path;
     let path_params = operation_ref.path_parameters;
     let operation = operation_ref.operation;
-    let Some(raw_name) = operation.operation_id.clone() else {
-        return Ok(());
+    let Some(raw_name) = traversal::explicit_operation_id(operation).map(str::to_string) else {
+        let derived_id = traversal::derived_operation_identifier(operation_ref.method, path);
+        anyhow::bail!(
+            "operation {method} {path} is missing operationId; explicit operationId is required for codegen/MCP identity. Add a stable operationId to this selected operation or exclude it from generation with `--exclude-operation \"{derived_id}\"`."
+        );
     };
     let name = operation_name(&raw_name);
     if let Some(previous_operation_id) = ctx.seen_tool_names.insert(name.clone(), raw_name.clone())
@@ -710,6 +713,50 @@ paths:
             .unwrap()
             .contains(&json!("id")));
         assert!(has_cli_arg(tool, "id", "id"));
+    }
+
+    #[test]
+    fn mcp_missing_operation_id_is_generation_error() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Missing Operation ID API
+  version: "1.0.0"
+paths:
+  /items/{id}:
+    patch:
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let error = mcp_tools(&api, None).unwrap_err().to_string();
+
+        assert!(error.contains("operation PATCH /items/{id} is missing operationId"));
+        assert!(error.contains("explicit operationId is required for codegen/MCP identity"));
+        assert!(error.contains("--exclude-operation \"patch /items/{id}\""));
+    }
+
+    #[test]
+    fn mcp_blank_operation_id_is_generation_error() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Blank Operation ID API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: "   "
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let error = mcp_tools(&api, None).unwrap_err().to_string();
+
+        assert!(error.contains("operation GET /items is missing operationId"));
+        assert!(error.contains("explicit operationId is required for codegen/MCP identity"));
     }
 
     #[test]

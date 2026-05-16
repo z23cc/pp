@@ -121,6 +121,7 @@ fn load_options(
             exclude_operations,
         },
         policy,
+        backend_capabilities: crate::backend::BackendCapabilities::progenitor(),
     }
 }
 

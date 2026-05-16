@@ -201,11 +201,21 @@ pub(crate) fn visit_operations_mut(
     });
 }
 
-pub(crate) fn operation_identifier(method: &str, path: &str, operation: &Operation) -> String {
+pub(crate) fn explicit_operation_id(operation: &Operation) -> Option<&str> {
     operation
         .operation_id
-        .clone()
-        .unwrap_or_else(|| format!("{method} {path}"))
+        .as_deref()
+        .filter(|operation_id| !operation_id.trim().is_empty())
+}
+
+pub(crate) fn derived_operation_identifier(method: &str, path: &str) -> String {
+    format!("{method} {path}")
+}
+
+pub(crate) fn operation_identifier(method: &str, path: &str, operation: &Operation) -> String {
+    explicit_operation_id(operation)
+        .map(str::to_string)
+        .unwrap_or_else(|| derived_operation_identifier(method, path))
 }
 
 fn operation_ref<'a>(
