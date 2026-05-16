@@ -71,7 +71,8 @@ pub(crate) fn propose_typed_normalization_transforms(
         &compatibility,
     )
     .expect("compatibility proposal replay for response relaxation should not fail");
-    let response_relaxation = response_relaxation::propose(&response_basis, backend_capabilities);
+    let response_relaxation_pass = response_relaxation::ResponseRelaxationPass;
+    let response_relaxation = response_relaxation_pass.propose(&response_basis, &pass_context);
 
     TypedNormalizationPlan {
         operation_naming,
@@ -104,9 +105,10 @@ pub(crate) fn normalize_with_approved_typed_normalization_transforms(
         &mut reports,
         &compatibility_stats,
     );
-    response_relaxation::apply_approved(
+    response_relaxation::ResponseRelaxationPass.apply_approved(
         spec,
         &mut reports,
+        &pass_context,
         &approved_transforms.response_relaxation,
     );
 

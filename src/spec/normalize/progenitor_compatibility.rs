@@ -1,7 +1,7 @@
 use anyhow::Result;
 use openapiv3::{
     ArrayType, MediaType, ObjectType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody,
-    Response, Schema, SchemaKind, StatusCode, Type,
+    Response, Schema, SchemaKind, Type,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +16,7 @@ pub(super) const JSON_MIME: &str = "application/json";
 #[cfg(test)]
 pub(super) const FORM_MIME: &str = "application/x-www-form-urlencoded";
 
+mod response_variants;
 mod schema_defaults;
 
 pub(crate) fn propose_transforms(
@@ -204,13 +205,13 @@ impl CompatibilityTransformPlan {
         &self,
         method: &str,
         path: &str,
-    ) -> Option<&CompatibilityTransformAction> {
-        self.actions.iter().find(|action| {
-            matches!(
-                action,
-                CompatibilityTransformAction::PruneResponseVariants { target, .. }
-                    if target.method == method && target.path == path
-            )
+    ) -> Option<&response_variants::Action> {
+        self.actions.iter().find_map(|action| {
+            if let CompatibilityTransformAction::PruneResponseVariants(action) = action {
+                action.matches(method, path).then_some(action)
+            } else {
+                None
+            }
         })
     }
 
@@ -457,11 +458,7 @@ impl CompatibilityAggregateProposal {
 
 #[derive(Debug, Clone)]
 enum CompatibilityTransformAction {
-    PruneResponseVariants {
-        target: OperationTarget,
-        kept: String,
-        report: ReportEntry,
-    },
+    PruneResponseVariants(response_variants::Action),
     PruneContentTypes {
         target: ContentTarget,
         kept: String,
@@ -507,8 +504,8 @@ impl CompatibilityTransformAction {
     fn report_entry(&self) -> &ReportEntry {
         match self {
             Self::DropSchemaDefaults(action) => action.report_entry(),
-            Self::PruneResponseVariants { report, .. }
-            | Self::PruneContentTypes { report, .. }
+            Self::PruneResponseVariants(action) => action.report_entry(),
+            Self::PruneContentTypes { report, .. }
             | Self::DropUnsupportedRequestBody { report, .. }
             | Self::DropUnsupportedRequestBodyOperations { report, .. }
             | Self::RewriteDeepObjectQueryParams { report, .. }
@@ -523,20 +520,7 @@ impl CompatibilityTransformAction {
     fn audit_entries(&self) -> Vec<TransformAuditEntry> {
         let report = self.report_entry();
         match self {
-            Self::PruneResponseVariants { target, kept, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    format!("operation {} responses", target.label()),
-                    format!("prune response variants to {kept}"),
-                )
-                .with_target_pointer(format!("{}/responses", operation_target_pointer(target)))
-                .with_action_kind(TransformActionKind::Prune)
-                .with_backend_requirement_id("progenitor.response.single_variant")
-                .with_backend_requirement("backend requires one response variant per operation")
-                .with_before_after("multiple response variants", format!("kept {kept}"))
-                .with_before_after_json(json!({ "variants": "multiple" }), json!({ "kept": kept })),
-            ],
+            Self::PruneResponseVariants(action) => action.audit_entries(),
             Self::PruneContentTypes { target, kept, .. } => vec![
                 TransformAuditEntry::new(
                     "typed_normalization",
@@ -1040,12 +1024,9 @@ fn propose_response_variants_transform(
     plan: &mut CompatibilityTransformPlan,
     backend_capabilities: &BackendCapabilities,
 ) -> Option<String> {
-    let (kept, dropped) = propose_response_variant_pruning(operation, backend_capabilities)?;
-    plan.push(CompatibilityTransformAction::PruneResponseVariants {
-        target,
-        report: response_variants_report(op_name, &kept, &dropped),
-        kept: kept.clone(),
-    });
+    let action = response_variants::propose(operation, op_name, target, backend_capabilities)?;
+    let kept = action.kept().to_string();
+    plan.push(CompatibilityTransformAction::PruneResponseVariants(action));
     Some(kept)
 }
 
@@ -1113,57 +1094,6 @@ fn propose_response_content_transform(
 struct ProposedContentTransform {
     drops_body: bool,
     kept: Option<String>,
-}
-
-fn propose_response_variant_pruning(
-    operation: &Operation,
-    backend_capabilities: &BackendCapabilities,
-) -> Option<(String, Vec<String>)> {
-    let mut codes: Vec<String> = operation
-        .responses
-        .responses
-        .keys()
-        .map(ToString::to_string)
-        .collect();
-    if operation.responses.default.is_some() {
-        codes.push("default".to_string());
-    }
-    if !backend_capabilities
-        .responses
-        .requires_single_variant_per_operation
-        || codes.len() <= 1
-    {
-        return None;
-    }
-
-    codes.sort();
-    let kept = if operation
-        .responses
-        .responses
-        .contains_key(&StatusCode::Code(200))
-    {
-        "200".to_string()
-    } else if let Some(code) = codes
-        .iter()
-        .find(|code| code.starts_with('2') && code.as_str() != "200")
-    {
-        code.clone()
-    } else {
-        codes[0].clone()
-    };
-    let dropped: Vec<String> = codes.into_iter().filter(|code| code != &kept).collect();
-    Some((kept, dropped))
-}
-
-fn response_variants_report(op_name: &str, kept: &str, dropped: &[String]) -> ReportEntry {
-    rules::typed_warning(
-        typed::RESPONSE_VARIANTS_PRUNED,
-        format!(
-            "normalized {op_name} responses — kept {kept}, dropped {}",
-            dropped.join(", ")
-        ),
-        Some(ReportSubject::operation(op_name)),
-    )
 }
 
 fn content_types_report(
@@ -1743,20 +1673,11 @@ fn apply_response_variants_transform(
     warnings: &mut Vec<ReportEntry>,
     approved_transforms: &CompatibilityTransformPlan,
 ) {
-    let Some(CompatibilityTransformAction::PruneResponseVariants { kept, report, .. }) =
-        approved_transforms.response_variants_for(method, path)
-    else {
+    let Some(action) = approved_transforms.response_variants_for(method, path) else {
         return;
     };
 
-    operation
-        .responses
-        .responses
-        .retain(|code, _| code.to_string() == *kept);
-    if kept != "default" {
-        operation.responses.default = None;
-    }
-    warnings.push(report.clone());
+    action.apply_approved(operation, warnings);
 }
 
 fn normalize_request_body(

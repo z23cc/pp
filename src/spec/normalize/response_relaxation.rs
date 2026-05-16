@@ -1,6 +1,7 @@
 use openapiv3::{MediaType, OpenAPI, ReferenceOr, Response, Schema, SchemaData, SchemaKind, Type};
 use std::collections::BTreeSet;
 
+use super::pass::{NormalizationPass, NormalizationPassContext, NormalizationPassPlan};
 use crate::backend::BackendCapabilities;
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::references;
@@ -16,19 +17,40 @@ pub(super) struct ResponseRelaxationPlan {
     action: Option<RelaxResponseSchemas>,
 }
 
-impl ResponseRelaxationPlan {
-    pub(super) fn report_entries(&self) -> Vec<ReportEntry> {
+impl NormalizationPassPlan for ResponseRelaxationPlan {
+    fn report_entries(&self) -> Vec<ReportEntry> {
         self.action
             .iter()
             .map(|action| action.report.clone())
             .collect()
     }
 
-    pub(super) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
+    fn audit_entries(&self) -> Vec<TransformAuditEntry> {
         self.action
             .iter()
             .map(RelaxResponseSchemas::audit_entry)
             .collect()
+    }
+}
+
+pub(super) struct ResponseRelaxationPass;
+
+impl NormalizationPass for ResponseRelaxationPass {
+    type Plan = ResponseRelaxationPlan;
+
+    fn propose(&self, spec: &OpenAPI, context: &NormalizationPassContext<'_>) -> Self::Plan {
+        self::propose(spec, context.backend_capabilities)
+    }
+
+    fn apply_approved(
+        &self,
+        spec: &mut OpenAPI,
+        reports: &mut Vec<ReportEntry>,
+        context: &NormalizationPassContext<'_>,
+        approved_plan: &Self::Plan,
+    ) {
+        let _ = context.backend_capabilities;
+        self::apply_approved(spec, reports, approved_plan);
     }
 }
 

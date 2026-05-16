@@ -370,15 +370,6 @@ fn inspect_allows_specific_report_code_when_explicit() {
 }
 
 #[test]
-fn hidden_compat_normalization_still_approves_transforms_when_explicit() {
-    let output = run_inspect(&["--reports", "--allow-compat-normalization"]);
-    common::assert_success(
-        output,
-        "pp inspect hidden --allow-compat-normalization --reports",
-    );
-}
-
-#[test]
 fn generate_writes_transform_plan_with_approval_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let spec = common::write_spec(temp.path(), "lossy.yaml", LOSSY_SPEC);

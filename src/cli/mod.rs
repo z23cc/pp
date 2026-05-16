@@ -45,9 +45,6 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Deprecated hidden escape hatch: permit all compatibility transforms.
-        #[arg(long, hide = true)]
-        allow_compat_normalization: bool,
         /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
         #[arg(long = "allow-effect", value_parser = parse_report_effect)]
         allow_effects: Vec<crate::spec::report::ReportEffect>,
@@ -86,9 +83,6 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Deprecated hidden escape hatch: permit all compatibility transforms.
-        #[arg(long, hide = true)]
-        allow_compat_normalization: bool,
         /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
         #[arg(long = "allow-effect", value_parser = parse_report_effect)]
         allow_effects: Vec<crate::spec::report::ReportEffect>,
@@ -111,7 +105,6 @@ struct LoadOptionsArgs {
     include_tags: Vec<String>,
     include_path_prefixes: Vec<String>,
     exclude_operations: Vec<String>,
-    allow_compat_normalization: bool,
     allow_effects: Vec<crate::spec::report::ReportEffect>,
     allow_report_codes: Vec<String>,
     auth_scheme: Option<String>,
@@ -123,17 +116,12 @@ fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
         include_tags,
         include_path_prefixes,
         exclude_operations,
-        allow_compat_normalization,
         allow_effects,
         allow_report_codes,
         auth_scheme,
     } = args;
 
-    let mut policy = if allow_compat_normalization {
-        crate::spec::transform::TransformPolicy::compatibility()
-    } else {
-        crate::spec::transform::TransformPolicy::strict()
-    };
+    let mut policy = crate::spec::transform::TransformPolicy::strict();
     for effect in allow_effects {
         policy = policy.allow_effect(effect);
     }
@@ -217,7 +205,6 @@ impl Cli {
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
-                allow_compat_normalization,
                 allow_effects,
                 allow_report_codes,
                 auth_scheme,
@@ -227,7 +214,6 @@ impl Cli {
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
-                    allow_compat_normalization,
                     allow_effects,
                     allow_report_codes,
                     auth_scheme,
@@ -276,7 +262,6 @@ impl Cli {
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
-                allow_compat_normalization,
                 allow_effects,
                 allow_report_codes,
                 auth_scheme,
@@ -286,7 +271,6 @@ impl Cli {
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
-                    allow_compat_normalization,
                     allow_effects,
                     allow_report_codes,
                     auth_scheme,
@@ -321,7 +305,6 @@ mod tests {
             include_tags: Vec::new(),
             include_path_prefixes: Vec::new(),
             exclude_operations: Vec::new(),
-            allow_compat_normalization: false,
             allow_effects: Vec::new(),
             allow_report_codes: Vec::new(),
             auth_scheme: Some("bearerAuth".to_string()),
@@ -389,16 +372,12 @@ mod tests {
     }
 
     #[test]
-    fn hidden_compat_normalization_flag_remains_explicit_opt_in() {
-        let cli = Cli::parse_from(["pp", "inspect", "spec.yaml", "--allow-compat-normalization"]);
+    fn compat_normalization_flag_is_removed() {
+        let err =
+            Cli::try_parse_from(["pp", "inspect", "spec.yaml", "--allow-compat-normalization"])
+                .unwrap_err();
 
-        match cli.command {
-            Command::Inspect {
-                allow_compat_normalization,
-                ..
-            } => assert!(allow_compat_normalization),
-            _ => panic!("expected inspect command"),
-        }
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
