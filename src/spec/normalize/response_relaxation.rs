@@ -1,6 +1,4 @@
-use openapiv3::{
-    MediaType, OpenAPI, Operation, ReferenceOr, Response, Schema, SchemaData, SchemaKind, Type,
-};
+use openapiv3::{MediaType, OpenAPI, ReferenceOr, Response, Schema, SchemaData, SchemaKind, Type};
 use std::collections::BTreeSet;
 
 use crate::spec::references;
@@ -39,23 +37,16 @@ fn collect_request_schema_refs(spec: &OpenAPI) -> BTreeSet<String> {
             .iter()
             .chain(operation_ref.operation.parameters.iter())
         {
-            if let ReferenceOr::Item(parameter) = parameter {
-                let data = match parameter {
-                    openapiv3::Parameter::Query { parameter_data, .. }
-                    | openapiv3::Parameter::Header { parameter_data, .. }
-                    | openapiv3::Parameter::Path { parameter_data, .. }
-                    | openapiv3::Parameter::Cookie { parameter_data, .. } => parameter_data,
-                };
-                if let openapiv3::ParameterSchemaOrContent::Schema(schema) = &data.format {
-                    references::collect_raw_schema_refs(schema, &mut refs);
-                }
-            }
+            collect_parameter_schema_refs(parameter, &mut refs);
         }
         if let Some(ReferenceOr::Item(request_body)) = &operation_ref.operation.request_body {
             collect_content_schema_refs(&request_body.content, &mut refs);
         }
     }
     if let Some(components) = spec.components.as_ref() {
+        for parameter in components.parameters.values() {
+            collect_parameter_schema_refs(parameter, &mut refs);
+        }
         for request_body in components.request_bodies.values() {
             if let ReferenceOr::Item(request_body) = request_body {
                 collect_content_schema_refs(&request_body.content, &mut refs);
@@ -64,6 +55,24 @@ fn collect_request_schema_refs(spec: &OpenAPI) -> BTreeSet<String> {
     }
     expand_component_schema_refs(spec, &mut refs);
     refs
+}
+
+fn collect_parameter_schema_refs(
+    parameter: &ReferenceOr<openapiv3::Parameter>,
+    refs: &mut BTreeSet<String>,
+) {
+    let ReferenceOr::Item(parameter) = parameter else {
+        return;
+    };
+    let data = match parameter {
+        openapiv3::Parameter::Query { parameter_data, .. }
+        | openapiv3::Parameter::Header { parameter_data, .. }
+        | openapiv3::Parameter::Path { parameter_data, .. }
+        | openapiv3::Parameter::Cookie { parameter_data, .. } => parameter_data,
+    };
+    if let openapiv3::ParameterSchemaOrContent::Schema(schema) = &data.format {
+        references::collect_raw_schema_refs(schema, refs);
+    }
 }
 
 fn collect_response_schema_refs(spec: &OpenAPI) -> BTreeSet<String> {
@@ -139,41 +148,19 @@ fn relax_inline_response_schemas(spec: &mut OpenAPI) -> ReplaceCount {
             }
         }
     }
-    for operation in operations_mut(spec) {
-        for response in operation.responses.responses.values_mut() {
+    traversal::visit_operations_mut(spec, |operation_ref| {
+        for response in operation_ref.operation.responses.responses.values_mut() {
             if let ReferenceOr::Item(response) = response {
                 count += relax_response(response);
             }
         }
-        if let Some(ReferenceOr::Item(response)) = operation.responses.default.as_mut() {
+        if let Some(ReferenceOr::Item(response)) =
+            operation_ref.operation.responses.default.as_mut()
+        {
             count += relax_response(response);
         }
-    }
+    });
     count
-}
-
-fn operations_mut(spec: &mut OpenAPI) -> Vec<&mut Operation> {
-    spec.paths
-        .paths
-        .iter_mut()
-        .filter_map(|(_, path_item)| match path_item {
-            ReferenceOr::Item(item) => Some(item),
-            ReferenceOr::Reference { .. } => None,
-        })
-        .flat_map(|item| {
-            [
-                &mut item.get,
-                &mut item.put,
-                &mut item.post,
-                &mut item.delete,
-                &mut item.options,
-                &mut item.head,
-                &mut item.patch,
-                &mut item.trace,
-            ]
-        })
-        .flatten()
-        .collect()
 }
 
 fn schema_component_name(reference: &str) -> Option<&str> {
@@ -329,6 +316,57 @@ paths:
               schema:
                 $ref: '#/components/schemas/Filter'
 components:
+  schemas:
+    Filter:
+      type: object
+      required: [term]
+      properties:
+        term:
+          type: string
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(relax_response_schemas(&mut spec), 0);
+        let components = spec.components.unwrap();
+        let ReferenceOr::Item(schema) = components.schemas.get("Filter").unwrap() else {
+            panic!("expected inline schema");
+        };
+        let SchemaKind::Type(Type::Object(object)) = &schema.schema_kind else {
+            panic!("expected object schema");
+        };
+        assert_eq!(object.required, vec!["term"]);
+    }
+
+    #[test]
+    fn component_parameter_refs_keep_shared_schema_request_side() {
+        let mut spec: OpenAPI = serde_yaml::from_str(
+            r#"
+openapi: 3.0.0
+info:
+  title: Component Param Relaxation
+  version: "1.0.0"
+paths:
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - $ref: '#/components/parameters/FilterParam'
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Filter'
+components:
+  parameters:
+    FilterParam:
+      in: query
+      name: filter
+      required: true
+      schema:
+        $ref: '#/components/schemas/Filter'
   schemas:
     Filter:
       type: object

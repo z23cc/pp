@@ -183,7 +183,7 @@ pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::ApiCrateOutput;
+    use crate::backend::{ApiCrateOutput, SourceTransformDiagnostic, SourceTransformPurpose};
 
     const MINIMAL_SPEC: &str = r#"
 openapi: 3.0.0
@@ -205,11 +205,7 @@ paths:
         let spec_path = write_minimal_spec(temp.path());
         let output_path = temp.path().join("out");
 
-        let backend = FakeBackend::with_diagnostics(vec![BackendDiagnostic::SourceTransform {
-            name: "fake_transform",
-            changed: true,
-            replacement_count: 2,
-        }]);
+        let backend = FakeBackend::with_diagnostics(vec![fake_source_transform_diagnostic()]);
 
         let result = generate_with_backend_and_progress(
             GenerateRequest {
@@ -230,11 +226,7 @@ paths:
         assert!(result.validation.is_none());
         assert_eq!(
             result.backend_diagnostics,
-            vec![BackendDiagnostic::SourceTransform {
-                name: "fake_transform",
-                changed: true,
-                replacement_count: 2,
-            }]
+            vec![fake_source_transform_diagnostic()]
         );
         assert!(result.output_path.join("Cargo.toml").exists());
         assert!(result.output_path.join("api/src/lib.rs").exists());
@@ -293,6 +285,18 @@ paths:
                 "workspace_written"
             ]
         );
+    }
+
+    fn fake_source_transform_diagnostic() -> BackendDiagnostic {
+        BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
+            name: "fake_transform",
+            changed: true,
+            replacement_count: 2,
+            purpose: SourceTransformPurpose::ClapParserCompatibility,
+            precondition: "fake precondition",
+            upstream_assumption: "fake upstream assumption",
+            upstream_version: "fake upstream version",
+        })
     }
 
     fn write_minimal_spec(dir: &std::path::Path) -> PathBuf {

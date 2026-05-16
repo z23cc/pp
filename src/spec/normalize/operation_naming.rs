@@ -1,9 +1,10 @@
 use heck::ToSnakeCase;
-use openapiv3::{OpenAPI, Operation, ReferenceOr};
+use openapiv3::OpenAPI;
 use std::collections::HashMap;
 
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
+use crate::spec::traversal;
 
 const VERBOSE_OPERATION_PREFIXES: &[&str] = &[
     "plausible_web_plugins_api_controllers_",
@@ -36,10 +37,10 @@ pub(super) fn apply(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
         .filter(|(old, new)| old != new && chosen_counts.get(new) == Some(&1))
         .collect();
 
-    for operation in operations_mut(spec) {
-        if let Some(old) = operation.operation_id.clone() {
+    traversal::visit_operations_mut(spec, |operation_ref| {
+        if let Some(old) = operation_ref.operation.operation_id.clone() {
             if let Some(new) = replacements.get(&old) {
-                operation.operation_id = Some(new.clone());
+                operation_ref.operation.operation_id = Some(new.clone());
                 reports.push(rules::typed_warning(
                     typed::OPERATION_IDS_SHORTENED,
                     format!("shortened operation '{old}' → '{new}'"),
@@ -47,54 +48,13 @@ pub(super) fn apply(spec: &mut OpenAPI, reports: &mut Vec<ReportEntry>) {
                 ));
             }
         }
-    }
+    });
 }
 
 fn operation_ids(spec: &OpenAPI) -> Vec<String> {
-    spec.paths
-        .iter()
-        .filter_map(|(_, path_item)| match path_item {
-            ReferenceOr::Item(item) => Some(item),
-            ReferenceOr::Reference { .. } => None,
-        })
-        .flat_map(|item| {
-            [
-                &item.get,
-                &item.put,
-                &item.post,
-                &item.delete,
-                &item.options,
-                &item.head,
-                &item.patch,
-                &item.trace,
-            ]
-        })
-        .flatten()
-        .filter_map(|op| op.operation_id.clone())
-        .collect()
-}
-
-fn operations_mut(spec: &mut OpenAPI) -> Vec<&mut Operation> {
-    spec.paths
-        .paths
-        .iter_mut()
-        .filter_map(|(_, path_item)| match path_item {
-            ReferenceOr::Item(item) => Some(item),
-            ReferenceOr::Reference { .. } => None,
-        })
-        .flat_map(|item| {
-            [
-                &mut item.get,
-                &mut item.put,
-                &mut item.post,
-                &mut item.delete,
-                &mut item.options,
-                &mut item.head,
-                &mut item.patch,
-                &mut item.trace,
-            ]
-        })
-        .flatten()
+    traversal::operations(spec)
+        .into_iter()
+        .filter_map(|op| op.operation.operation_id.clone())
         .collect()
 }
 
@@ -130,7 +90,7 @@ fn count_by(values: impl Iterator<Item = String>) -> HashMap<String, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openapiv3::OpenAPI;
+    use openapiv3::{OpenAPI, ReferenceOr};
 
     #[test]
     fn verbose_operation_ids_are_shortened() {

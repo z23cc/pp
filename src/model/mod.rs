@@ -28,23 +28,46 @@ pub struct ApiModel {
 #[derive(Debug, Clone, Serialize)]
 pub struct McpTool {
     pub name: String,
-    pub name_literal: String,
-    pub schema_fn_name: String,
-    pub args_static_name: String,
     pub description: String,
-    pub description_literal: String,
     pub input_schema: String,
-    pub input_schema_literal: String,
     pub args: Vec<McpArg>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct McpArg {
     pub json_name: String,
-    pub json_name_literal: String,
-    pub cli_name: String,
-    pub cli_name_literal: String,
-    pub body_field: bool,
+    pub binding: McpArgBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpArgBinding {
+    CliFlag { cli_name: String },
+    FlattenedBodyField,
+    WholeJsonBody,
+}
+
+impl McpArg {
+    fn cli_flag(json_name: String, cli_name: String) -> Self {
+        Self {
+            json_name,
+            binding: McpArgBinding::CliFlag { cli_name },
+        }
+    }
+
+    fn flattened_body_field(json_name: String) -> Self {
+        Self {
+            json_name,
+            binding: McpArgBinding::FlattenedBodyField,
+        }
+    }
+
+    fn whole_json_body(json_name: String) -> Self {
+        Self {
+            json_name,
+            binding: McpArgBinding::WholeJsonBody,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,10 +79,8 @@ pub struct McpResponseShaping {
 #[derive(Debug, Clone, Serialize)]
 pub struct McpResponseShapingArg {
     pub json_name: String,
-    pub json_name_literal: String,
     pub schema: Value,
     pub invalid_type_message: String,
-    pub invalid_type_message_literal: String,
 }
 
 impl Default for McpResponseShaping {
@@ -162,18 +183,10 @@ fn push_operation(
     });
 
     let input_schema = serde_json::to_string(&schema).expect("schema serializes");
-    let input_schema_literal =
-        serde_json::to_string(&input_schema).expect("schema literal serializes");
-    let tool_index = tools.len() + 1;
     tools.push(McpTool {
-        name_literal: serde_json::to_string(&name).expect("tool name serializes"),
-        schema_fn_name: format!("schema_{tool_index}"),
-        args_static_name: format!("ARGS_{tool_index}"),
         name,
-        description_literal: serde_json::to_string(&description).expect("description serializes"),
         description,
         input_schema,
-        input_schema_literal,
         args,
     });
     Ok(())
@@ -189,27 +202,19 @@ fn mcp_response_shaping() -> McpResponseShaping {
     McpResponseShaping {
         field_filter: McpResponseShapingArg {
             json_name: MCP_FIELD_FILTER_ARG_NAME.to_string(),
-            json_name_literal: serde_json::to_string(MCP_FIELD_FILTER_ARG_NAME)
-                .expect("reserved arg name serializes"),
             schema: json!({
                 "type": "array",
                 "items": { "type": "string" },
                 "description": "MCP-only response shaping: keep only these object dot paths."
             }),
-            invalid_type_message_literal: serde_json::to_string(&field_filter_message)
-                .expect("reserved arg message serializes"),
             invalid_type_message: field_filter_message,
         },
         compact: McpResponseShapingArg {
             json_name: MCP_COMPACT_ARG_NAME.to_string(),
-            json_name_literal: serde_json::to_string(MCP_COMPACT_ARG_NAME)
-                .expect("reserved arg name serializes"),
             schema: json!({
                 "type": "boolean",
                 "description": "MCP-only response shaping: remove nulls and empty arrays/objects from successful structured results."
             }),
-            invalid_type_message_literal: serde_json::to_string(&compact_message)
-                .expect("reserved arg message serializes"),
             invalid_type_message: compact_message,
         },
     }
@@ -258,10 +263,12 @@ fn reject_cli_arg_collision(
             "MCP CLI argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{json_name}' from {source} maps to reserved generated flag '--json-body'"
         );
     }
-    if let Some(existing) = args
-        .iter()
-        .find(|arg| !arg.body_field && arg.cli_name == cli_name)
-    {
+    if let Some(existing) = args.iter().find(|arg| {
+        matches!(
+            &arg.binding,
+            McpArgBinding::CliFlag { cli_name: existing_cli_name } if existing_cli_name == cli_name
+        )
+    }) {
         anyhow::bail!(
             "MCP CLI argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{json_name}' from {source} maps to '--{cli_name}', already used by argument '{}'",
             existing.json_name
@@ -309,13 +316,7 @@ fn add_parameter(
     if is_path || data.required {
         required.push(data.name.clone());
     }
-    args.push(McpArg {
-        json_name_literal: serde_json::to_string(&data.name).expect("arg name serializes"),
-        json_name: data.name.clone(),
-        cli_name_literal: serde_json::to_string(&cli_name).expect("arg name serializes"),
-        cli_name,
-        body_field: false,
-    });
+    args.push(McpArg::cli_flag(data.name.clone(), cli_name));
     Ok(())
 }
 
@@ -370,16 +371,7 @@ fn add_body(
                 for (name, property_schema) in body_properties {
                     reject_reserved_arg(name, tool_name, operation_id)?;
                     properties.insert(name.clone(), property_schema.clone());
-                    let cli_name = name.to_kebab_case();
-                    args.push(McpArg {
-                        json_name_literal: serde_json::to_string(name)
-                            .expect("arg name serializes"),
-                        json_name: name.clone(),
-                        cli_name_literal: serde_json::to_string(&cli_name)
-                            .expect("arg name serializes"),
-                        cli_name: "json-body".to_string(),
-                        body_field: true,
-                    });
+                    args.push(McpArg::flattened_body_field(name.clone()));
                 }
                 if body.required {
                     if let Some(Value::Array(body_required)) = object.get("required") {
@@ -427,13 +419,7 @@ fn add_synthetic_body_arg(
     if body_required {
         required.push("body".to_string());
     }
-    args.push(McpArg {
-        json_name_literal: "\"body\"".to_string(),
-        json_name: "body".to_string(),
-        cli_name_literal: "\"json-body\"".to_string(),
-        cli_name: "json-body".to_string(),
-        body_field: false,
-    });
+    args.push(McpArg::whole_json_body("body".to_string()));
     Ok(())
 }
 
@@ -514,6 +500,28 @@ fn schema_kind_json(kind: &SchemaKind, api: &OpenAPI, stack: &mut BTreeSet<Strin
 mod tests {
     use super::*;
 
+    fn has_cli_arg(tool: &McpTool, json_name: &str, cli_name: &str) -> bool {
+        tool.args.iter().any(|arg| {
+            arg.json_name == json_name
+                && matches!(
+                    &arg.binding,
+                    McpArgBinding::CliFlag { cli_name: actual_cli_name } if actual_cli_name == cli_name
+                )
+        })
+    }
+
+    fn has_flattened_body_field(tool: &McpTool, json_name: &str) -> bool {
+        tool.args.iter().any(|arg| {
+            arg.json_name == json_name && matches!(arg.binding, McpArgBinding::FlattenedBodyField)
+        })
+    }
+
+    fn has_whole_json_body(tool: &McpTool, json_name: &str) -> bool {
+        tool.args.iter().any(|arg| {
+            arg.json_name == json_name && matches!(arg.binding, McpArgBinding::WholeJsonBody)
+        })
+    }
+
     #[test]
     fn api_model_exposes_response_shaping_runtime_inputs() {
         let spec = r#"
@@ -537,19 +545,19 @@ paths:
             "_pp_fields"
         );
         assert_eq!(
-            model.mcp_response_shaping.field_filter.json_name_literal,
-            "\"_pp_fields\""
-        );
-        assert_eq!(
             model.mcp_response_shaping.field_filter.schema["items"]["type"],
             "string"
+        );
+        assert_eq!(
+            model.mcp_response_shaping.field_filter.invalid_type_message,
+            "_pp_fields must be an array of dot paths"
         );
         assert_eq!(model.mcp_response_shaping.compact.json_name, "_pp_compact");
         assert_eq!(model.mcp_response_shaping.compact.schema["type"], "boolean");
     }
 
     #[test]
-    fn mcp_tools_assign_stable_runtime_metadata() {
+    fn mcp_tools_assign_stable_semantic_names() {
         let spec = r#"
 openapi: 3.0.0
 info:
@@ -573,12 +581,9 @@ paths:
         let tools = mcp_tools(&api, None).unwrap();
 
         assert_eq!(tools[0].name, "list_items");
-        assert_eq!(tools[0].name_literal, "\"list_items\"");
-        assert_eq!(tools[0].schema_fn_name, "schema_1");
-        assert_eq!(tools[0].args_static_name, "ARGS_1");
         assert_eq!(tools[1].name, "get_item");
-        assert_eq!(tools[1].schema_fn_name, "schema_2");
-        assert_eq!(tools[1].args_static_name, "ARGS_2");
+        assert_eq!(tools[0].description, "GET /items");
+        assert_eq!(tools[1].description, "GET /items/{id}");
     }
 
     #[test]
@@ -599,6 +604,8 @@ paths:
             "string"
         );
         assert!(!serde_json::to_string(&schema).unwrap().contains("$ref"));
+        assert!(has_flattened_body_field(add_pet, "name"));
+        assert!(has_flattened_body_field(add_pet, "photoUrls"));
     }
 
     #[test]
@@ -702,10 +709,7 @@ paths:
             .as_array()
             .unwrap()
             .contains(&json!("id")));
-        assert!(tool
-            .args
-            .iter()
-            .any(|arg| arg.json_name == "id" && arg.cli_name == "id"));
+        assert!(has_cli_arg(tool, "id", "id"));
     }
 
     #[test]
@@ -778,18 +782,9 @@ paths:
 
         assert!(properties.contains_key("id"));
         assert!(properties.contains_key("body"));
-        assert!(tool
-            .args
-            .iter()
-            .any(|arg| arg.json_name == "id" && !arg.body_field));
-        assert!(tool
-            .args
-            .iter()
-            .any(|arg| arg.json_name == "body" && !arg.body_field));
-        assert!(!tool
-            .args
-            .iter()
-            .any(|arg| arg.json_name == "id" && arg.body_field));
+        assert!(has_cli_arg(tool, "id", "id"));
+        assert!(has_whole_json_body(tool, "body"));
+        assert!(!has_flattened_body_field(tool, "id"));
     }
 
     #[test]

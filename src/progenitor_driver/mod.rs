@@ -1,6 +1,8 @@
 //! In-process driver around the `progenitor` library.
 
-use crate::backend::{ApiCrateOutput, BackendDiagnostic};
+use crate::backend::{
+    ApiCrateOutput, BackendDiagnostic, SourceTransformDiagnostic, SourceTransformPurpose,
+};
 use anyhow::{Context, Result};
 use openapiv3::OpenAPI;
 use progenitor::{GenerationSettings, Generator, InterfaceStyle};
@@ -12,6 +14,43 @@ use std::path::Path;
 const TRANSFORM_STRING_VEC_VALUE_PARSER: &str = "string_vec_value_parser";
 const TRANSFORM_UNEXPECTED_RESPONSE_BODY: &str = "unexpected_response_body";
 const TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS: &str = "complex_clap_value_parsers";
+const PROGENITOR_SOURCE_VERSION_ASSUMPTION: &str = "progenitor 0.14 generated Rust source shape";
+
+#[derive(Debug, Clone, Copy)]
+struct SourceTransformMetadata {
+    name: &'static str,
+    purpose: SourceTransformPurpose,
+    precondition: &'static str,
+    upstream_assumption: &'static str,
+    upstream_version: &'static str,
+}
+
+const STRING_VEC_VALUE_PARSER_METADATA: SourceTransformMetadata = SourceTransformMetadata {
+    name: TRANSFORM_STRING_VEC_VALUE_PARSER,
+    purpose: SourceTransformPurpose::ClapParserCompatibility,
+    precondition: "generated CLI contains clap value_parser! calls for Vec<String>",
+    upstream_assumption:
+        "the generated parser shape does not accept comma-separated CLI values for string arrays",
+    upstream_version: PROGENITOR_SOURCE_VERSION_ASSUMPTION,
+};
+
+const UNEXPECTED_RESPONSE_BODY_METADATA: SourceTransformMetadata = SourceTransformMetadata {
+    name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
+    purpose: SourceTransformPurpose::ErrorDiagnostics,
+    precondition: "generated client contains a fallback UnexpectedResponse arm",
+    upstream_assumption:
+        "the fallback error preserves response status but omits readable body context",
+    upstream_version: PROGENITOR_SOURCE_VERSION_ASSUMPTION,
+};
+
+const COMPLEX_CLAP_VALUE_PARSERS_METADATA: SourceTransformMetadata = SourceTransformMetadata {
+    name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
+    purpose: SourceTransformPurpose::ClapParserCompatibility,
+    precondition: "generated CLI contains clap value_parser! calls for generated schema types",
+    upstream_assumption:
+        "generated schema types require serde_json parsing rather than clap's default typed parser",
+    upstream_version: PROGENITOR_SOURCE_VERSION_ASSUMPTION,
+};
 
 const STRING_VEC_VALUE_PARSER_INLINE: &str =
     "::clap::value_parser!(::std::vec::Vec<::std::string::String>)";
@@ -82,7 +121,7 @@ fn apply_generated_source_transforms(source: &str) -> GeneratedSourceTransformOu
 
     let (next, replacement_count) = patch_string_vec_value_parser_with_count(&source);
     diagnostics.push(source_transform_diagnostic(
-        TRANSFORM_STRING_VEC_VALUE_PARSER,
+        STRING_VEC_VALUE_PARSER_METADATA,
         &source,
         &next,
         replacement_count,
@@ -91,7 +130,7 @@ fn apply_generated_source_transforms(source: &str) -> GeneratedSourceTransformOu
 
     let (next, replacement_count) = patch_unexpected_response_body_with_count(&source);
     diagnostics.push(source_transform_diagnostic(
-        TRANSFORM_UNEXPECTED_RESPONSE_BODY,
+        UNEXPECTED_RESPONSE_BODY_METADATA,
         &source,
         &next,
         replacement_count,
@@ -100,7 +139,7 @@ fn apply_generated_source_transforms(source: &str) -> GeneratedSourceTransformOu
 
     let (next, replacement_count) = patch_complex_clap_value_parsers_with_count(&source);
     diagnostics.push(source_transform_diagnostic(
-        TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
+        COMPLEX_CLAP_VALUE_PARSERS_METADATA,
         &source,
         &next,
         replacement_count,
@@ -113,16 +152,20 @@ fn apply_generated_source_transforms(source: &str) -> GeneratedSourceTransformOu
 }
 
 fn source_transform_diagnostic(
-    name: &'static str,
+    metadata: SourceTransformMetadata,
     before: &str,
     after: &str,
     replacement_count: usize,
 ) -> BackendDiagnostic {
-    BackendDiagnostic::SourceTransform {
-        name,
+    BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
+        name: metadata.name,
         changed: before != after,
         replacement_count,
-    }
+        purpose: metadata.purpose,
+        precondition: metadata.precondition,
+        upstream_assumption: metadata.upstream_assumption,
+        upstream_version: metadata.upstream_version,
+    })
 }
 
 #[cfg(test)]
@@ -212,6 +255,51 @@ mod tests {
     }
 
     #[test]
+    fn source_transform_metadata_describes_semantic_intent() {
+        assert_eq!(
+            STRING_VEC_VALUE_PARSER_METADATA.purpose,
+            SourceTransformPurpose::ClapParserCompatibility
+        );
+        assert_eq!(
+            UNEXPECTED_RESPONSE_BODY_METADATA.purpose,
+            SourceTransformPurpose::ErrorDiagnostics
+        );
+        assert_eq!(
+            COMPLEX_CLAP_VALUE_PARSERS_METADATA.purpose,
+            SourceTransformPurpose::ClapParserCompatibility
+        );
+
+        for metadata in [
+            STRING_VEC_VALUE_PARSER_METADATA,
+            UNEXPECTED_RESPONSE_BODY_METADATA,
+            COMPLEX_CLAP_VALUE_PARSERS_METADATA,
+        ] {
+            assert!(!metadata.precondition.is_empty());
+            assert!(!metadata.upstream_assumption.is_empty());
+            assert_eq!(
+                metadata.upstream_version,
+                PROGENITOR_SOURCE_VERSION_ASSUMPTION
+            );
+        }
+    }
+
+    fn expected_source_transform_diagnostic(
+        metadata: SourceTransformMetadata,
+        changed: bool,
+        replacement_count: usize,
+    ) -> BackendDiagnostic {
+        BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
+            name: metadata.name,
+            changed,
+            replacement_count,
+            purpose: metadata.purpose,
+            precondition: metadata.precondition,
+            upstream_assumption: metadata.upstream_assumption,
+            upstream_version: metadata.upstream_version,
+        })
+    }
+
+    #[test]
     fn string_vec_value_parser_transform_handles_inline_shape() {
         let patched = patch_string_vec_value_parser(STRING_VEC_VALUE_PARSER_INLINE);
 
@@ -273,21 +361,9 @@ mod tests {
         assert_eq!(
             transformed.diagnostics,
             vec![
-                BackendDiagnostic::SourceTransform {
-                    name: TRANSFORM_STRING_VEC_VALUE_PARSER,
-                    changed: true,
-                    replacement_count: 1,
-                },
-                BackendDiagnostic::SourceTransform {
-                    name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
-                    changed: true,
-                    replacement_count: 1,
-                },
-                BackendDiagnostic::SourceTransform {
-                    name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
-                    changed: true,
-                    replacement_count: 1,
-                },
+                expected_source_transform_diagnostic(STRING_VEC_VALUE_PARSER_METADATA, true, 1),
+                expected_source_transform_diagnostic(UNEXPECTED_RESPONSE_BODY_METADATA, true, 1),
+                expected_source_transform_diagnostic(COMPLEX_CLAP_VALUE_PARSERS_METADATA, true, 1),
             ]
         );
     }
@@ -301,21 +377,9 @@ mod tests {
         assert_eq!(
             transformed.diagnostics,
             vec![
-                BackendDiagnostic::SourceTransform {
-                    name: TRANSFORM_STRING_VEC_VALUE_PARSER,
-                    changed: false,
-                    replacement_count: 0,
-                },
-                BackendDiagnostic::SourceTransform {
-                    name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
-                    changed: false,
-                    replacement_count: 0,
-                },
-                BackendDiagnostic::SourceTransform {
-                    name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
-                    changed: false,
-                    replacement_count: 0,
-                },
+                expected_source_transform_diagnostic(STRING_VEC_VALUE_PARSER_METADATA, false, 0),
+                expected_source_transform_diagnostic(UNEXPECTED_RESPONSE_BODY_METADATA, false, 0),
+                expected_source_transform_diagnostic(COMPLEX_CLAP_VALUE_PARSERS_METADATA, false, 0),
             ]
         );
     }

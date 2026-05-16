@@ -442,6 +442,18 @@ pub(crate) fn collect_raw_schema_refs_in_schema(schema: &Schema, refs: &mut BTre
             if let Some(AdditionalProperties::Schema(schema)) = any.additional_properties.as_ref() {
                 collect_raw_schema_refs(schema.as_ref(), refs);
             }
+            for schema in &any.one_of {
+                collect_raw_schema_refs(schema, refs);
+            }
+            for schema in &any.all_of {
+                collect_raw_schema_refs(schema, refs);
+            }
+            for schema in &any.any_of {
+                collect_raw_schema_refs(schema, refs);
+            }
+            if let Some(not) = any.not.as_ref() {
+                collect_raw_schema_refs(not.as_ref(), refs);
+            }
         }
         _ => {}
     }
@@ -588,5 +600,38 @@ additionalProperties:
         collect_raw_schema_refs(&schema, &mut refs);
         assert!(refs.contains("#/components/schemas/Direct"));
         assert!(refs.contains("#/components/schemas/Additional"));
+    }
+
+    #[test]
+    fn raw_schema_refs_cover_any_schema_composition_fields() {
+        let mut any = openapiv3::AnySchema::default();
+        any.one_of.push(ReferenceOr::Reference {
+            reference: "#/components/schemas/One".to_string(),
+        });
+        any.all_of.push(ReferenceOr::Reference {
+            reference: "#/components/schemas/All".to_string(),
+        });
+        any.any_of.push(ReferenceOr::Reference {
+            reference: "#/components/schemas/Any".to_string(),
+        });
+        any.not = Some(Box::new(ReferenceOr::Reference {
+            reference: "#/components/schemas/Not".to_string(),
+        }));
+        let schema = Schema {
+            schema_data: Default::default(),
+            schema_kind: SchemaKind::Any(any),
+        };
+
+        let mut refs = BTreeSet::new();
+        collect_raw_schema_refs_in_schema(&schema, &mut refs);
+
+        for reference in [
+            "#/components/schemas/One",
+            "#/components/schemas/All",
+            "#/components/schemas/Any",
+            "#/components/schemas/Not",
+        ] {
+            assert!(refs.contains(reference), "missing {reference}");
+        }
     }
 }

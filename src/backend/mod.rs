@@ -16,11 +16,24 @@ pub(crate) struct ApiCrateOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BackendDiagnostic {
-    SourceTransform {
-        name: &'static str,
-        changed: bool,
-        replacement_count: usize,
-    },
+    SourceTransform(SourceTransformDiagnostic),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceTransformDiagnostic {
+    pub name: &'static str,
+    pub changed: bool,
+    pub replacement_count: usize,
+    pub purpose: SourceTransformPurpose,
+    pub precondition: &'static str,
+    pub upstream_assumption: &'static str,
+    pub upstream_version: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceTransformPurpose {
+    ClapParserCompatibility,
+    ErrorDiagnostics,
 }
 
 pub(crate) struct ApiCrateRequest<'a> {
@@ -54,5 +67,37 @@ mod tests {
     #[test]
     fn progenitor_backend_has_stable_diagnostic_name() {
         assert_eq!(ProgenitorBackend.name(), "progenitor");
+    }
+
+    #[test]
+    fn source_transform_diagnostic_carries_semantic_metadata() {
+        let diagnostic = BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
+            name: "example",
+            changed: true,
+            replacement_count: 1,
+            purpose: SourceTransformPurpose::ErrorDiagnostics,
+            precondition: "generated source contains fallback arm",
+            upstream_assumption: "upstream error hides body details",
+            upstream_version: "example upstream version",
+        });
+
+        let BackendDiagnostic::SourceTransform(source_transform) = diagnostic;
+        assert_eq!(source_transform.name, "example");
+        assert_eq!(
+            source_transform.purpose,
+            SourceTransformPurpose::ErrorDiagnostics
+        );
+        assert_eq!(
+            source_transform.precondition,
+            "generated source contains fallback arm"
+        );
+        assert_eq!(
+            source_transform.upstream_assumption,
+            "upstream error hides body details"
+        );
+        assert_eq!(
+            source_transform.upstream_version,
+            "example upstream version"
+        );
     }
 }

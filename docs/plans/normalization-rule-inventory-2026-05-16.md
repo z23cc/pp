@@ -45,4 +45,7 @@ These reports are emitted by `src/spec/slice.rs` after operation filtering and c
 
 - Code constants and static inventory live in `src/spec/normalization_rules.rs`.
 - String-level pre-parse rules live in `src/spec/pre_parse.rs`.
-- Typed progenitor-compatibility and response-relaxation rules still live in `src/spec/normalize.rs`, but now enter through explicit group functions.
+- Typed normalization is coordinated by `src/spec/normalize.rs`.
+- Operation naming rules live in `src/spec/normalize/operation_naming.rs`.
+- Progenitor compatibility rules live in `src/spec/normalize/progenitor_compatibility.rs`.
+- Response relaxation rules live in `src/spec/normalize/response_relaxation.rs`.
