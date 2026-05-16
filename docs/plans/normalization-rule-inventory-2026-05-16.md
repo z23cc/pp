@@ -28,7 +28,7 @@ These rules run after typed parsing in `src/spec/normalize.rs`.
 | `spec.normalize.optional_object_query_params_dropped` | Progenitor compatibility | Drop optional object-shaped query params that break generated builders. |
 | `spec.normalize.schema_defaults_dropped` | Progenitor compatibility | Drop schema defaults that typify/progenitor may reject. |
 | `spec.normalize.enum_constraint_dropped` | Progenitor compatibility | Drop enum constraints that collide after Rust identifier sanitization. |
-| `spec.normalize.unsupported_schema_type_replaced` | Progenitor compatibility | Replace unsupported schema type names with fallback schemas. |
+| `spec.normalize.unsupported_schema_type_replaced` | Progenitor compatibility | Replace unsupported schema type names with explicitly approved compatibility schemas. |
 | `spec.normalize.properties_colliding_dropped` | Progenitor compatibility | Drop object properties that collide after Rust field-name sanitization. |
 | `spec.normalize.response_schemas_relaxed` | Response relaxation | Relax response-only schemas for tolerant deserialization. |
 

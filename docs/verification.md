@@ -22,7 +22,7 @@ Purpose:
 
 ## Standard
 
-Run manually or by the weekly `Generated Workspace Smoke` workflow.
+Run manually or by the weekly `Generated Workspace Smoke` workflow. When runtime templates change, run at least the MCP ignored smoke tests below (`mcp_errors` and `mcp_usability`) in addition to the fast profile.
 
 ```bash
 cargo test --test petstore_smoke -- --ignored

@@ -259,12 +259,12 @@ fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEn
         "runtime_generation",
         "runtime.mcp_invocation.progenitor_cli_bridge",
         "generated src/invoke.rs",
-        "route MCP tool calls through generated Progenitor CLI dispatcher",
+        "route MCP tool calls through the Progenitor CLI bridge adapter",
     )
     .with_action_kind(TransformActionKind::RuntimeBridge)
     .with_backend_requirement_id("progenitor.cli_bridge.mcp_invocation")
     .with_backend_requirement(
-        "transitional MCP runtime uses generated Progenitor CLI argv/Clap dispatch until direct typed invocation is implemented",
+        "MCP runtime uses generated Progenitor CLI argv/Clap dispatch because the current generated surface does not expose stable typed operation invocation metadata",
     )
     .with_before_after(
         "no explicit runtime-generation bridge audit",
@@ -466,6 +466,12 @@ paths:
                 && audit.action_kind == Some(TransformActionKind::RuntimeBridge)
                 && audit.backend_requirement_id.as_deref()
                     == Some("progenitor.cli_bridge.mcp_invocation")
+                && audit
+                    .backend_requirement
+                    .as_deref()
+                    .is_some_and(|requirement| {
+                        requirement.contains("stable typed operation invocation metadata")
+                    })
         }));
         let transform_plan_json: serde_json::Value = serde_json::from_slice(
             &std::fs::read(transform_plan_path).expect("read transform plan"),
@@ -495,6 +501,10 @@ paths:
                     && audit["code"] == "runtime.mcp_invocation.progenitor_cli_bridge"
                     && audit["action_kind"] == "runtime_bridge"
                     && audit["backend_requirement_id"] == "progenitor.cli_bridge.mcp_invocation"
+                    && audit["backend_requirement"]
+                        .as_str()
+                        .unwrap()
+                        .contains("stable typed operation invocation metadata")
                     && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
             }));
     }

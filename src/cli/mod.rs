@@ -359,6 +359,40 @@ mod tests {
     }
 
     #[test]
+    fn inspect_defaults_to_legacy_compatible_auth_policy() {
+        let cli = Cli::parse_from(["pp", "inspect", "spec.yaml"]);
+
+        match cli.command {
+            Command::Inspect {
+                auth_policy,
+                auth_scheme,
+                ..
+            } => {
+                assert!(matches!(auth_policy, AuthPolicyArg::Legacy));
+                assert!(auth_scheme.is_none());
+            }
+            _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn generate_defaults_to_legacy_compatible_auth_policy() {
+        let cli = Cli::parse_from(["pp", "generate", "spec.yaml", "-o", "out"]);
+
+        match cli.command {
+            Command::Generate {
+                auth_policy,
+                auth_scheme,
+                ..
+            } => {
+                assert!(matches!(auth_policy, AuthPolicyArg::Legacy));
+                assert!(auth_scheme.is_none());
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
     fn inspect_accepts_fail_ambiguous_auth_policy_flag() {
         let cli = Cli::parse_from([
             "pp",

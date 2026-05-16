@@ -98,7 +98,7 @@ impl WrapperManifest {
         let auth_env_var = auth_env_var(&auth_kind, &env_prefix);
         let temp_body_file_prefix = format!("{bin_name}-mcp");
         let invocation_adapter_kind = "progenitor_cli_bridge".to_string();
-        let invocation_adapter_reason = "MCP tool calls are still adapted through generated Progenitor CLI argv/Clap dispatch until direct typed invocation is implemented".to_string();
+        let invocation_adapter_reason = "MCP tool calls use the Progenitor CLI bridge adapter because the current generated surface does not expose stable typed operation invocation metadata".to_string();
         Self {
             bin_name,
             base_url,
@@ -338,14 +338,21 @@ paths:
         let rendered = render_template("invoke.rs", INVOKE_TEMPLATE, &manifest).unwrap();
 
         assert!(rendered.contains("pub async fn invoke_operation"));
-        assert!(rendered.contains("struct ProgenitorCliInvocationAdapter"));
+        assert!(rendered.contains("struct ProgenitorCliBridgeInvoker"));
+        assert!(rendered.contains("Adapter contract:"));
         assert!(rendered
             .contains("pub const INVOCATION_ADAPTER_KIND: &str = \"progenitor_cli_bridge\";"));
-        assert!(rendered.contains("generated Progenitor CLI argv/Clap dispatch"));
+        assert!(rendered.contains("generated CLI argv/Clap dispatch semantics"));
+        assert!(!rendered.contains("backend debt"));
+        assert!(!rendered.contains("Transitional Progenitor CLI bridge"));
         assert_eq!(
             manifest.mcp_runtime.invocation_adapter_kind,
             "progenitor_cli_bridge"
         );
+        assert!(manifest
+            .mcp_runtime
+            .invocation_adapter_reason
+            .contains("stable typed operation invocation metadata"));
         assert!(rendered.contains(".create_new(true)"));
         assert!(rendered.contains("static MCP_BODY_FILE_COUNTER: AtomicU64"));
         assert!(rendered.contains("MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)"));

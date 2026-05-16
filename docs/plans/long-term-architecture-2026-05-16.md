@@ -38,7 +38,7 @@ Each stage should have a small interface, typed errors, and a report. Callers sh
 
 As of the 2026-05-16 follow-up pass, `pp` has implemented the main internal seams this plan called for: generation runs through an internal pipeline request/result path; spec preparation emits structured reports and transform plans; normalization is split into rule groups; selected transforms include machine-readable audit metadata; MCP tool data is built by the model layer before rendering; rendering consumes a wrapper manifest; Progenitor is isolated behind a backend seam with named source-transform diagnostics; and verification profiles are documented.
 
-Remaining work is narrower than the original plan. The generated MCP runtime still uses an audited Progenitor CLI bridge (`runtime.mcp_invocation.progenitor_cli_bridge`) instead of direct typed operation invocation. OAuth2 is still modeled as bearer-token input only, and validation remains build-focused rather than a full runtime-smoke validation framework.
+Remaining work is narrower than the original plan. The generated MCP runtime now treats `runtime.mcp_invocation.progenitor_cli_bridge` as an explicit Progenitor runtime adapter contract rather than hidden local debt. Direct typed operation invocation remains blocked until generated output exposes stable operation metadata. OAuth2 is still modeled as bearer-token input only, and validation remains build-focused rather than a full runtime-smoke validation framework.
 
 ## Solution
 
@@ -87,7 +87,7 @@ Expected leverage:
 
 - Upstream changes become easier to diagnose.
 - Future backends or modes become possible without rewriting the whole project.
-- Fragile regex/string transformations become visible technical debt instead of hidden coupling.
+- Backend-generated source transforms become visible adapter constraints with version assumptions instead of hidden coupling.
 
 ### Make verification first-class
 
@@ -160,7 +160,7 @@ Status: implemented internally. `pp inspect --reports` exposes facts plus struct
 
 ### Phase 7 — Isolate backend adapters
 
-Status: implemented for the current Progenitor backend seam and named source transforms. Direct typed invocation from generated MCP tools remains future runtime/backend work.
+Status: implemented for the current Progenitor backend seam, named source transforms, and explicit MCP CLI bridge adapter audit. Direct typed invocation from generated MCP tools remains future runtime/backend work because current generated Progenitor output does not expose stable operation metadata.
 
 1. Define a backend interface for API crate generation.
 2. Move progenitor-specific settings and source transforms behind the progenitor adapter.
@@ -229,7 +229,7 @@ Rendering and MCP tool construction consume `pp` model types instead of raw Open
 
 ### Milestone D — Backend isolation
 
-Progenitor-specific code and generated-source transforms are isolated, named, and tested. The remaining backend/runtime debt is direct typed invocation for MCP calls; today that path is explicitly audited as a Progenitor CLI bridge.
+Progenitor-specific code and generated-source transforms are isolated, named, and tested. The remaining backend/runtime constraint is direct typed invocation for MCP calls; today that path is explicitly audited as a Progenitor CLI bridge adapter, and replacement depends on generated operation metadata.
 
 ### Milestone E — Release-grade verification
 

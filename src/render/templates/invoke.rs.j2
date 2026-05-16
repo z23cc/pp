@@ -27,22 +27,29 @@ pub struct OperationInvocationResult {
     pub is_error: bool,
 }
 
-/// Transitional Progenitor CLI bridge used by MCP tools.
+/// Invoke one generated operation from the MCP runtime.
 ///
-/// This is intentionally backend debt: MCP JSON arguments are still adapted into
-/// generated CLI argv/Clap matches and then dispatched through the CLI executor.
-/// It is not yet the final shared typed operation invocation layer for both CLI
-/// and MCP callers.
+/// This function is the stable runtime boundary used by `mcp.rs`. The current
+/// Progenitor backend satisfies that boundary through `ProgenitorCliBridgeInvoker`,
+/// which preserves generated CLI argv/Clap dispatch semantics while keeping MCP
+/// result and error shaping in the wrapper runtime.
 pub async fn invoke_operation(
     context: Context,
     invocation: OperationInvocation,
 ) -> Result<OperationInvocationResult, McpError> {
-    ProgenitorCliInvocationAdapter::invoke(context, invocation).await
+    ProgenitorCliBridgeInvoker::invoke(context, invocation).await
 }
 
-struct ProgenitorCliInvocationAdapter;
+/// Runtime adapter for Progenitor-generated CLI surfaces.
+///
+/// Adapter contract:
+/// - convert MCP JSON arguments into the generated CLI argument contract;
+/// - dispatch through the same generated operation executor as human CLI calls;
+/// - preserve captured structured output and MCP error/result shapes;
+/// - keep temporary JSON body files process-local and cleaned up on drop.
+struct ProgenitorCliBridgeInvoker;
 
-impl ProgenitorCliInvocationAdapter {
+impl ProgenitorCliBridgeInvoker {
     pub async fn invoke(
         context: Context,
         invocation: OperationInvocation,

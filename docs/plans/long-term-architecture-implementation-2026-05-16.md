@@ -56,8 +56,9 @@ Design choices for this plan:
 - [x] Packet 3 — first plan-before-apply transform exemplar: response variant pruning and request/response content-type pruning now produce narrow internal compatibility proposals before typed mutation; `LoadOptions.policy` approves those proposal reports before the approved actions are applied.
 - [x] Follow-up packet — machine-readable transform audits and runtime bridge audit: `TransformAuditEntry` now carries optional structured fields (`target_pointer`, `action_kind`, `backend_requirement_id`, `before_json`, `after_json`), typed/backend producers populate them where practical, and the generated MCP Progenitor CLI bridge is recorded as a `runtime_generation` audit.
 - [x] Follow-up packet — auth selection policy: `inspect` and `generate` accept `--auth-policy legacy|fail-ambiguous` and `--auth-scheme <NAME>`, preserving legacy selection by default while allowing explicit or fail-ambiguous behavior.
+- [x] Follow-up packet — debt-marker cleanup: the MCP Progenitor CLI bridge is documented and audited as an explicit runtime adapter contract, auth default compatibility has direct CLI parse coverage, and direct typed MCP invocation is classified as blocked until generated operation metadata exists.
 
-Current state: the compiler seams from the original plan are now largely present internally: pipeline orchestration, structured reports, normalization rule groups, transform approval/audits, model-backed MCP tool construction, thin rendering, backend capability isolation, named backend source transforms, and verification profiles. Direct typed MCP operation invocation is still future work; generated MCP calls currently route through an audited Progenitor CLI bridge to preserve behavior.
+Current state: the compiler seams from the original plan are now largely present internally: pipeline orchestration, structured reports, normalization rule groups, transform approval/audits, model-backed MCP tool construction, thin rendering, backend capability isolation, named backend source transforms, and verification profiles. Generated MCP calls route through an audited Progenitor CLI bridge adapter to preserve behavior; direct typed MCP operation invocation is blocked until generated output exposes stable operation metadata.
 
 Latest focused verification: Packet 3 and follow-up implementation items ran formatting, clippy, full tests, and relevant ignored MCP/runtime checks as recorded in the item plan. For the auth-selection review fix, `cargo fmt --check && cargo test spec::auth` passed with 19 auth unit tests passing, 0 failed, 0 ignored, and 95 filtered out.
 
@@ -226,7 +227,7 @@ Latest focused verification: Packet 3 and follow-up implementation items ran for
 
 ### 10. Name and test generated-source transforms
 
-**Goal:** Make generated-source patches explicit, searchable technical debt.
+**Goal:** Make generated-source patches explicit, searchable backend adapter constraints.
 
 **Done when:**
 

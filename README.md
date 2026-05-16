@@ -88,7 +88,7 @@ Human-readable progress and diagnostics stay on stderr.
 MCP `tools/list` uses standard cursor pagination with a server-defined page size.
 Clients should follow `nextCursor` until it is absent to discover every generated tool.
 
-MCP tool calls currently use an audited transitional Progenitor CLI bridge: MCP JSON arguments are adapted into generated CLI argv/Clap dispatch before reaching the generated operation executor. This keeps CLI and MCP behavior aligned today, and each generated workspace records the bridge in `pp-transform-plan.json` as `runtime.mcp_invocation.progenitor_cli_bridge`; direct typed invocation remains future backend/runtime work.
+MCP tool calls currently use an audited Progenitor CLI bridge adapter: MCP JSON arguments are adapted into generated CLI argv/Clap dispatch before reaching the generated operation executor. This keeps CLI and MCP behavior aligned today, and each generated workspace records the adapter in `pp-transform-plan.json` as `runtime.mcp_invocation.progenitor_cli_bridge`. Direct typed invocation is blocked until generated Progenitor output exposes stable operation metadata such as method names, parameter setters, request body types, and response types.
 
 MCP tool calls return the full structured JSON response by default. Agent clients can opt into response shaping with reserved MCP-only parameters:
 
@@ -125,7 +125,9 @@ keep their existing text fields and may include structured fields such as `targe
 `action_kind`, `backend_requirement_id`, `before_json`, and `after_json`.
 
 Available transform effects are `lossless_repair`, `explicit_selection`, `lossy_rewrite`,
-`semantic_drop`, `backend_workaround`, and `unsafe_fallback`.
+`semantic_drop`, `backend_workaround`, and `unsafe_fallback`. The `unsafe_fallback`
+effect is explicit-approval vocabulary for last-resort compatibility replacement; it is
+not an implicit fallback path in strict mode.
 
 Current compatibility rules:
 
@@ -151,8 +153,8 @@ Generated CLIs currently support:
 - HTTP basic via `<BIN>_USER` and `<BIN>_PASSWORD`
 - OAuth2 treated as bearer token input
 
-By default, auth selection remains legacy-compatible: when multiple supported component
-security schemes are present, `pp` keeps the first supported scheme in component order.
+By default, auth selection remains compatibility-preserving: when multiple supported component
+security schemes are present, the `legacy` policy keeps the first supported scheme in component order.
 Use `--auth-policy fail-ambiguous` with `inspect` or `generate` to fail instead when more
 than one supported component scheme is selectable. Use `--auth-scheme <NAME>` to select a
 specific `components.securitySchemes` entry; this overrides `--auth-policy` and does not
@@ -169,6 +171,7 @@ MY_API_TOKEN=foo ./out/my-api/target/release/my-api get-ping
 - OpenAPI 3.1 support is a downgrade pass, not a full native 3.1 implementation.
 - OAuth2 is modeled as bearer-token input only.
 - Very large specs can still expose upstream `progenitor` / `typify` codegen limits. `pp` currently carries a temporary typify fork patch for nullable-composition fixes; remove it only after upstream releases the fixes and the GitHub-scale regression still passes.
+- The Progenitor backend still carries named generated-source transforms: CLI parser-compatibility transforms for generated Progenitor surfaces, plus a local unexpected-response diagnostic transform for readable error bodies. These are audited backend-adapter source transforms, not hidden local normalization.
 
 ## Verification
 
