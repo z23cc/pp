@@ -378,6 +378,7 @@ fn decode_json_pointer(input: &str) -> String {
     input.replace("~1", "/").replace("~0", "~")
 }
 
+#[cfg(test)]
 pub(crate) fn collect_raw_schema_refs(schema: &ReferenceOr<Schema>, refs: &mut BTreeSet<String>) {
     match schema {
         ReferenceOr::Reference { reference } => {
@@ -387,6 +388,7 @@ pub(crate) fn collect_raw_schema_refs(schema: &ReferenceOr<Schema>, refs: &mut B
     }
 }
 
+#[cfg(test)]
 pub(crate) fn collect_raw_boxed_schema_refs(
     schema: &ReferenceOr<Box<Schema>>,
     refs: &mut BTreeSet<String>,
@@ -399,6 +401,7 @@ pub(crate) fn collect_raw_boxed_schema_refs(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn collect_raw_schema_refs_in_schema(schema: &Schema, refs: &mut BTreeSet<String>) {
     match &schema.schema_kind {
         SchemaKind::Type(Type::Object(object)) => {

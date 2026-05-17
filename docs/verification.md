@@ -36,8 +36,8 @@ cargo test --test mcp_usability -- --ignored
 
 Purpose:
 
-- Prove representative generated workspaces compile with `cargo build --release`.
-- Preflight sliced generation with the petstore `store` tag so pruning remains covered outside fast PR CI.
+- Prove representative clean generated workspaces compile with `cargo build --release`.
+- Keep petstore and sliced petstore checks as expected backend-rejection coverage for unsupported strict specs.
 - Exercise bearer, API key, and basic auth header behavior against local `mockito` servers.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
 - Rebuild generated runtimes that expose MCP through generated direct HTTP invocation metadata.
@@ -52,7 +52,7 @@ Run manually before release candidates or after large generator/backend changes,
 cargo test --test dogfood -- --ignored
 ```
 
-Optional large-spec manual checks should also include representative public specs documented under `docs/plans/`, especially GitHub REST slices/full generation when the fixture is available locally.
+Optional large-spec manual checks should use strict, parser-ready OpenAPI 3.0 fixtures. Public specs that require shape repair are intentionally expected to fail until their source specs are fixed upstream or preprocessed outside `pp`.
 
 Purpose:
 
@@ -64,7 +64,7 @@ Purpose:
 `pp validate <workspace>` currently performs generated-workspace build validation:
 
 ```bash
-pp validate ./out/petstore
+pp validate ./out/ping
 ```
 
 It intentionally has a narrow first contract: run `cargo build --release` in an emitted workspace and return the build result. Future validation levels can add runtime smoke checks without changing the meaning of the current build validation.

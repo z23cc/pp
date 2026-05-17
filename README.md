@@ -26,14 +26,26 @@ List operations in a spec for discovery and slicing:
 pp inspect testdata/petstore.yaml --list-operations
 ```
 
-Generate a CLI workspace and build it:
+Generate a CLI workspace from a strict OpenAPI 3.0 spec and build it:
 
 ```bash
-pp generate testdata/petstore.yaml -o ./out/petstore \
-  --allow-report-code spec.normalize.response_variants_pruned \
-  --allow-report-code spec.normalize.content_types_pruned \
-  --build
-./out/petstore/target/release/swagger-petstore --help
+cat > /tmp/ping.yaml <<'YAML'
+openapi: 3.0.0
+info:
+  title: Ping API
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200':
+          description: ok
+YAML
+pp generate /tmp/ping.yaml -o ./out/ping --build
+./out/ping/target/release/ping-api --help
 ```
 
 ## What pp is good for
@@ -49,9 +61,7 @@ pp generate testdata/petstore.yaml -o ./out/petstore \
 Every generated binary supports human CLI commands and an MCP stdio server:
 
 ```bash
-pp generate stripe.yaml -o ./stripe \
-  --allow-report-code <reviewed-report-code> \
-  --build
+pp generate stripe.yaml -o ./stripe --build
 cargo install --path ./stripe
 stripe charges_retrieve --id ch_123
 stripe mcp
@@ -102,52 +112,33 @@ MCP tool calls return the full structured JSON response by default. Agent client
 
 These `_pp_` controls only apply to successful MCP tool results. CLI `--json` output and MCP error diagnostics are unchanged. OpenAPI parameters using the `_pp_` prefix are rejected during generation because that namespace is reserved by the wrapper.
 
-## Spec normalization
+## Spec preparation
 
-`pp` is strict by default: compatibility rewrites, lossy drops, backend workarounds,
-and unsafe fallback replacements fail generation instead of silently proceeding. For
-`generate`, approve only the required compatibility work with repeatable
-`--allow-report-code <code>` flags. `inspect` also accepts `--allow-effect <effect>` for
-exploratory report review.
+`pp` keeps the parsed OpenAPI document strict: it does not rewrite, drop,
+prune, or relax typed OpenAPI shapes to satisfy the Progenitor backend. Specs are
+parsed, optionally sliced, inspected, modeled, and generated as-is; unsupported backend
+shapes fail at model construction or backend code generation.
 
 Generated workspaces also require an explicit base URL. `pp` uses `servers[0].url` from
-the spec, or `--base-url <URL>` when the spec does not declare a server; it no longer
-falls back to `http://localhost`.
+the spec, or `--base-url <URL>` when the spec does not declare a server.
 
 Generated commands and MCP tools require every selected operation to declare an explicit,
 stable `operationId`. `pp inspect --list-operations` still shows discovery-only derived
 IDs for unnamed operations, but generation fails until those operations are given an
 `operationId` or excluded from the generated surface.
 
-When compatibility normalization is allowed by report code, `pp` prints each
-normalization to stderr, exposes structured report entries through `pp inspect --reports`,
-and writes `pp-transform-plan.json` into generated workspaces. Use
-`pp inspect --reports --allow-report-code <code>` to approve a single known rule for review,
-then pass the same reviewed `--allow-report-code <code>` flags to `pp generate`.
-
-The transform plan also includes machine-readable audit entries for applied raw repairs,
-typed normalization, backend source transforms, and runtime-generation seams. Audit entries
-keep their existing text fields and may include structured fields such as `target_pointer`,
+`pp inspect --reports` exposes structured preparation reports for explicit slicing.
+Generated workspaces write `pp-transform-plan.json` with machine-readable audit entries
+for runtime-generation seams. Audit entries may include structured fields such as
 `action_kind`, `backend_requirement_id`, `before_json`, and `after_json`.
 
-Available transform effects are `lossless_repair`, `explicit_selection`, `lossy_rewrite`,
-`semantic_drop`, `backend_workaround`, and `unsafe_fallback`. The `unsafe_fallback`
-effect is explicit-approval vocabulary for last-resort compatibility replacement; it is
-not an implicit fallback path in strict mode.
+Current preparation behavior:
 
-Current compatibility rules:
-
-- Request body media types: keep `application/json` when present, otherwise fail unless
-  the specific report code is explicitly allowed for generation.
-- Response media types: keep `application/json` when present, otherwise fail unless
-  the specific report code is explicitly allowed for generation.
-- Response variants: keep `200`, else the first 2xx response, else the first
-  available response such as `default`; strict mode rejects this pruning by default.
-- Schemaless request bodies: dropping CLI body input when no JSON Schema is present requires explicit approval by report code for generation.
-- OpenAPI 3.1: downgrade supported 3.1 shapes into the 3.0 parser path only when
-  the specific report code is explicitly allowed for generation.
-- Enum collisions, property name collisions, and unsupported schema types are
-  rewritten only when the specific report code is explicitly allowed so codegen can continue.
+- Typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for backend output.
+- OpenAPI 3.1 input must be parseable by the current typed parser; `pp` no longer performs
+  raw 3.1-to-3.0 repair passes.
+- Operation slicing remains explicit and reports selected/dropped operations and pruned
+  unreachable components.
 
 ## Auth
 
@@ -157,11 +148,10 @@ Generated CLIs currently support:
 - HTTP bearer via `<BIN>_TOKEN`
 - header `apiKey` via `<BIN>_API_KEY`
 - HTTP basic via `<BIN>_USER` and `<BIN>_PASSWORD`
-- OAuth2 treated as bearer token input
 
 By default, auth selection fails when multiple supported component security schemes are
 selectable. Use `--auth-scheme <NAME>` to select a specific
-`components.securitySchemes` entry; explicit scheme selection does not fall back to
+`components.securitySchemes` entry; explicit scheme selection does not infer
 query-parameter heuristics.
 
 Example:
@@ -172,10 +162,9 @@ MY_API_TOKEN=foo ./out/my-api/target/release/my-api get-ping
 
 ## Known limitations
 
-- OpenAPI 3.1 support is a downgrade pass, not a full native 3.1 implementation.
-- OAuth2 is modeled as bearer-token input only.
+- OpenAPI 3.1 support is limited to shapes accepted by the current typed parser.
+- OAuth2 flows are not implemented; use an explicit HTTP bearer scheme for token-based APIs.
 - Very large specs can still expose upstream `progenitor` / `typify` codegen limits. `pp` currently carries a temporary typify fork patch for nullable-composition fixes; remove it only after upstream releases the fixes and the GitHub-scale regression still passes.
-- The Progenitor backend still carries named generated-source transforms: CLI parser-compatibility transforms for generated Progenitor surfaces, plus a local unexpected-response diagnostic transform for readable error bodies. These are audited backend-adapter source transforms, not hidden local normalization.
 
 ## Verification
 
@@ -188,12 +177,12 @@ cargo test
 `pp validate <workspace>` runs `cargo build --release` in a generated workspace:
 
 ```bash
-pp validate ./out/petstore
+pp validate ./out/ping
 ```
 
 Generated-workspace smoke tests are ignored in normal PR runs and covered by a manual/scheduled workflow. See `docs/verification.md` for the fast, standard, and deep verification profiles.
 
-The standard smoke profile covers petstore generation/build, auth headers, MCP error shapes, `tools/list` pagination, and MCP response shaping against local `mockito` servers.
+The standard smoke profile covers clean generated-workspace builds, expected Petstore backend rejection, auth headers, MCP error shapes, `tools/list` pagination, and MCP response shaping against local `mockito` servers.
 
 ## Contributing
 

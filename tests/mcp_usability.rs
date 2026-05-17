@@ -50,6 +50,96 @@ paths:
 
 #[test]
 #[ignore = "expensive smoke test: generates and builds a wrapper CLI; run with `cargo test --test mcp_usability -- --ignored`"]
+fn json_object_request_body_spec_generates_and_builds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "json-body.yaml",
+        r#"
+openapi: 3.0.0
+info:
+  title: Json Body API
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+              required: [name]
+      responses:
+        '200':
+          description: ok
+"#,
+    );
+    let out_dir = temp.path().join("out");
+    common::assert_success(
+        common::run_pp_generate(&spec, &out_dir),
+        "pp generate --build json body",
+    );
+    assert!(common::generated_bin(&out_dir, "json-body-api").exists());
+}
+
+#[test]
+#[ignore = "expensive smoke test: generates and builds a wrapper CLI; run with `cargo test --test mcp_usability -- --ignored`"]
+fn query_array_spec_reaches_backend_rejection_without_source_rewrites() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(
+        temp.path(),
+        "query-array.yaml",
+        r#"
+openapi: 3.0.0
+info:
+  title: Query Array API
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: tags
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: ok
+"#,
+    );
+    let out_dir = temp.path().join("out");
+    let output = common::pp_generate_command(&spec, &out_dir)
+        .arg("--build")
+        .output()
+        .expect("failed to run pp generate");
+
+    assert!(
+        !output.status.success(),
+        "query array spec unexpectedly built"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("backend failed to generate API crate")
+            || stderr.contains("cargo build --release failed"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+#[ignore = "expensive smoke test: generates and builds a wrapper CLI; run with `cargo test --test mcp_usability -- --ignored`"]
 fn tools_list_uses_cursor_pagination() {
     let temp = tempfile::tempdir().expect("tempdir");
     let spec = common::write_spec(temp.path(), "many-tools.yaml", &many_tools_spec(105));
@@ -91,15 +181,10 @@ fn mcp_response_shaping_is_opt_in_and_success_only() {
     let spec = common::write_spec(temp.path(), "shape.yaml", &shape_spec(&server.url()));
     let out_dir = temp.path().join("out");
     let output = common::pp_generate_command(&spec, &out_dir)
-        .arg("--allow-report-code")
-        .arg("spec.normalize.response_schemas_relaxed")
         .arg("--build")
         .output()
         .expect("failed to run pp generate");
-    common::assert_success(
-        output,
-        "pp generate --allow-report-code spec.normalize.response_schemas_relaxed --build",
-    );
+    common::assert_success(output, "pp generate --build");
     let bin = common::generated_bin(&out_dir, "shape-api");
 
     let full = call_tool(&bin, "get_item", json!({}));

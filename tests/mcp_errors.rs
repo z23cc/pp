@@ -50,15 +50,6 @@ paths:
                 properties:
                   ok:
                     type: boolean
-        '401':
-          description: unauthorized
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
 components:
   securitySchemes:
     apiKeyAuth:
@@ -71,17 +62,10 @@ components:
     );
     let out_dir = temp.path().join("out");
     let output = common::pp_generate_command(&spec, &out_dir)
-        .arg("--allow-report-code")
-        .arg("spec.normalize.response_variants_pruned")
-        .arg("--allow-report-code")
-        .arg("spec.normalize.response_schemas_relaxed")
         .arg("--build")
         .output()
         .expect("failed to run pp generate");
-    common::assert_success(
-        output,
-        "pp generate --allow-report-code response_variants_pruned/response_schemas_relaxed --build",
-    );
+    common::assert_success(output, "pp generate --build");
     let bin = common::generated_bin(&out_dir, "error-api");
 
     let invalid_params = call_tool(&bin, Some(("ERROR_API_API_KEY", "secret")), json!({}));
@@ -145,15 +129,10 @@ paths:
     );
     let out_dir = temp.path().join("out");
     let output = common::pp_generate_command(&spec, &out_dir)
-        .arg("--allow-report-code")
-        .arg("spec.normalize.response_schemas_relaxed")
         .arg("--build")
         .output()
         .expect("failed to run pp generate");
-    common::assert_success(
-        output,
-        "pp generate --allow-report-code spec.normalize.response_schemas_relaxed --build",
-    );
+    common::assert_success(output, "pp generate --build");
     let bin = common::generated_bin(&out_dir, "transport-api");
 
     let response = call_named_tool(&bin, "ping", None, json!({}));

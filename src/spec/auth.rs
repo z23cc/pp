@@ -50,9 +50,6 @@ pub(crate) enum AuthCandidate {
         supported: bool,
         reason: Option<String>,
     },
-    OAuth2AsBearerCompatibility {
-        name: String,
-    },
     QueryParameterHeuristic {
         param_name: String,
         appearances: usize,
@@ -94,7 +91,6 @@ pub(crate) enum AuthSelectionBasis {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum AuthSelectionSource {
     SecurityScheme { name: String },
-    OAuth2AsBearerCompatibility { name: String },
     QueryParameterHeuristic { param_name: String },
 }
 
@@ -134,10 +130,6 @@ pub(crate) fn derive_auth_plan_with_policy(
 
     for (name, scheme_ref) in &components.security_schemes {
         match scheme_ref {
-            ReferenceOr::Item(SecurityScheme::OAuth2 { .. }) => {
-                // User supplies their own token via `<BIN>_TOKEN`; pp doesn't run the OAuth2 flow.
-                candidates.push(AuthCandidate::OAuth2AsBearerCompatibility { name: name.clone() });
-            }
             ReferenceOr::Item(scheme) => {
                 let auth_kind = auth_kind_for_scheme(scheme);
                 let supported = is_supported_auth_kind(&auth_kind);
@@ -354,7 +346,6 @@ impl AuthCandidate {
                 supported: true,
                 ..
             } => Some(auth_kind.clone()),
-            AuthCandidate::OAuth2AsBearerCompatibility { .. } => Some(AuthKind::Bearer),
             AuthCandidate::QueryParameterHeuristic {
                 param_name,
                 accepted: true,
@@ -375,8 +366,7 @@ impl AuthCandidate {
 
     fn component_scheme_name(&self) -> Option<&str> {
         match self {
-            AuthCandidate::SecurityScheme { name, .. }
-            | AuthCandidate::OAuth2AsBearerCompatibility { name } => Some(name.as_str()),
+            AuthCandidate::SecurityScheme { name, .. } => Some(name.as_str()),
             AuthCandidate::QueryParameterHeuristic { .. } => None,
         }
     }
@@ -397,9 +387,6 @@ impl AuthCandidate {
                 supported: true,
                 ..
             } => Some(AuthSelectionSource::SecurityScheme { name: name.clone() }),
-            AuthCandidate::OAuth2AsBearerCompatibility { name } => {
-                Some(AuthSelectionSource::OAuth2AsBearerCompatibility { name: name.clone() })
-            }
             AuthCandidate::QueryParameterHeuristic {
                 param_name,
                 accepted: true,
@@ -488,13 +475,13 @@ fn required_query_params<'a>(
 }
 
 fn is_auth_query_param_name(name: &str) -> bool {
-    let normalized: String = name
+    let folded_name: String = name
         .chars()
         .filter(|c| *c != '_' && *c != '-')
         .flat_map(char::to_lowercase)
         .collect();
     matches!(
-        normalized.as_str(),
+        folded_name.as_str(),
         "apikey"
             | "accesstoken"
             | "token"
@@ -525,9 +512,10 @@ fn auth_kind_for_scheme(scheme: &SecurityScheme) -> AuthKind {
                 reason: format!("apiKey in '{other:?}' not supported in MVP (only header)"),
             },
         },
-        // Defensive fallback for direct callers; derive_auth_plan models OAuth2 through
-        // AuthCandidate::OAuth2AsBearerCompatibility so compatibility is inspectable.
-        SecurityScheme::OAuth2 { .. } => AuthKind::Bearer,
+        SecurityScheme::OAuth2 { .. } => AuthKind::Unsupported {
+            reason: "OAuth2 flows are not implemented; use an explicit bearer security scheme"
+                .into(),
+        },
         SecurityScheme::OpenIDConnect { .. } => AuthKind::Unsupported {
             reason: "OpenID Connect not supported in MVP".into(),
         },
@@ -838,7 +826,7 @@ components:
     }
 
     #[test]
-    fn oauth2_first_bearer_second_fails_ambiguous_by_default() {
+    fn oauth2_first_bearer_second_selects_supported_scheme() {
         let spec: OpenAPI = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
@@ -858,13 +846,11 @@ components:
         )
         .unwrap();
 
-        let err = derive_auth_kind(&spec).unwrap_err().to_string();
-        assert!(err.contains("ambiguous auth schemes: oauth2, bearerAuth"));
-        assert!(err.contains("--auth-scheme <name>"));
+        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
     }
 
     #[test]
-    fn oauth2_first_apikey_second_fails_ambiguous_by_default() {
+    fn oauth2_first_apikey_second_selects_supported_scheme() {
         let spec: OpenAPI = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
@@ -885,9 +871,13 @@ components:
         )
         .unwrap();
 
-        let err = derive_auth_plan(&spec).unwrap_err().to_string();
-        assert!(err.contains("ambiguous auth schemes: oauth2, apiKeyAuth"));
-        assert!(err.contains("--auth-scheme <name>"));
+        let plan = derive_auth_plan(&spec).unwrap();
+        assert_eq!(
+            plan.selected,
+            AuthKind::ApiKey {
+                header_name: "X-API-Key".into()
+            }
+        );
 
         let explicit_plan = derive_auth_plan_with_policy(
             &spec,
@@ -905,7 +895,7 @@ components:
     }
 
     #[test]
-    fn oauth2_only_plan_documents_bearer_compatibility() {
+    fn oauth2_only_plan_is_unsupported() {
         let spec: OpenAPI = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
@@ -922,46 +912,43 @@ components:
         )
         .unwrap();
 
+        let reason = "OAuth2 flows are not implemented; use an explicit bearer security scheme";
         let plan = derive_auth_plan(&spec).unwrap();
-        assert_eq!(plan.selected, AuthKind::Bearer);
-        assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
+        assert_eq!(
+            plan.selected,
+            AuthKind::Unsupported {
+                reason: reason.into()
+            }
+        );
+        assert_eq!(derive_auth_kind(&spec).unwrap(), plan.selected);
         assert_eq!(
             plan.decision,
-            AuthDecision::Selected {
-                source: AuthSelectionSource::OAuth2AsBearerCompatibility {
-                    name: "oauth2".into()
-                },
-                selection_basis: AuthSelectionBasis::ComponentSecurityScheme,
+            AuthDecision::UnsupportedOnly {
+                first_reason: reason.into()
             }
         );
         assert_eq!(
             plan.candidates,
-            vec![AuthCandidate::OAuth2AsBearerCompatibility {
-                name: "oauth2".into()
+            vec![AuthCandidate::SecurityScheme {
+                name: "oauth2".into(),
+                auth_kind: AuthKind::Unsupported {
+                    reason: reason.into()
+                },
+                supported: false,
+                reason: Some(reason.into()),
             }]
         );
 
-        let fail_ambiguous_plan =
-            derive_auth_plan_with_policy(&spec, &AuthSelectionPolicy::FailAmbiguous).unwrap();
-        assert_eq!(fail_ambiguous_plan.selected, AuthKind::Bearer);
-
-        let explicit_plan = derive_auth_plan_with_policy(
+        let err = derive_auth_plan_with_policy(
             &spec,
             &AuthSelectionPolicy::ExplicitScheme {
                 name: "oauth2".into(),
             },
         )
-        .unwrap();
-        assert_eq!(explicit_plan.selected, AuthKind::Bearer);
-        assert_eq!(
-            explicit_plan.decision,
-            AuthDecision::Selected {
-                source: AuthSelectionSource::OAuth2AsBearerCompatibility {
-                    name: "oauth2".into()
-                },
-                selection_basis: AuthSelectionBasis::ExplicitScheme,
-            }
-        );
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("auth scheme 'oauth2' is not supported"));
+        assert!(err.contains(reason));
     }
 
     #[test]

@@ -315,7 +315,9 @@ pub(super) fn add_body(
         .get(capabilities.request_bodies.json_content_type)
     else {
         if body.content.is_empty() {
-            return Ok(());
+            bail!(
+                "{DIRECT_UNSUPPORTED_PREFIX} requestBody without JSON content for tool '{tool_name}' (operationId '{operation_id}')"
+            );
         }
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} non-JSON request bodies for tool '{tool_name}' (operationId '{operation_id}')"
@@ -337,14 +339,8 @@ pub(super) fn add_body(
             .keys()
             .any(|name| properties.contains_key(name));
         if has_flattening_collision {
-            return add_synthetic_body_arg(
-                body_schema.json,
-                body.required,
-                properties,
-                required,
-                args,
-                tool_name,
-                operation_id,
+            bail!(
+                "{DIRECT_UNSUPPORTED_PREFIX} flattened JSON request body field collision for tool '{tool_name}' (operationId '{operation_id}')"
             );
         }
 

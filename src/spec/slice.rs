@@ -1,4 +1,4 @@
-use super::normalization_rules::{self as rules, slicing};
+use super::preparation_rules::{self as rules, slicing};
 use super::references::{collect_reachable_components, ComponentRefs};
 use super::report::{ReportEntry, ReportSubject};
 use super::traversal;
@@ -31,8 +31,8 @@ impl SliceOptions {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OperationListing {
-    /// Back-compatible discovery identifier: explicit operationId when present,
-    /// otherwise a derived method/path label.
+    /// Discovery identifier: explicit operationId when present, otherwise a
+    /// method/path label used only for inspection and slicing output.
     pub id: String,
     pub method: String,
     pub path: String,
@@ -406,11 +406,11 @@ mod tests {
     use crate::spec::report::ReportStage;
 
     #[test]
-    fn list_operations_uses_method_path_fallback_id_without_operation_id() {
+    fn list_operations_uses_method_path_derived_id_without_operation_id() {
         let api: OpenAPI = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
-info: { title: Fallback Operation IDs, version: '1.0' }
+info: { title: Derived Operation IDs, version: '1.0' }
 paths:
   /items/{id}:
     patch:

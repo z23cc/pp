@@ -4,10 +4,7 @@
 //! argument handling and the current spec/progenitor/render implementation
 //! without committing to a public library API.
 
-use crate::backend::{
-    ApiBackend, ApiCrateRequest, BackendDiagnostic, ProgenitorBackend, SourceTransformPurpose,
-    SourceTransformStatus,
-};
+use crate::backend::{ApiBackend, ApiCrateRequest, ProgenitorBackend};
 use crate::model::ApiModel;
 use crate::render::WrapperManifest;
 use crate::spec::{
@@ -37,7 +34,6 @@ pub(crate) struct GenerateResult {
     pub reports: Vec<ReportEntry>,
     pub transform_plan: TransformPlan,
     pub formatted_warnings: Vec<String>,
-    pub backend_diagnostics: Vec<BackendDiagnostic>,
     pub output_path: PathBuf,
     pub target_bin_name: String,
     pub validation: Option<ValidationResult>,
@@ -97,10 +93,7 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
     });
 
     let backend_capabilities = backend.capabilities();
-    let load_options = request
-        .load_options
-        .with_backend_capabilities(backend_capabilities.clone());
-    let loaded = crate::spec::load_with_options(&request.spec_path, &load_options)?;
+    let loaded = crate::spec::load_with_options(&request.spec_path, &request.load_options)?;
 
     for report in &loaded.reports {
         progress(GenerateProgress::Warning {
@@ -147,17 +140,13 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
 
     progress(GenerateProgress::GeneratingApiCrate);
     let api_out_dir = request.output_path.join("api");
-    let api_output = backend
+    backend
         .generate_api_crate(ApiCrateRequest {
             api: &loaded.api,
             out_dir: &api_out_dir,
             crate_name: &api_name,
         })
         .with_context(|| format!("{} backend failed to generate API crate", backend.name()))?;
-    transform_plan.add_audits(backend_diagnostic_audits(
-        backend.name(),
-        &api_output.diagnostics,
-    ));
     transform_plan.add_audits(runtime_generation_audits(&manifest, &backend_capabilities));
     write_transform_plan(&request.output_path, &transform_plan)?;
 
@@ -181,105 +170,11 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         facts,
         reports: loaded.reports,
         transform_plan,
-        formatted_warnings: loaded.normalization_warnings,
-        backend_diagnostics: api_output.diagnostics,
+        formatted_warnings: loaded.preparation_warnings,
         output_path: request.output_path,
         target_bin_name,
         validation,
     })
-}
-
-fn backend_diagnostic_audits(
-    backend_name: &str,
-    diagnostics: &[BackendDiagnostic],
-) -> Vec<TransformAuditEntry> {
-    diagnostics
-        .iter()
-        .map(|diagnostic| match diagnostic {
-            BackendDiagnostic::SourceTransform(source_transform) => {
-                let action = match source_transform.status {
-                    SourceTransformStatus::Applied => format!(
-                        "apply generated source transform '{}' ({} replacements)",
-                        source_transform.name, source_transform.replacement_count
-                    ),
-                    SourceTransformStatus::VerifiedNotNeeded => format!(
-                        "verify generated source transform '{}' is not needed",
-                        source_transform.name
-                    ),
-                    SourceTransformStatus::NotApplicable => format!(
-                        "verify generated source transform '{}' is not applicable",
-                        source_transform.name
-                    ),
-                };
-                let (before, after) = match source_transform.status {
-                    SourceTransformStatus::Applied => (
-                        format!("{} matched", source_transform.precondition),
-                        format!(
-                            "{} replacements applied for {}; postcondition: {}",
-                            source_transform.replacement_count,
-                            source_transform_purpose_label(source_transform.purpose),
-                            source_transform.postcondition
-                        ),
-                    ),
-                    SourceTransformStatus::VerifiedNotNeeded => (
-                        format!("{} not present", source_transform.precondition),
-                        format!(
-                            "generated source unchanged; postcondition already held: {}",
-                            source_transform.postcondition
-                        ),
-                    ),
-                    SourceTransformStatus::NotApplicable => (
-                        format!("{} not present", source_transform.precondition),
-                        "generated source has no applicable response fallback path".to_string(),
-                    ),
-                };
-                TransformAuditEntry::new(
-                    "backend_source_transform",
-                    format!(
-                        "backend.{backend_name}.source_transform.{}",
-                        source_transform.name
-                    ),
-                    format!("{backend_name} generated source"),
-                    action,
-                )
-                .with_action_kind(TransformActionKind::BackendSourceTransform)
-                .with_backend_requirement_id(source_transform.requirement_id)
-                .with_backend_requirement(format!(
-                    "requiredness: {}; {}; postcondition: {}; upstream assumption: {}; source shape: {}; capability: {}; retirement: {}",
-                    source_transform.required.as_str(),
-                    source_transform.precondition,
-                    source_transform.postcondition,
-                    source_transform.upstream_assumption,
-                    source_transform.upstream_version,
-                    source_transform.capability_link,
-                    source_transform.retirement_condition
-                ))
-                .with_before_after(before.clone(), after.clone())
-                .with_before_after_json(
-                    json!({
-                        "required": source_transform.required.as_str(),
-                        "requirement_id": source_transform.requirement_id,
-                        "capability_link": source_transform.capability_link,
-                        "retirement_condition": source_transform.retirement_condition,
-                        "precondition": source_transform.precondition,
-                        "postcondition": source_transform.postcondition,
-                        "matched": source_transform.replacement_count > 0,
-                    }),
-                    json!({
-                        "status": source_transform.status.as_str(),
-                        "required": source_transform.required.as_str(),
-                        "requirement_id": source_transform.requirement_id,
-                        "capability_link": source_transform.capability_link,
-                        "retirement_condition": source_transform.retirement_condition,
-                        "postcondition": source_transform.postcondition,
-                        "changed": source_transform.changed,
-                        "replacement_count": source_transform.replacement_count,
-                        "outcome": after,
-                    }),
-                )
-            }
-        })
-        .collect()
 }
 
 fn runtime_generation_audits(
@@ -345,13 +240,6 @@ fn runtime_generation_audits(
     audits
 }
 
-fn source_transform_purpose_label(purpose: SourceTransformPurpose) -> &'static str {
-    match purpose {
-        SourceTransformPurpose::ClapParserCompatibility => "clap parser compatibility",
-        SourceTransformPurpose::ErrorDiagnostics => "error diagnostics",
-    }
-}
-
 fn write_transform_plan(output_path: &Path, transform_plan: &TransformPlan) -> Result<()> {
     std::fs::create_dir_all(output_path)
         .with_context(|| format!("failed to create output dir: {}", output_path.display()))?;
@@ -372,7 +260,7 @@ fn effective_base_url(
     }
     let Some(base_url) = spec_base_url else {
         return Err(anyhow!(
-            "spec has no servers[0].url; pass --base-url explicitly because pp no longer falls back to http://localhost"
+            "spec has no servers[0].url; pass --base-url explicitly because pp requires an explicit runtime base URL"
         ));
     };
     Ok((base_url.to_string(), spec_base_url_is_relative))
@@ -400,11 +288,7 @@ pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{
-        ApiCrateOutput, BackendCapabilities, SourceTransformDiagnostic, SourceTransformPurpose,
-        SourceTransformRequiredness, SourceTransformStatus,
-    };
-    use crate::spec::normalization_rules::typed;
+    use crate::backend::BackendCapabilities;
 
     const MINIMAL_SPEC: &str = r#"
 openapi: 3.0.0
@@ -513,7 +397,7 @@ paths:
         let spec_path = write_minimal_spec(temp.path());
         let output_path = temp.path().join("out");
 
-        let backend = FakeBackend::with_diagnostics(vec![fake_source_transform_diagnostic()]);
+        let backend = FakeBackend::default();
 
         let result = generate_with_backend_and_progress(
             GenerateRequest {
@@ -533,22 +417,10 @@ paths:
         assert_eq!(result.target_bin_name, "fixture-cli");
         assert_eq!(result.output_path, output_path);
         assert!(result.validation.is_none());
-        assert_eq!(
-            result.backend_diagnostics,
-            vec![fake_source_transform_diagnostic()]
-        );
         assert!(result.output_path.join("Cargo.toml").exists());
         assert!(result.output_path.join("api/src/lib.rs").exists());
         let transform_plan_path = result.output_path.join("pp-transform-plan.json");
         assert!(transform_plan_path.exists());
-        assert!(result.transform_plan.audits.iter().any(|audit| {
-            audit.source_stage == "backend_source_transform"
-                && audit.code == "backend.fake.source_transform.fake_transform"
-                && audit.backend_requirement.is_some()
-                && audit.action_kind == Some(TransformActionKind::BackendSourceTransform)
-                && audit.backend_requirement_id.as_deref()
-                    == Some("fake.source_transform.fake_transform")
-        }));
         assert!(result.transform_plan.audits.iter().any(|audit| {
             audit.source_stage == "runtime_generation"
                 && audit.code == "runtime.mcp_invocation.direct_http"
@@ -563,21 +435,6 @@ paths:
             &std::fs::read(transform_plan_path).expect("read transform plan"),
         )
         .expect("parse transform plan");
-        assert!(transform_plan_json["audits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|audit| {
-                audit["source_stage"] == "backend_source_transform"
-                    && audit["code"] == "backend.fake.source_transform.fake_transform"
-                    && audit["target"] == "fake generated source"
-                    && audit["action_kind"] == "backend_source_transform"
-                    && audit["backend_requirement_id"] == "fake.source_transform.fake_transform"
-                    && audit.get("before").is_some()
-                    && audit.get("after").is_some()
-                    && audit.get("before_json").is_some()
-                    && audit.get("after_json").is_some()
-            }));
         assert!(transform_plan_json["audits"]
             .as_array()
             .unwrap()
@@ -661,12 +518,7 @@ paths:
         let spec_path = temp.path().join("spec.yaml");
         std::fs::write(&spec_path, QUERY_ARRAY_SPEC).expect("write spec");
         let output_path = temp.path().join("out");
-        let mut capabilities = BackendCapabilities::progenitor();
-        capabilities
-            .direct_invocation
-            .parameters
-            .supports_query_arrays = false;
-        let backend = FakeBackend::with_capabilities(capabilities);
+        let backend = FakeBackend::default();
 
         let result = generate_with_backend_and_progress(
             GenerateRequest {
@@ -696,14 +548,12 @@ paths:
     }
 
     #[test]
-    fn generate_uses_backend_capabilities_during_spec_preparation() {
+    fn generation_does_not_rewrite_deep_object_query_params_during_spec_preparation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let spec_path = temp.path().join("spec.yaml");
         std::fs::write(&spec_path, DEEP_OBJECT_SPEC).expect("write spec");
         let output_path = temp.path().join("out");
-        let mut capabilities = BackendCapabilities::progenitor();
-        capabilities.parameters.supports_deep_object_query = true;
-        let backend = FakeBackend::with_capabilities(capabilities);
+        let backend = FakeBackend::default();
 
         let result = generate_with_backend_and_progress(
             GenerateRequest {
@@ -717,12 +567,11 @@ paths:
             &backend,
             |_| {},
         )
-        .expect("backend capability avoids deepObject compatibility rewrite");
+        .expect("spec preparation preserves deepObject query parameters");
 
-        assert!(result
-            .reports
-            .iter()
-            .all(|report| report.code != typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN));
+        assert!(result.reports.iter().all(|report| !report
+            .code
+            .starts_with("spec.prepare.deep_object_query_params_rewritten")));
     }
 
     #[test]
@@ -781,24 +630,6 @@ paths:
         );
     }
 
-    fn fake_source_transform_diagnostic() -> BackendDiagnostic {
-        BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
-            name: "fake_transform",
-            changed: true,
-            replacement_count: 2,
-            purpose: SourceTransformPurpose::ClapParserCompatibility,
-            required: SourceTransformRequiredness::Conditional,
-            status: SourceTransformStatus::Applied,
-            requirement_id: "fake.source_transform.fake_transform",
-            capability_link: "backend.fake.capability",
-            retirement_condition: "remove when fake backend no longer needs this transform",
-            precondition: "fake precondition",
-            postcondition: "fake postcondition",
-            upstream_assumption: "fake upstream assumption",
-            upstream_version: "fake upstream version",
-        })
-    }
-
     fn write_minimal_spec(dir: &std::path::Path) -> PathBuf {
         let spec_path = dir.join("spec.yaml");
         std::fs::write(&spec_path, MINIMAL_SPEC).expect("write spec");
@@ -806,31 +637,13 @@ paths:
     }
 
     struct FakeBackend {
-        output: ApiCrateOutput,
         capabilities: BackendCapabilities,
     }
 
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
-                output: ApiCrateOutput::default(),
                 capabilities: BackendCapabilities::progenitor(),
-            }
-        }
-    }
-
-    impl FakeBackend {
-        fn with_diagnostics(diagnostics: Vec<BackendDiagnostic>) -> Self {
-            Self {
-                output: ApiCrateOutput { diagnostics },
-                capabilities: BackendCapabilities::progenitor(),
-            }
-        }
-
-        fn with_capabilities(capabilities: BackendCapabilities) -> Self {
-            Self {
-                output: ApiCrateOutput::default(),
-                capabilities,
             }
         }
     }
@@ -844,7 +657,7 @@ paths:
             self.capabilities.clone()
         }
 
-        fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<ApiCrateOutput> {
+        fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<()> {
             assert_eq!(request.crate_name, "fixture-cli-api");
             assert_eq!(request.api.paths.paths.len(), 1);
 
@@ -861,7 +674,7 @@ paths:
                 "pub fn fake_backend_marker() {}\n",
             )?;
 
-            Ok(self.output.clone())
+            Ok(())
         }
     }
 }

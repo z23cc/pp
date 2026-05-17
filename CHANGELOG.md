@@ -17,24 +17,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Initial release: OpenAPI YAML/JSON → installable Rust CLI workspace.
 - `pp inspect`, `pp generate`, and build-only `pp validate` commands.
-- OpenAPI 3.1 downgrade/tolerance path for supported 3.1 shapes.
 - Spec slicing by operation, tag, path prefix, and exclusion, with component pruning.
-- Structured normalization/slicing reports with human-readable warning output.
-- Auth support: none, bearer, header API key, HTTP basic, and OAuth2-as-bearer.
+- Structured preparation/slicing reports with human-readable warning output.
+- Auth support: none, bearer, header API key, and HTTP basic.
 - Generated MCP stdio server with one tool per operation.
 - MCP `tools/list` cursor pagination.
 - MCP response shaping via `_pp_fields` and `_pp_compact`.
-- Internal generation pipeline, API/MCP model layer, backend adapter seam, and named generated-source transforms.
+- Internal generation pipeline, API/MCP model layer, and backend adapter seam.
 
 ### Changed
 
 - Wrapper rendering consumes precomputed model data instead of walking raw OpenAPI.
-- Progenitor-generated source patches are named transforms with focused tests.
+- Progenitor-generated source is emitted directly from formatted generator output.
 - Large-spec support currently relies on a temporary typify fork patch documented in `docs/release-status.md`.
 
 ### Fixed
 
-- Preserved upstream error response bodies in generated unexpected-response diagnostics.
 - Hardened MCP temporary JSON body filenames against repeated-call reuse in one server process.
 - Added generation-time checks for MCP tool names, reserved `_pp_` arguments, and generated CLI flag collisions.
 

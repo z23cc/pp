@@ -45,12 +45,6 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit one transform effect in strict policy (repeatable: semantic_drop, backend_workaround, ...)
-        #[arg(long = "allow-effect", value_parser = parse_report_effect)]
-        allow_effects: Vec<crate::spec::report::ReportEffect>,
-        /// Permit one transform report code in strict policy (repeatable)
-        #[arg(long = "allow-report-code")]
-        allow_report_codes: Vec<String>,
         /// Explicit component security scheme name to use for generated auth
         #[arg(long = "auth-scheme")]
         auth_scheme: Option<String>,
@@ -83,9 +77,6 @@ pub enum Command {
         /// Exclude an operation by operationId after includes are applied (repeatable)
         #[arg(long = "exclude-operation")]
         exclude_operations: Vec<String>,
-        /// Permit one transform report code in strict policy (repeatable)
-        #[arg(long = "allow-report-code")]
-        allow_report_codes: Vec<String>,
         /// Explicit component security scheme name to use for generated auth
         #[arg(long = "auth-scheme")]
         auth_scheme: Option<String>,
@@ -102,10 +93,7 @@ struct LoadOptionsArgs {
     include_tags: Vec<String>,
     include_path_prefixes: Vec<String>,
     exclude_operations: Vec<String>,
-    allow_effects: Vec<crate::spec::report::ReportEffect>,
-    allow_report_codes: Vec<String>,
     auth_scheme: Option<String>,
-    approval_surface: crate::spec::transform::ApprovalSurface,
 }
 
 fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
@@ -114,20 +102,8 @@ fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
         include_tags,
         include_path_prefixes,
         exclude_operations,
-        allow_effects,
-        allow_report_codes,
         auth_scheme,
-        approval_surface,
     } = args;
-
-    let mut policy =
-        crate::spec::transform::TransformPolicy::strict().with_approval_surface(approval_surface);
-    for effect in allow_effects {
-        policy = policy.allow_effect(effect);
-    }
-    for code in allow_report_codes {
-        policy = policy.allow_code(code);
-    }
 
     crate::spec::LoadOptions {
         slice: crate::spec::slice::SliceOptions {
@@ -136,14 +112,8 @@ fn load_options(args: LoadOptionsArgs) -> crate::spec::LoadOptions {
             include_path_prefixes,
             exclude_operations,
         },
-        policy,
         auth_policy: auth_policy_from_scheme(auth_scheme),
-        backend_capabilities: crate::backend::BackendCapabilities::progenitor(),
     }
-}
-
-fn parse_report_effect(value: &str) -> Result<crate::spec::report::ReportEffect, String> {
-    value.parse()
 }
 
 fn print_generate_progress(event: crate::pipeline::GenerateProgress) {
@@ -205,8 +175,6 @@ impl Cli {
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
-                allow_effects,
-                allow_report_codes,
                 auth_scheme,
             } => {
                 let options = load_options(LoadOptionsArgs {
@@ -214,11 +182,7 @@ impl Cli {
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
-                    allow_effects,
-                    allow_report_codes,
                     auth_scheme,
-                    approval_surface:
-                        crate::spec::transform::ApprovalSurface::ReportCodesAndEffects,
                 });
                 if list_operations {
                     let loaded = crate::spec::load_for_operation_listing(&spec, &options)?;
@@ -240,11 +204,7 @@ impl Cli {
                             }))?
                         );
                     } else {
-                        for report in loaded.reports.iter().filter(|report| {
-                            report.stage == crate::spec::report::ReportStage::PreParseTolerance
-                                || report.code
-                                    == crate::spec::normalization_rules::typed::OPERATION_IDS_SHORTENED
-                        }) {
+                        for report in &loaded.reports {
                             eprintln!("pp: {}", report.formatted_warning());
                         }
                         println!("{}", serde_json::to_string_pretty(&loaded.facts)?);
@@ -262,7 +222,6 @@ impl Cli {
                 include_tags,
                 include_path_prefixes,
                 exclude_operations,
-                allow_report_codes,
                 auth_scheme,
             } => {
                 let options = load_options(LoadOptionsArgs {
@@ -270,10 +229,7 @@ impl Cli {
                     include_tags,
                     include_path_prefixes,
                     exclude_operations,
-                    allow_effects: Vec::new(),
-                    allow_report_codes,
                     auth_scheme,
-                    approval_surface: crate::spec::transform::ApprovalSurface::ReportCodesOnly,
                 });
                 let _result = crate::pipeline::generate_with_progress(
                     crate::pipeline::GenerateRequest {
@@ -296,7 +252,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
     #[test]
     fn load_options_auth_scheme_overrides_policy() {
@@ -305,10 +261,7 @@ mod tests {
             include_tags: Vec::new(),
             include_path_prefixes: Vec::new(),
             exclude_operations: Vec::new(),
-            allow_effects: Vec::new(),
-            allow_report_codes: Vec::new(),
             auth_scheme: Some("bearerAuth".to_string()),
-            approval_surface: crate::spec::transform::ApprovalSurface::ReportCodesAndEffects,
         });
 
         assert!(matches!(
@@ -350,47 +303,6 @@ mod tests {
             "spec.yaml",
             "--auth-policy",
             "fail-ambiguous",
-        ])
-        .unwrap_err();
-
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn help_hides_deprecated_compat_normalization_flag() {
-        let mut command = Cli::command();
-        let inspect = command
-            .find_subcommand_mut("inspect")
-            .expect("inspect subcommand");
-        let mut help = Vec::new();
-        inspect
-            .write_long_help(&mut help)
-            .expect("render inspect help");
-        let help = String::from_utf8(help).expect("help is UTF-8");
-        assert!(!help.contains("--allow-compat-normalization"));
-        assert!(help.contains("--allow-effect"));
-        assert!(help.contains("--allow-report-code"));
-    }
-
-    #[test]
-    fn compat_normalization_flag_is_removed() {
-        let err =
-            Cli::try_parse_from(["pp", "inspect", "spec.yaml", "--allow-compat-normalization"])
-                .unwrap_err();
-
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn generate_rejects_allow_effect_flag() {
-        let err = Cli::try_parse_from([
-            "pp",
-            "generate",
-            "spec.yaml",
-            "-o",
-            "out",
-            "--allow-effect",
-            "semantic_drop",
         ])
         .unwrap_err();
 

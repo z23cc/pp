@@ -75,12 +75,12 @@ fn build_operation(
         );
     };
     let name = operation_name(&raw_name);
-    let fallback_description = format!("{method} {path}");
+    let derived_description = format!("{method} {path}");
     let mut description = operation
         .summary
         .as_deref()
         .or(operation.description.as_deref())
-        .unwrap_or(&fallback_description)
+        .unwrap_or(&derived_description)
         .chars()
         .take(1024)
         .collect::<String>();

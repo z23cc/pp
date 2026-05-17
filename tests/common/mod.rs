@@ -19,6 +19,7 @@ pub fn pp_generate_command(spec: &Path, out_dir: &Path) -> Command {
     command
 }
 
+#[allow(dead_code)]
 pub fn assert_success(output: Output, label: &str) {
     assert!(
         output.status.success(),

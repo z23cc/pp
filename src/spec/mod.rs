@@ -3,21 +3,18 @@
 
 mod auth;
 pub(crate) use auth::{AuthPlan, AuthSelectionPolicy};
-pub(crate) mod normalization_rules;
-pub mod normalize;
-mod pre_parse;
+pub(crate) mod preparation_rules;
 pub(crate) mod references;
 pub mod report;
 pub mod slice;
 pub(crate) mod transform;
 pub(crate) mod traversal;
 
-use crate::backend::BackendCapabilities;
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
 use openapiv3::OpenAPI;
 use regex::Regex;
-use report::{ReportEntry, ReportStage};
+use report::ReportEntry;
 use serde::Serialize;
 use std::path::Path;
 
@@ -51,7 +48,7 @@ pub(crate) struct LoadedSpec {
     pub auth_plan: AuthPlan,
     pub reports: Vec<ReportEntry>,
     pub transform_plan: transform::TransformPlan,
-    pub normalization_warnings: Vec<String>,
+    pub preparation_warnings: Vec<String>,
 }
 
 pub(crate) struct LoadedOperationListingSpec {
@@ -59,37 +56,14 @@ pub(crate) struct LoadedOperationListingSpec {
     pub reports: Vec<ReportEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct LoadOptions {
     pub slice: slice::SliceOptions,
-    pub policy: transform::TransformPolicy,
     pub auth_policy: AuthSelectionPolicy,
-    pub backend_capabilities: BackendCapabilities,
 }
 
-impl Default for LoadOptions {
-    fn default() -> Self {
-        Self {
-            slice: slice::SliceOptions::default(),
-            policy: transform::TransformPolicy::default(),
-            auth_policy: AuthSelectionPolicy::default(),
-            backend_capabilities: BackendCapabilities::progenitor(),
-        }
-    }
-}
-
-impl LoadOptions {
-    pub(crate) fn with_backend_capabilities(
-        mut self,
-        backend_capabilities: BackendCapabilities,
-    ) -> Self {
-        self.backend_capabilities = backend_capabilities;
-        self
-    }
-}
-
-/// Parse the spec at `path` (YAML or JSON, detected by extension and content),
-/// normalize it for progenitor, and derive [`SpecFacts`].
+/// Parse the spec at `path` (YAML or JSON, detected by content),
+/// optionally slice it, and derive [`SpecFacts`].
 pub(crate) fn load(path: &Path) -> Result<LoadedSpec> {
     load_with_options(path, &LoadOptions::default())
 }
@@ -97,13 +71,7 @@ pub(crate) fn load(path: &Path) -> Result<LoadedSpec> {
 pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
     let prepared = prepare_openapi(path, options)?;
     let (facts, auth_plan) = inspect_openapi(&prepared.api, &options.auth_policy)?;
-    let normalization_reports = prepared
-        .reports
-        .iter()
-        .filter(|report| report.stage != ReportStage::PreParseTolerance)
-        .cloned()
-        .collect::<Vec<_>>();
-    let normalization_warnings = report::formatted_warnings(&normalization_reports);
+    let preparation_warnings = report::formatted_warnings(&prepared.reports);
 
     Ok(LoadedSpec {
         api: prepared.api,
@@ -111,7 +79,7 @@ pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<Lo
         auth_plan,
         reports: prepared.reports,
         transform_plan: prepared.transform_plan,
-        normalization_warnings,
+        preparation_warnings,
     })
 }
 
@@ -121,15 +89,8 @@ pub(crate) fn load_for_operation_listing(
 ) -> Result<LoadedOperationListingSpec> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
-    let raw_repair_plan = pre_parse::RawSpecRepairPlan::propose(&raw)?;
-    let mut reports = raw_repair_plan.report_entries();
-    let repaired_raw = if raw_repair_plan.is_empty() {
-        None
-    } else {
-        Some(raw_repair_plan.apply(&raw)?)
-    };
-    let parse_raw = repaired_raw.as_deref().unwrap_or(&raw);
-    let mut api = parse_prepared(parse_raw)
+    let mut reports = Vec::new();
+    let mut api = parse_prepared(&raw)
         .with_context(|| format!("failed to parse spec: {}", path.display()))?;
 
     if !options.slice.is_noop() {
@@ -149,41 +110,17 @@ struct PreparedOpenApi {
 fn prepare_openapi(path: &Path, options: &LoadOptions) -> Result<PreparedOpenApi> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
-    let raw_repair_plan = pre_parse::RawSpecRepairPlan::propose(&raw)?;
-    let raw_reports = raw_repair_plan.report_entries();
-    let mut audits = raw_repair_plan.audit_entries();
-    let mut proposed_raw_plan = transform::TransformPlan::from_reports(&raw_reports);
-    proposed_raw_plan.approve(&options.policy)?;
-    let repaired_raw = if raw_repair_plan.is_empty() {
-        None
-    } else {
-        Some(raw_repair_plan.apply(&raw)?)
-    };
-    let parse_raw = repaired_raw.as_deref().unwrap_or(&raw);
-    let mut api = parse_prepared(parse_raw)
+    let mut reports = Vec::new();
+    let audits = Vec::new();
+    let mut api = parse_prepared(&raw)
         .with_context(|| format!("failed to parse spec: {}", path.display()))?;
-    let mut reports = raw_reports;
+
     if !options.slice.is_noop() {
         let slice_report = slice::slice_openapi(&mut api, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
-    let approved_typed_normalization_transforms =
-        normalize::propose_typed_normalization_transforms(&api, &options.backend_capabilities);
-    let proposed_reports = approved_typed_normalization_transforms.report_entries();
-    let typed_audits = approved_typed_normalization_transforms.audit_entries();
-    let mut proposed_plan = transform::TransformPlan::from_reports(&proposed_reports);
-    proposed_plan.approve(&options.policy)?;
 
-    reports.extend(
-        normalize::normalize_with_approved_typed_normalization_transforms(
-            &mut api,
-            &options.backend_capabilities,
-            &approved_typed_normalization_transforms,
-        )?,
-    );
-    audits.extend(typed_audits);
-    let mut transform_plan = transform::TransformPlan::from_reports_with_audits(&reports, audits);
-    transform_plan.approve(&options.policy)?;
+    let transform_plan = transform::TransformPlan::from_reports_with_audits(&reports, audits);
 
     Ok(PreparedOpenApi {
         api,
@@ -256,14 +193,12 @@ fn bin_name_from_title(title: &str) -> String {
 
 #[allow(dead_code)]
 fn parse(raw: &str, _path: &Path) -> Result<(OpenAPI, Vec<ReportEntry>)> {
-    let (owned, reports) = pre_parse::normalize_yaml(raw)?;
-    let parse_raw = owned.as_deref().unwrap_or(raw);
-    Ok((parse_prepared(parse_raw)?, reports))
+    Ok((parse_prepared(raw)?, Vec::new()))
 }
 
 fn parse_prepared(raw: &str) -> Result<OpenAPI> {
-    // Try JSON first if it looks like JSON, otherwise YAML. serde_yaml accepts
-    // JSON too, so YAML is a safe fallback.
+    // Try JSON first when the content looks like JSON for clearer parser errors.
+    // Otherwise use YAML, which also accepts JSON-like syntax.
     let trimmed = raw.trim_start();
     if trimmed.starts_with('{') {
         serde_json::from_str(raw).map_err(|e| anyhow!("JSON parse error: {e}"))
@@ -279,7 +214,6 @@ fn count_operations(spec: &OpenAPI) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openapiv3::ReferenceOr;
 
     const PETSTORE_MINIMAL: &str = r#"
 openapi: 3.0.0
@@ -338,281 +272,8 @@ paths:
     }
 
     #[test]
-    fn openapi_31_json_is_detected() {
-        assert_eq!(
-            pre_parse::detect_openapi_31(r#"{"openapi":"3.1.1","paths":{}}"#).as_deref(),
-            Some("3.1.1")
-        );
-    }
-
-    #[test]
-    fn openapi_31_yaml_downgrades_nullable_type_before_parse() {
-        let (spec, reports) = parse(
-            r#"
-openapi: 3.1.0
-info:
-  title: Future API
-  version: "1.0.0"
-paths: {}
-components:
-  schemas:
-    MaybeName:
-      type: [string, null]
-"#,
-            Path::new("future.yaml"),
-        )
-        .unwrap();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].stage, ReportStage::PreParseTolerance);
-        assert_eq!(reports[0].code, "spec.pre_parse.openapi_31_downgraded");
-        assert_eq!(
-            reports[0].formatted_warning(),
-            "downgraded OpenAPI 3.1.0 → 3.0.3 for parsing (2 transforms applied)"
-        );
-
-        let components = spec.components.unwrap();
-        let ReferenceOr::Item(schema) = components.schemas.get("MaybeName").unwrap() else {
-            panic!("expected inline schema");
-        };
-        assert!(schema.schema_data.nullable);
-        assert!(matches!(
-            schema.schema_kind,
-            openapiv3::SchemaKind::Type(openapiv3::Type::String(_))
-        ));
-    }
-
-    #[test]
-    fn pre_parse_reports_remain_outside_typed_normalization_proposals() {
-        let (spec, pre_parse_reports) = parse(
-            r#"
-openapi: 3.1.0
-info:
-  title: Future API
-  version: "1.0.0"
-paths: {}
-components:
-  schemas:
-    MaybeName:
-      type: [string, null]
-"#,
-            Path::new("future.yaml"),
-        )
-        .unwrap();
-        assert!(pre_parse_reports
-            .iter()
-            .any(|report| report.code == "spec.pre_parse.openapi_31_downgraded"));
-
-        let typed_plan = normalize::propose_typed_normalization_transforms(
-            &spec,
-            &BackendCapabilities::progenitor(),
-        );
-        assert!(typed_plan
-            .report_entries()
-            .iter()
-            .all(|report| report.stage == ReportStage::TypedNormalization));
-        assert!(!typed_plan
-            .report_entries()
-            .iter()
-            .any(|report| report.code.starts_with("spec.pre_parse.")));
-    }
-
-    #[test]
-    fn raw_repair_plan_proposes_reports_and_applies_after_approval() {
-        let raw = r#"
-openapi: 3.1.0
-info:
-  title: Raw Plan Fixture
-  version: "1.0.0"
-tags:
-  - name: account
-    description:
-      text: Accounts
-paths:
-  /things/{thing_id}:
-    get:
-      $ref: "resources/things/list.yml"
-components:
-  schemas:
-    MaybeName:
-      type: [string, null]
-      maximum: 9223372036854776008
-"#;
-        let plan = pre_parse::RawSpecRepairPlan::propose(raw).unwrap();
-        let reports = plan.report_entries();
-
-        assert_eq!(reports.len(), 4);
-        assert_eq!(
-            reports.iter().map(|report| report.code).collect::<Vec<_>>(),
-            vec![
-                "spec.pre_parse.openapi_31_downgraded",
-                "spec.pre_parse.numeric_bounds_clamped",
-                "spec.pre_parse.tag_descriptions_replaced",
-                "spec.pre_parse.ref_only_operations_replaced",
-            ]
-        );
-        assert!(raw.contains("openapi: 3.1.0"));
-        assert!(raw.contains("$ref: \"resources/things/list.yml\""));
-
-        let repaired = plan.apply(raw).unwrap();
-        assert!(repaired.contains("openapi: 3.0.3"));
-        assert!(repaired.contains("nullable: true"));
-        assert!(repaired.contains("maximum: 9223372036854775807"));
-        assert!(repaired.contains("    description: \"\""));
-        assert!(repaired.contains("operationId: getresources_things_list_yml"));
-    }
-
-    #[test]
-    fn transform_plan_carries_raw_and_typed_audit_entries() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let spec_path = temp.path().join("audit.yaml");
-        std::fs::write(
-            &spec_path,
-            r#"
-openapi: 3.1.0
-info:
-  title: Audit Fixture
-  version: "1.0.0"
-servers:
-  - url: https://example.test
-paths:
-  /pets:
-    get:
-      operationId: listPets
-      responses:
-        '200':
-          description: ok
-        '404':
-          description: missing
-"#,
-        )
-        .unwrap();
-
-        let loaded = load_with_options(
-            &spec_path,
-            &LoadOptions {
-                policy: transform::TransformPolicy::compatibility(),
-                ..LoadOptions::default()
-            },
-        )
-        .unwrap();
-
-        let plan_json = serde_json::to_value(&loaded.transform_plan).unwrap();
-        let entries = plan_json["entries"].as_array().expect("entries array");
-        assert!(entries
-            .iter()
-            .any(|entry| entry["code"] == "spec.pre_parse.openapi_31_downgraded"));
-        assert!(entries
-            .iter()
-            .any(|entry| entry["code"] == "spec.normalize.response_variants_pruned"));
-
-        let audits = plan_json["audits"].as_array().expect("audits array");
-        assert!(audits.iter().any(|audit| {
-            audit["source_stage"] == "pre_parse_tolerance"
-                && audit["code"] == "spec.pre_parse.openapi_31_downgraded"
-                && audit["target"] == "raw.openapi.version"
-                && audit.get("before").is_some()
-                && audit.get("after").is_some()
-        }));
-        assert!(audits.iter().any(|audit| {
-            audit["source_stage"] == "typed_normalization"
-                && audit["code"] == "spec.normalize.response_variants_pruned"
-                && audit["target"] == "operation GET /pets responses"
-                && audit["target_pointer"] == "/paths/~1pets/get/responses"
-                && audit["action_kind"] == "prune"
-                && audit["backend_requirement_id"] == "progenitor.response.single_variant"
-                && audit.get("backend_requirement").is_some()
-                && audit.get("before_json").is_some()
-                && audit.get("after_json").is_some()
-        }));
-    }
-
-    #[test]
-    fn raw_pre_parse_reports_are_policy_checked_before_parse() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let spec_path = temp.path().join("future.yaml");
-        std::fs::write(
-            &spec_path,
-            r#"
-openapi: 3.1.0
-info:
-  title: Future API
-  version: "1.0.0"
-paths: {}
-"#,
-        )
-        .unwrap();
-
-        let strict_err = match load_with_options(&spec_path, &LoadOptions::default()) {
-            Ok(_) => panic!("strict load unexpectedly succeeded"),
-            Err(err) => err,
-        };
-        let strict_message = strict_err.to_string();
-        assert!(strict_message.contains("strict transform policy rejected"));
-        assert!(strict_message.contains("spec.pre_parse.openapi_31_downgraded"));
-
-        let options = LoadOptions {
-            policy: transform::TransformPolicy::strict()
-                .allow_code("spec.pre_parse.openapi_31_downgraded"),
-            ..LoadOptions::default()
-        };
-        let loaded = load_with_options(&spec_path, &options).unwrap();
-        assert!(loaded
-            .reports
-            .iter()
-            .any(|report| report.code == "spec.pre_parse.openapi_31_downgraded"));
-    }
-
-    #[test]
-    fn out_of_range_numeric_bounds_are_clamped_before_parse() {
-        let (out, count) = pre_parse::clamp_numeric_bounds(
-            r#"
-minimum: -9223372036854776000
-maximum: 9223372036854776008
-exclusiveMinimum: -9223372036854775808
-{"maximum":9223372036854776008}
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(count, 3);
-        assert!(out.contains("minimum: -9223372036854775808"));
-        assert!(out.contains("maximum: 9223372036854775807"));
-        assert!(out.contains(r#"{"maximum":9223372036854775807}"#));
-        assert!(out.contains("exclusiveMinimum: -9223372036854775808"));
-    }
-
-    #[test]
-    fn top_level_tag_map_descriptions_are_replaced() {
-        let (out, count) = pre_parse::normalize_top_level_tag_descriptions(
-            r#"tags:
-  - name: account
-    description:
-      text: Accounts
-      format: markdown
-paths: {}
-"#,
-        );
-
-        assert_eq!(count, 1);
-        assert!(out.contains("    description: \"\""));
-        assert!(!out.contains("text: Accounts"));
-        assert!(out.contains("paths: {}"));
-    }
-
-    #[test]
-    fn ref_only_operations_get_parseable_placeholders() {
-        let (out, count) = pre_parse::replace_ref_only_operations(
-            r#"paths:
-  /v2/things/{thing_id}:
-    get:
-      $ref: "resources/things/list.yml"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(count, 1);
-        assert!(out.contains("operationId: getresources_things_list_yml"));
-        assert!(out.contains("name: thing_id"));
-        assert!(out.contains("responses:"));
+    fn raw_parse_returns_no_reports_for_clean_specs() {
+        let (_spec, reports) = parse(PETSTORE_MINIMAL, Path::new("petstore.yaml")).unwrap();
+        assert!(reports.is_empty());
     }
 }

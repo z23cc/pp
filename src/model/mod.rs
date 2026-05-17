@@ -1,4 +1,4 @@
-//! Narrow API/MCP model derived from a normalized and sliced OpenAPI spec.
+//! Narrow API/MCP model derived from a parsed and optionally sliced OpenAPI spec.
 //!
 //! This is intentionally not a replacement OpenAPI model. It only captures the
 //! operation names, descriptions, arguments, input schemas, and reserved wrapper
@@ -102,25 +102,9 @@ mod tests {
         })
     }
 
-    fn has_query_param(tool: &McpTool, json_name: &str, wire_name: &str) -> bool {
-        tool.args.iter().any(|arg| {
-            arg.json_name == json_name
-                && matches!(
-                    &arg.binding,
-                    McpArgBinding::QueryParam { wire_name: actual_wire_name } if actual_wire_name == wire_name
-                )
-        })
-    }
-
     fn has_flattened_body_field(tool: &McpTool, json_name: &str) -> bool {
         tool.args.iter().any(|arg| {
             arg.json_name == json_name && matches!(arg.binding, McpArgBinding::FlattenedBodyField)
-        })
-    }
-
-    fn has_whole_json_body(tool: &McpTool, json_name: &str) -> bool {
-        tool.args.iter().any(|arg| {
-            arg.json_name == json_name && matches!(arg.binding, McpArgBinding::WholeJsonBody)
         })
     }
 
@@ -576,7 +560,12 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let model = mcp_model_for_tests(&api, None).unwrap();
+        let mut capabilities = BackendCapabilities::progenitor();
+        capabilities
+            .direct_invocation
+            .parameters
+            .supports_query_arrays = true;
+        let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
 
         assert!(model.tools.is_empty());
         assert_eq!(model.unsupported_operations.len(), 1);
@@ -608,11 +597,7 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let mut capabilities = BackendCapabilities::progenitor();
-        capabilities
-            .direct_invocation
-            .parameters
-            .supports_query_arrays = false;
+        let capabilities = BackendCapabilities::progenitor();
 
         let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
 
@@ -624,7 +609,7 @@ paths:
     }
 
     #[test]
-    fn mcp_flattened_body_property_collision_falls_back_to_whole_body_arg() {
+    fn mcp_flattened_body_property_collision_is_unsupported() {
         let spec = r#"
 openapi: 3.0.0
 info:
@@ -653,19 +638,41 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let tools = mcp_tools(&api, None).unwrap();
-        let tool = tools
-            .iter()
-            .find(|tool| tool.name == "create_item")
-            .unwrap();
-        let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
-        let properties = schema["properties"].as_object().unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
 
-        assert!(properties.contains_key("id"));
-        assert!(properties.contains_key("body"));
-        assert!(has_query_param(tool, "id", "id"));
-        assert!(has_whole_json_body(tool, "body"));
-        assert!(!has_flattened_body_field(tool, "id"));
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("flattened JSON request body field collision"));
+    }
+
+    #[test]
+    fn mcp_empty_request_body_content_is_unsupported() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Empty Body API
+  version: "1.0.0"
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content: {}
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("requestBody without JSON content"));
     }
 
     #[test]

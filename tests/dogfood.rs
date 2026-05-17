@@ -12,36 +12,17 @@ fn fixture_clis_expose_mcp_tools() {
             "plausible.yaml",
             "plausible-api",
             Some(("PLAUSIBLE_API_TOKEN", "dummy")),
-            &["spec.normalize.response_schemas_relaxed"][..],
         ),
-        (
-            "pokeapi.yaml",
-            "poke-api",
-            None,
-            &[
-                "spec.pre_parse.openapi_31_downgraded",
-                "spec.normalize.response_schemas_relaxed",
-            ][..],
-        ),
-        (
-            "interzoid.yaml",
-            "interzoid-get-weather-city-api",
-            None,
-            &["spec.normalize.response_schemas_relaxed"][..],
-        ),
+        ("interzoid.yaml", "interzoid-get-weather-city-api", None),
     ];
 
-    for (fixture, bin_name, env, allowed_report_codes) in fixtures {
+    for (fixture, bin_name, env) in fixtures {
         let temp = tempfile::tempdir().expect("tempdir");
         let spec = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(fixture);
         let out_dir = temp.path().join("out");
-        let mut command = common::pp_generate_command(&spec, &out_dir);
-        for code in allowed_report_codes {
-            command.arg("--allow-report-code").arg(code);
-        }
-        let output = command
+        let output = common::pp_generate_command(&spec, &out_dir)
             .arg("--build")
             .output()
             .expect("failed to run pp generate");

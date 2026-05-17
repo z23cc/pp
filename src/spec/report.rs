@@ -1,16 +1,13 @@
 //! Structured reports emitted while preparing an OpenAPI spec.
 //!
-//! These reports are internal for now. User-facing compatibility is preserved
-//! by formatting each warning report back to its original message at CLI and
-//! pipeline boundaries.
+//! These reports are internal for now. CLI and pipeline boundaries format each
+//! warning report back to its human-readable message.
 
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportStage {
-    PreParseTolerance,
-    TypedNormalization,
     Slicing,
 }
 
@@ -23,57 +20,14 @@ pub enum ReportSeverity {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportEffect {
-    /// Deterministic repair that does not intentionally remove API surface.
-    LosslessRepair,
     /// User-requested selection such as operation slicing.
     ExplicitSelection,
-    /// Compatibility rewrite that changes how a spec shape is represented.
-    LossyRewrite,
-    /// Compatibility change that removes source spec information or API surface.
-    SemanticDrop,
-    /// Workaround for a known codegen/backend limitation.
-    BackendWorkaround,
-    /// Last-resort replacement where pp cannot preserve source semantics.
-    UnsafeFallback,
 }
 
 impl ReportEffect {
-    pub fn allowed_without_compat_flag(self) -> bool {
-        matches!(self, Self::LosslessRepair | Self::ExplicitSelection)
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LosslessRepair => "lossless_repair",
             Self::ExplicitSelection => "explicit_selection",
-            Self::LossyRewrite => "lossy_rewrite",
-            Self::SemanticDrop => "semantic_drop",
-            Self::BackendWorkaround => "backend_workaround",
-            Self::UnsafeFallback => "unsafe_fallback",
-        }
-    }
-}
-
-impl std::fmt::Display for ReportEffect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for ReportEffect {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "lossless_repair" => Ok(Self::LosslessRepair),
-            "explicit_selection" => Ok(Self::ExplicitSelection),
-            "lossy_rewrite" => Ok(Self::LossyRewrite),
-            "semantic_drop" => Ok(Self::SemanticDrop),
-            "backend_workaround" => Ok(Self::BackendWorkaround),
-            "unsafe_fallback" => Ok(Self::UnsafeFallback),
-            _ => Err(format!(
-                "unknown report effect '{value}' (expected one of: lossless_repair, explicit_selection, lossy_rewrite, semantic_drop, backend_workaround, unsafe_fallback)"
-            )),
         }
     }
 }
