@@ -5,7 +5,8 @@ use heck::ToSnakeCase;
 use serde_json::{json, Map};
 use std::collections::BTreeMap;
 
-use super::arguments::{add_body, add_parameter, McpArgumentContext, DIRECT_UNSUPPORTED_PREFIX};
+use super::arguments::{add_body, add_parameter, McpArgumentContext};
+use super::diagnostics::DirectInvocationUnsupported;
 use super::response::add_mcp_reserved_properties;
 use super::{McpTool, McpUnsupportedOperation};
 
@@ -30,19 +31,15 @@ pub(crate) fn mcp_model(
     for operation in traversal::operations(spec) {
         match build_operation(operation.clone(), &mut ctx) {
             Ok(tool) => tools.push(tool),
-            Err(error) => {
-                let reason = error.to_string();
-                if reason.starts_with(DIRECT_UNSUPPORTED_PREFIX) {
-                    unsupported_operations.push(McpUnsupportedOperation {
-                        operation_id: operation.explicit_operation_id().map(str::to_string),
-                        method: operation.method_uppercase.to_string(),
-                        path: operation.path.to_string(),
-                        reason,
-                    });
-                } else {
-                    return Err(error);
-                }
-            }
+            Err(error) => match error.downcast::<DirectInvocationUnsupported>() {
+                Ok(unsupported) => unsupported_operations.push(McpUnsupportedOperation {
+                    operation_id: operation.explicit_operation_id().map(str::to_string),
+                    method: operation.method_uppercase.to_string(),
+                    path: operation.path.to_string(),
+                    reason: unsupported.to_string(),
+                }),
+                Err(error) => return Err(error),
+            },
         }
     }
     Ok(McpModel {

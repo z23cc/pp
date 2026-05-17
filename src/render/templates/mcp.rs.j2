@@ -108,15 +108,43 @@ fn validate_required_arguments(
     let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) else {
         return Ok(());
     };
+    let properties = schema.get("properties").and_then(serde_json::Value::as_object);
     for name in required.iter().filter_map(serde_json::Value::as_str) {
-        if !arguments.contains_key(name) {
-            return Err(McpError::invalid_params(
-                format!("missing required argument: {name}"),
-                None,
-            ));
+        match arguments.get(name) {
+            None => {
+                return Err(McpError::invalid_params(
+                    format!("missing required argument: {name}"),
+                    None,
+                ));
+            }
+            Some(value) if value.is_null() && !property_schema_allows_null(properties, name) => {
+                return Err(McpError::invalid_params(
+                    format!("required argument cannot be null: {name}"),
+                    None,
+                ));
+            }
+            Some(_) => {}
         }
     }
     Ok(())
+}
+
+fn property_schema_allows_null(
+    properties: Option<&serde_json::Map<String, serde_json::Value>>,
+    name: &str,
+) -> bool {
+    properties
+        .and_then(|properties| properties.get(name))
+        .and_then(|property| property.get("type"))
+        .is_some_and(json_type_allows_null)
+}
+
+fn json_type_allows_null(schema_type: &serde_json::Value) -> bool {
+    match schema_type {
+        serde_json::Value::String(value) => value == "null",
+        serde_json::Value::Array(values) => values.iter().any(|value| value.as_str() == Some("null")),
+        _ => false,
+    }
 }
 
 impl ServerHandler for ApiMcpServer {

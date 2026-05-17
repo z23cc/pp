@@ -2,12 +2,19 @@
 //! OpenAPI 3.1 subset, then derive the facts pp needs to render native direct-HTTP CLI/MCP workspaces.
 
 mod auth;
+mod diagnostics;
+mod json_pointer;
 mod model;
+mod operation;
+mod schema;
 pub(crate) use auth::{AuthPlan, AuthSelectionPolicy};
-pub(crate) use model::{
-    schema_projection, OperationRef, PpParameter, PpParameterLocation, PpParameterRef,
-    PpRequestBodyRef, PpSpec, ProjectedSchema, SchemaPrimitive, SchemaShape,
+#[allow(unused_imports)]
+pub(crate) use diagnostics::{SchemaFeature, UnsupportedSchemaDiagnostic};
+pub(crate) use model::PpSpec;
+pub(crate) use operation::{
+    OperationRef, PpParameter, PpParameterLocation, PpParameterRef, PpRequestBodyRef,
 };
+pub(crate) use schema::{schema_projection, ProjectedSchema, SchemaPrimitive, SchemaShape};
 pub(crate) mod preparation_rules;
 pub(crate) mod references;
 pub mod report;

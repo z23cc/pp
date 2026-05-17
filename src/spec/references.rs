@@ -1,3 +1,6 @@
+use crate::spec::json_pointer::{
+    decode_json_pointer_segment, encode_json_pointer_segment, resolve_local_ref,
+};
 use crate::spec::PpSpec;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -180,16 +183,12 @@ fn scan_local_ref(
     refs: &mut ComponentRefs,
     worklist: &mut Vec<WorkItem>,
 ) {
-    let Some(local_pointer) = reference.strip_prefix('#') else {
-        return;
-    };
     let key = format!("{:p}:{reference}", scope_root);
     if !local_refs_seen.insert(key.clone()) {
         return;
     }
-    if let Some(target) = scope_root
-        .pointer(local_pointer)
-        .or_else(|| doc.pointer(local_pointer))
+    if let Some(target) =
+        resolve_local_ref(scope_root, reference).or_else(|| resolve_local_ref(doc, reference))
     {
         scan_value(
             Some(target),
@@ -265,15 +264,7 @@ pub(crate) fn parse_component_ref(reference: &str) -> Option<(ComponentKind, Str
         "securitySchemes" => ComponentKind::SecurityScheme,
         _ => return None,
     };
-    Some((kind, decode_json_pointer(raw_name)))
-}
-
-fn decode_json_pointer(input: &str) -> String {
-    input.replace("~1", "/").replace("~0", "~")
-}
-
-fn encode_json_pointer_segment(input: &str) -> String {
-    input.replace('~', "~0").replace('/', "~1")
+    Some((kind, decode_json_pointer_segment(raw_name)))
 }
 
 #[cfg(test)]

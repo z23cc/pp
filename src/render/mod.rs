@@ -391,7 +391,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_template_required_validation_accepts_explicit_null() {
+    fn mcp_template_required_validation_rejects_non_nullable_explicit_null() {
         let manifest = WrapperManifest::new(
             "nullable-api".to_string(),
             "https://example.test".to_string(),
@@ -401,8 +401,12 @@ mod tests {
 
         let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
 
-        assert!(rendered.contains("if !arguments.contains_key(name)"));
-        assert!(!rendered.contains("serde_json::Value::is_null"));
+        assert!(rendered.contains("arguments.get(name)"));
+        assert!(
+            rendered.contains("value.is_null() && !property_schema_allows_null(properties, name)")
+        );
+        assert!(rendered.contains("required argument cannot be null: {name}"));
+        assert!(rendered.contains("fn json_type_allows_null"));
     }
 
     #[test]

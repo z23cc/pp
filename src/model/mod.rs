@@ -5,20 +5,24 @@
 //! inputs needed by the generated MCP wrapper.
 
 mod arguments;
+mod diagnostics;
+mod direct_http_plan;
 mod identity;
 mod response;
+mod value_kind;
 
 use crate::backend::{BackendCapabilities, DirectInvocationRequirements};
 use crate::spec::PpSpec;
 use anyhow::Result;
 use serde::Serialize;
 
-pub use arguments::{ArgValueKind, GeneratedArg, McpArg, McpArgBinding, PrimitiveKind};
+pub use arguments::{GeneratedArg, McpArg, McpArgBinding};
 #[allow(unused_imports)]
 pub use response::{
     McpDirectTypedInvocationStatus, McpInvocationAdapterContract, McpInvocationAdapterKind,
     McpResponseShaping, McpResponseShapingArg,
 };
+pub use value_kind::{ArgValueKind, PrimitiveKind};
 
 pub(crate) use identity::mcp_model;
 use response::mcp_response_shaping;
@@ -1106,5 +1110,110 @@ paths:
         assert!(model.unsupported_operations[0]
             .reason
             .contains("required nullable parameter 'q'"));
+    }
+
+    #[test]
+    fn openapi_31_nullable_query_array_items_are_unsupported() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Nullable Array Items API, version: '1.0' }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: tags
+          in: query
+          explode: true
+          schema:
+            type: array
+            items:
+              type: [string, 'null']
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("nullable array items for parameter 'tags'"));
+    }
+
+    #[test]
+    fn nullable_root_object_request_body_uses_whole_json_body_arg() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Nullable Root Body API, version: '1.0' }
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: [object, 'null']
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let tools = mcp_tools(&api, None).unwrap();
+        let tool = &tools[0];
+        let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
+
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("body")));
+        assert_eq!(
+            schema["properties"]["body"]["type"],
+            json!(["object", "null"])
+        );
+        assert!(tool.args.iter().any(|arg| arg.json_name == "body"
+            && arg.required
+            && matches!(arg.binding, McpArgBinding::WholeJsonBody)));
+        assert!(!has_flattened_body_field(tool, "name"));
+    }
+
+    #[test]
+    fn required_empty_object_request_body_uses_whole_json_body_arg() {
+        let spec = r#"
+openapi: 3.0.0
+info: { title: Empty Root Body API, version: '1.0' }
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let tools = mcp_tools(&api, None).unwrap();
+        let tool = &tools[0];
+        let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
+
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("body")));
+        assert_eq!(schema["properties"]["body"]["type"], "object");
+        assert!(tool.args.iter().any(|arg| arg.json_name == "body"
+            && arg.required
+            && matches!(arg.binding, McpArgBinding::WholeJsonBody)));
+        assert_eq!(tool.args.len(), 1);
     }
 }

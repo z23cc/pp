@@ -157,6 +157,46 @@ fn mcp_request(bin: &std::path::Path, request: Value) -> Value {
 }
 
 #[test]
+fn generate_rejects_nullable_query_array_items() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "nullable-array-items.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: Nullable Array Items API, version: '1.0' }
+servers:
+  - url: https://api.example.test
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: tags
+          in: query
+          explode: true
+          schema:
+            type: array
+            items:
+              type: [string, 'null']
+      responses:
+        '200': { description: ok }
+"#,
+    );
+    let out = temp.path().join("generated");
+
+    let output = pp_generate_command(&spec, &out)
+        .output()
+        .expect("run pp generate");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nullable array items for parameter 'tags'"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn generate_rejects_unsupported_openapi31_json_schema_feature() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(
