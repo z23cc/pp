@@ -1,0 +1,42 @@
+# Source: https://docs.github.com/en/rest/repos/repos
+# Trim date: 2026-05-17. Trimmed to supported repository read/list endpoints.
+openapi: 3.0.3
+info:
+  title: GitHub REST API
+  version: '2022-11-28'
+servers:
+  - url: https://api.github.com
+security:
+  - bearerAuth: []
+paths:
+  /repos/{owner}/{repo}:
+    get:
+      operationId: repos_get
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema: { type: string }
+        - name: repo
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Repository }
+  /user/repos:
+    get:
+      operationId: repos_list_for_authenticated_user
+      parameters:
+        - name: visibility
+          in: query
+          required: false
+          schema: { type: string, enum: [all, public, private] }
+        - name: per_page
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: Repositories }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

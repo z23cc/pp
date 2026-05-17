@@ -1,0 +1,30 @@
+# Source: https://kubernetes.io/docs/reference/generated/kubernetes-api/
+# Trim date: 2026-05-17. Trimmed to expose unsupported additionalProperties in JSON body coverage.
+openapi: 3.0.3
+info:
+  title: Kubernetes Core API
+  version: v1
+servers:
+  - url: https://kubernetes.default.svc
+paths:
+  /api/v1/namespaces/{namespace}/pods:
+    post:
+      operationId: pods_create
+      parameters:
+        - name: namespace
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                metadata:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        '201': { description: Pod }

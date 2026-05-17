@@ -176,6 +176,7 @@ Productized spec checks and support queries are available without generating a w
 
 ```bash
 pp check ./openapi.yaml --json
+pp explain direct_http.request_body_json_missing
 pp support --diagnostic direct_http.request_body_json_missing --json
 ```
 
@@ -187,7 +188,7 @@ pp validate ./out/ping
 
 Generated-workspace smoke tests are ignored in normal PR runs and covered by a manual/scheduled workflow. See `docs/verification.md` for the fast, standard, and deep verification profiles.
 
-The standard smoke profile covers clean generated-workspace builds, full-Petstore strict native-subset rejection, sliced-Petstore native builds, an OpenAPI 3.1 safe-subset generated workspace, auth headers, repeated query-array parameters, MCP error shapes, `tools/list` pagination, and MCP response shaping against local `mockito` servers.
+The standard smoke profile covers clean generated-workspace builds, full-Petstore strict native-subset rejection, sliced-Petstore native builds, an OpenAPI 3.1 safe-subset generated workspace, auth headers, repeated query-array parameters, MCP error shapes, `tools/list` pagination, MCP response shaping against local `mockito` servers, and a deterministic 20+ local curated public API-shape fixture corpus report at `target/pp-corpus-coverage.{json,md}`.
 
 ## Contributing
 

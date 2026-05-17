@@ -2,27 +2,308 @@
   {
     "id": "plausible_stats_trimmed",
     "path": "tests/fixtures/plausible.yaml",
+    "source": "https://plausible.io/docs/stats-api#openapi-specification",
     "expected_check": "pass",
-    "generate_build": true
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "query-params",
+      "json-response"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": true,
+    "fixture_kind": "upstream_openapi_trim"
   },
   {
     "id": "interzoid_weather_trimmed",
     "path": "tests/fixtures/interzoid.yaml",
+    "source": "https://api.apis.guru/v2/specs/interzoid.com/getweathercity/1.0.0/openapi.yaml",
     "expected_check": "pass",
-    "generate_build": true
+    "coverage_tags": [
+      "openapi30",
+      "query-params",
+      "no-auth"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": true,
+    "fixture_kind": "upstream_openapi_trim"
   },
   {
     "id": "pokeapi_openapi31_trimmed",
     "path": "tests/fixtures/pokeapi.yaml",
+    "source": "https://github.com/PokeAPI/pokeapi/blob/master/openapi.yml",
     "expected_check": "pass",
-    "generate_build": true
+    "coverage_tags": [
+      "openapi31",
+      "path-params",
+      "nullable",
+      "json-response"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": true,
+    "fixture_kind": "upstream_openapi_trim"
   },
   {
     "id": "petstore_full_strict_subset_rejection",
     "path": "testdata/petstore.yaml",
+    "source": "https://github.com/swagger-api/swagger-petstore/blob/master/src/main/resources/openapi.yaml",
     "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "strict-rejection",
+      "full-spec"
+    ],
+    "expected_diagnostics": [
+      "direct_http.parameter_location_unsupported",
+      "direct_http.request_body_field_collision",
+      "direct_http.request_body_non_json"
+    ],
+    "generate_build": false,
     "base_url": "https://petstore.example.test/api/v3",
     "auth_scheme": "api_key",
-    "generate_build": false
+    "fixture_kind": "upstream_openapi_full"
+  },
+  {
+    "id": "github_repos_pass",
+    "path": "tests/fixtures/corpus/github_repos.yaml",
+    "source": "https://docs.github.com/en/rest/repos/repos",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "path-params",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "github_search_pass",
+    "path": "tests/fixtures/corpus/github_search.yaml",
+    "source": "https://docs.github.com/en/rest/search/search",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "query-array",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "stripe_customers_pass",
+    "path": "tests/fixtures/corpus/stripe_customers.yaml",
+    "source": "https://docs.stripe.com/api/customers",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "json-request-body",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "sendgrid_mail_send_pass",
+    "path": "tests/fixtures/corpus/sendgrid_mail_send.yaml",
+    "source": "https://docs.sendgrid.com/api-reference/mail-send/mail-send",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "json-request-body"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "slack_conversations_history_pass",
+    "path": "tests/fixtures/corpus/slack_conversations_history.yaml",
+    "source": "https://api.slack.com/methods/conversations.history",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "query-params",
+      "boolean-param"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "datadog_metrics_pass",
+    "path": "tests/fixtures/corpus/datadog_metrics.yaml",
+    "source": "https://docs.datadoghq.com/api/latest/metrics/",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "api-key-header",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "linear_issues_pass",
+    "path": "tests/fixtures/corpus/linear_issues.yaml",
+    "source": "https://developers.linear.app/docs/graphql/working-with-the-graphql-api",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi31",
+      "bearer",
+      "json-request-body",
+      "nullable"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "vercel_projects_pass",
+    "path": "tests/fixtures/corpus/vercel_projects.yaml",
+    "source": "https://vercel.com/docs/rest-api/reference/endpoints/projects",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "path-params",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "openai_responses_pass",
+    "path": "tests/fixtures/corpus/openai_responses.yaml",
+    "source": "https://platform.openai.com/docs/api-reference/responses",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "json-request-body"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "discord_channels_pass",
+    "path": "tests/fixtures/corpus/discord_channels.yaml",
+    "source": "https://discord.com/developers/docs/resources/channel",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "path-params",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "notion_pages_fail_header_param",
+    "path": "tests/fixtures/corpus/notion_pages_fail_header_param.yaml",
+    "source": "https://developers.notion.com/reference/post-page",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "json-request-body",
+      "unsupported-header-param"
+    ],
+    "expected_diagnostics": [
+      "direct_http.parameter_location_unsupported"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "twilio_messages_fail_form_body",
+    "path": "tests/fixtures/corpus/twilio_messages_fail_form_body.yaml",
+    "source": "https://www.twilio.com/docs/messaging/api/message-resource",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "basic-auth",
+      "form-request-body"
+    ],
+    "expected_diagnostics": [
+      "direct_http.request_body_non_json"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "mailchimp_members_fail_cookie_or_deep_object",
+    "path": "tests/fixtures/corpus/mailchimp_members_fail_cookie_or_deep_object.yaml",
+    "source": "https://mailchimp.com/developer/marketing/api/list-members/",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "api-key-header",
+      "deep-object-query"
+    ],
+    "expected_diagnostics": [
+      "direct_http.parameter_type_unsupported"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "shopify_products_fail_relative_server",
+    "path": "tests/fixtures/corpus/shopify_products_fail_relative_server.yaml",
+    "source": "https://shopify.dev/docs/api/admin-rest/latest/resources/product",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "relative-server"
+    ],
+    "expected_diagnostics": [
+      "runtime.base_url"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "kubernetes_pods_fail_additional_properties",
+    "path": "tests/fixtures/corpus/kubernetes_pods_fail_additional_properties.yaml",
+    "source": "https://kubernetes.io/docs/reference/generated/kubernetes-api/",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "json-request-body",
+      "unsupported-schema-keyword"
+    ],
+    "expected_diagnostics": [
+      "direct_http.request_body_field_schema_unsupported"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "jira_issue_search_fail_non_primitive_param",
+    "path": "tests/fixtures/corpus/jira_issue_search_fail_non_primitive_param.yaml",
+    "source": "https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "basic-auth",
+      "query-array",
+      "non-primitive-array-item"
+    ],
+    "expected_diagnostics": [
+      "direct_http.parameter_array_non_primitive"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
   }
 ]

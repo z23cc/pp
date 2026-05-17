@@ -21,7 +21,7 @@ Purpose:
 - Transform-plan audit JSON coverage, including structured audit fields and the generated native direct HTTP invocation audit.
 - Support matrix and diagnostic-code contract tests for `src/support.rs`, schema diagnostics, model unsupported-operation codes, `pp check --json`, and `pp support --json` query behavior.
 - Golden generated-output snapshot coverage for a fixed native direct HTTP fixture.
-- Local corpus manifest validation for pinned real-world trimmed fixtures.
+- Local corpus manifest validation for 20+ local curated public API-shape fixtures, including `fixture_kind` provenance metadata, coverage tags, and expected diagnostic metadata.
 
 ## Standard
 
@@ -48,7 +48,7 @@ Purpose:
 - Exercise repeated query-array serialization as repeated query parameters.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
 - Rebuild generated runtimes that expose CLI and MCP through generated native direct HTTP invocation metadata.
-- Run local-only corpus `pp check --json` coverage and generated build smoke for check-pass fixtures.
+- Run local-only corpus `pp check --json` coverage across curated public API-shape fixtures, write deterministic reports to `target/pp-corpus-coverage.json` and `target/pp-corpus-coverage.md`, and run generated build smoke for opted-in check-pass fixtures.
 
 These are the first ignored tests promoted to scheduled/manual CI because they cover generated artifact correctness without external network dependencies.
 

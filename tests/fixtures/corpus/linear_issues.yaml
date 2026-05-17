@@ -1,0 +1,30 @@
+# Source: https://developers.linear.app/docs/graphql/working-with-the-graphql-api
+# Trim date: 2026-05-17. Trimmed to a REST-like issue creation shape used for generator coverage.
+openapi: 3.1.0
+info:
+  title: Linear Issue API
+  version: '1.0'
+servers:
+  - url: https://api.linear.app
+security:
+  - bearerAuth: []
+paths:
+  /issues:
+    post:
+      operationId: issues_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                description:
+                  type: [string, 'null']
+      responses:
+        '200': { description: Issue }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

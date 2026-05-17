@@ -35,6 +35,24 @@ pub(crate) struct SupportDiagnosticPayload {
     pub features: Vec<SupportFeature>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DiagnosticExplanation {
+    pub matrix_id: &'static str,
+    pub diagnostic_code: &'static str,
+    pub title: &'static str,
+    pub meaning: &'static str,
+    pub remediation: &'static str,
+    pub features: Vec<SupportFeature>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiagnosticExplanationMetadata {
+    diagnostic_code: &'static str,
+    title: &'static str,
+    meaning: &'static str,
+    remediation: &'static str,
+}
+
 pub(crate) fn support_payload() -> SupportMatrixPayload {
     SupportMatrixPayload {
         matrix_id: SUPPORT_MATRIX_ID,
@@ -61,6 +79,22 @@ pub(crate) fn features_for_diagnostic(code: &str) -> Option<SupportDiagnosticPay
         matrix_id: SUPPORT_MATRIX_ID,
         diagnostic_code,
         features,
+    })
+}
+
+pub(crate) fn explain_diagnostic(code: &str) -> Option<DiagnosticExplanation> {
+    let metadata = DIAGNOSTIC_EXPLANATIONS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.diagnostic_code == code)?;
+    let feature_payload = features_for_diagnostic(metadata.diagnostic_code)?;
+    Some(DiagnosticExplanation {
+        matrix_id: SUPPORT_MATRIX_ID,
+        diagnostic_code: metadata.diagnostic_code,
+        title: metadata.title,
+        meaning: metadata.meaning,
+        remediation: metadata.remediation,
+        features: feature_payload.features,
     })
 }
 
@@ -214,11 +248,230 @@ pub(crate) const ALL_DIAGNOSTIC_CODES: &[&str] = &[
     diagnostics::direct_http::REQUEST_BODY_FIELD_COLLISION,
 ];
 
+const DIAGNOSTIC_EXPLANATIONS: &[DiagnosticExplanationMetadata] = &[
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::spec::LOAD_ERROR,
+        title: "Spec could not be loaded or prepared",
+        meaning: "pp could not complete the pre-model load path: reading/parsing the OpenAPI document, applying slice include/exclude filters, or selecting the requested auth scheme failed.",
+        remediation: "Fix the source spec path/syntax, adjust slice filters so at least one operation matches, or pass an auth scheme that exists in components.securitySchemes; pp does not repair malformed input or guess invalid selections.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::runtime::BASE_URL,
+        title: "Runtime base URL is missing or unsupported",
+        meaning: "Generated native HTTP commands need an absolute http(s) base URL.",
+        remediation: "Add an absolute servers[0].url to the source spec or pass --base-url with an absolute http(s) URL.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::model::GENERATION_ERROR,
+        title: "Selected operations cannot be modeled",
+        meaning: "The selected operation set violates pp's strict native generation contract before direct HTTP planning can finish.",
+        remediation: "Fix the source operation shapes or narrow the selection with include/exclude filters; pp does not fallback to generated wrapper execution.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::BOOLEAN_OR_NON_OBJECT_SCHEMA,
+        title: "Schema is boolean or non-object",
+        meaning: "pp expects schemas it models to be JSON objects with explicit supported keywords.",
+        remediation: "Replace boolean/non-object schema declarations with explicit object schemas in the source spec.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::REF_SIBLINGS,
+        title: "$ref has sibling keywords",
+        meaning: "A schema combines $ref with sibling keywords, which pp treats as ambiguous in the strict subset.",
+        remediation: "Move sibling constraints into the referenced schema or select a simpler schema shape.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::KEYWORD_UNSUPPORTED,
+        title: "Unsupported schema keyword",
+        meaning: "The schema uses a JSON Schema/OpenAPI keyword outside pp's supported modeling subset.",
+        remediation: "Remove or simplify the keyword in the source spec, or exclude operations that require it.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::TYPE_UNSUPPORTED,
+        title: "Unsupported schema type",
+        meaning: "The schema declares a type that pp cannot map to generated arguments or JSON body fields.",
+        remediation: "Change the source schema to a supported primitive/object/array shape or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::UNRESOLVED_REFERENCE,
+        title: "Schema reference could not be resolved",
+        meaning: "A local schema reference points to a target pp cannot find in the loaded document.",
+        remediation: "Fix the local $ref target in the source spec; remote fetching and repair are not performed.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::TUPLE_ARRAY_ITEMS,
+        title: "Tuple array items are unsupported",
+        meaning: "The schema describes array positions with tuple-style items rather than one item schema.",
+        remediation: "Use a homogeneous array item schema or exclude the operation that requires tuple arrays.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::INVALID_TYPE_ARRAY,
+        title: "Invalid schema type array",
+        meaning: "A type array is not one of pp's accepted nullable [T, null] forms.",
+        remediation: "Rewrite the schema type to a single supported type or a nullable [T, null] pair.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::UNSUPPORTED_TYPE_UNION,
+        title: "Unsupported type union",
+        meaning: "The schema uses a type union broader than pp's safe nullable subset.",
+        remediation: "Reduce the union to one supported type plus optional null, or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::INVALID_TYPE,
+        title: "Invalid schema type",
+        meaning: "The schema type value is missing, malformed, or not a recognized OpenAPI/JSON Schema type.",
+        remediation: "Correct the type declaration in the source spec before running pp again.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::schema::MISSING_SUPPORTED_TYPE,
+        title: "Missing supported schema type",
+        meaning: "pp could not infer a supported type from the schema declaration.",
+        remediation: "Add an explicit supported type or simplify the schema used by the selected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::UNRESOLVED_PARAMETER_REF,
+        title: "Parameter reference could not be resolved",
+        meaning: "A parameter $ref used by a selected operation does not resolve locally.",
+        remediation: "Fix the parameter $ref in the source spec or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_NAME_MISSING,
+        title: "Parameter name is missing",
+        meaning: "A selected operation has a parameter without a name.",
+        remediation: "Add a stable parameter name to the source spec or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_LOCATION_MISSING,
+        title: "Parameter location is missing",
+        meaning: "A selected operation has a parameter without an in location.",
+        remediation: "Set the parameter location to a supported value such as path or query.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_LOCATION_UNSUPPORTED,
+        title: "Parameter location is unsupported",
+        meaning: "The parameter is not in a location pp's native direct HTTP planner supports.",
+        remediation: "Use supported path/query parameters or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_REQUIRED_NULLABLE,
+        title: "Required parameter is nullable",
+        meaning: "A required parameter allows null, which cannot be represented as a required CLI argument safely.",
+        remediation: "Make the parameter non-nullable or change the source contract before generation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_SCHEMA_UNSUPPORTED,
+        title: "Parameter schema is unsupported",
+        meaning: "The parameter schema shape is outside pp's supported parameter subset.",
+        remediation: "Use primitive path/query parameters or supported exploded primitive query arrays.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_PRIMITIVE_TYPE_MISSING,
+        title: "Parameter primitive type is missing",
+        meaning: "A parameter needs an explicit primitive schema type for CLI argument generation.",
+        remediation: "Add a string, integer, number, or boolean type to the parameter schema.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::QUERY_ARRAY_ITEM_NULLABLE,
+        title: "Query array item is nullable",
+        meaning: "pp supports query arrays only when each item is a non-null primitive.",
+        remediation: "Make the array item non-nullable or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_ARRAY_NON_PRIMITIVE,
+        title: "Parameter array item is not primitive",
+        meaning: "A parameter array contains object or otherwise non-primitive items.",
+        remediation: "Use an exploded array of primitive items or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PATH_ARRAY_UNSUPPORTED,
+        title: "Path array parameter is unsupported",
+        meaning: "pp does not model array-valued path parameters for native direct HTTP invocation.",
+        remediation: "Use primitive path parameters or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_TYPE_UNSUPPORTED,
+        title: "Parameter type is unsupported",
+        meaning: "A parameter uses a type pp cannot expose as a native CLI argument.",
+        remediation: "Change the source parameter to a supported primitive shape or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_CONTENT_ENCODING,
+        title: "Parameter content encoding is unsupported",
+        meaning: "The parameter uses OpenAPI content encoding instead of a simple schema.",
+        remediation: "Represent the parameter with a supported schema or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PARAMETER_SCHEMA_MISSING,
+        title: "Parameter schema is missing",
+        meaning: "A selected parameter has no schema pp can inspect.",
+        remediation: "Add a supported parameter schema to the source spec.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::QUERY_STYLE_NON_FORM,
+        title: "Query parameter style is unsupported",
+        meaning: "pp supports query serialization through the form style only.",
+        remediation: "Use form-style query parameters or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::QUERY_ARRAY_NON_EXPLODED,
+        title: "Query array is not exploded",
+        meaning: "pp supports query arrays only as exploded repeated query parameters.",
+        remediation: "Set explode: true for the array query parameter or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::PATH_STYLE_NON_SIMPLE,
+        title: "Path parameter style is unsupported",
+        meaning: "pp supports simple path parameter serialization only.",
+        remediation: "Use simple path style or exclude the affected operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::UNRESOLVED_REQUEST_BODY_REF,
+        title: "Request body reference could not be resolved",
+        meaning: "A requestBody $ref used by a selected operation does not resolve locally.",
+        remediation: "Fix the request body $ref target in the source spec or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::REQUEST_BODY_JSON_MISSING,
+        title: "JSON request body is missing",
+        meaning: "A selected operation has a request body but no application/json media type pp can model.",
+        remediation: "Add an application/json request body schema or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::REQUEST_BODY_NON_JSON,
+        title: "Request body is not JSON",
+        meaning: "The operation requires a non-JSON request body outside pp's native direct HTTP subset.",
+        remediation: "Use a JSON request body for the source operation or exclude it from generation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::REQUEST_BODY_SCHEMA_MISSING,
+        title: "Request body schema is missing",
+        meaning: "The JSON request body lacks a schema pp can model.",
+        remediation: "Add a supported JSON schema for the request body or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::REQUEST_BODY_FIELD_SCHEMA_UNSUPPORTED,
+        title: "Request body field schema is unsupported",
+        meaning: "A flattened JSON body field uses a schema shape pp cannot expose as an argument.",
+        remediation: "Simplify that field schema or model the body with supported JSON shapes.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::REQUEST_BODY_SCHEMA_UNSUPPORTED,
+        title: "Request body schema is unsupported",
+        meaning: "The JSON request body schema is outside pp's supported body modeling subset.",
+        remediation: "Simplify the source schema, use a supported object/body shape, or exclude the operation.",
+    },
+    DiagnosticExplanationMetadata {
+        diagnostic_code: diagnostics::direct_http::REQUEST_BODY_FIELD_COLLISION,
+        title: "Request body field collides with another argument",
+        meaning: "A generated JSON body field argument would conflict with another CLI argument name.",
+        remediation: "Rename fields or parameters in the source spec, or exclude the affected operation.",
+    },
+];
+
 pub(crate) const SUPPORT_FEATURES: &[SupportFeature] = &[
     SupportFeature {
         id: "spec.load",
         status: SupportStatus::Required,
-        summary: "Input specs must be readable, parseable OpenAPI documents before check or generation can continue.",
+        summary: "Input specs must be readable, parseable, sliceable, and have a valid auth selection before check or generation can continue.",
         diagnostic_codes: &[diagnostics::spec::LOAD_ERROR],
     },
     SupportFeature {
@@ -416,5 +669,29 @@ mod tests {
                 "diagnostic code {code} is not attached to any support feature"
             );
         }
+    }
+
+    #[test]
+    fn every_diagnostic_code_has_an_explanation() {
+        let explanation_codes: BTreeSet<_> = DIAGNOSTIC_EXPLANATIONS
+            .iter()
+            .map(|explanation| explanation.diagnostic_code)
+            .collect();
+        for code in ALL_DIAGNOSTIC_CODES {
+            let explanation = explain_diagnostic(code)
+                .unwrap_or_else(|| panic!("diagnostic code {code} has no explanation"));
+            assert!(explanation_codes.contains(code));
+            assert_eq!(explanation.matrix_id, SUPPORT_MATRIX_ID);
+            assert_eq!(explanation.diagnostic_code, *code);
+            assert!(!explanation.title.is_empty());
+            assert!(!explanation.meaning.is_empty());
+            assert!(!explanation.remediation.is_empty());
+            assert!(!explanation.features.is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_diagnostic_has_no_explanation() {
+        assert!(explain_diagnostic("not.real").is_none());
     }
 }

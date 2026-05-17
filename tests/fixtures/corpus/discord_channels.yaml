@@ -1,0 +1,28 @@
+# Source: https://discord.com/developers/docs/resources/channel
+# Trim date: 2026-05-17. Trimmed to supported channel message endpoints.
+openapi: 3.0.3
+info:
+  title: Discord Channel API
+  version: '10'
+servers:
+  - url: https://discord.com/api/v10
+security:
+  - botToken: []
+paths:
+  /channels/{channel_id}/messages:
+    get:
+      operationId: messages_list
+      parameters:
+        - name: channel_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: Messages }
+components:
+  securitySchemes:
+    botToken: { type: http, scheme: bearer }

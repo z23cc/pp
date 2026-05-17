@@ -1,0 +1,32 @@
+# Source: https://api.slack.com/methods/conversations.history
+# Trim date: 2026-05-17. Trimmed to supported primitive query parameters.
+openapi: 3.0.3
+info:
+  title: Slack Web API
+  version: '1.0'
+servers:
+  - url: https://slack.com/api
+security:
+  - bearerAuth: []
+paths:
+  /conversations.history:
+    get:
+      operationId: conversations_history
+      parameters:
+        - name: channel
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: inclusive
+          in: query
+          required: false
+          schema: { type: boolean }
+      responses:
+        '200': { description: History }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

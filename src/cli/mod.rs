@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -124,6 +125,14 @@ pub enum Command {
         #[arg(long, conflicts_with = "feature")]
         diagnostic: Option<String>,
     },
+    /// Explain a diagnostic code and how to address it
+    Explain {
+        /// Diagnostic code to explain, such as direct_http.request_body_json_missing
+        diagnostic_code: String,
+        /// Emit machine-readable explanation JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 struct LoadOptionsArgs {
@@ -247,6 +256,117 @@ fn print_support(json: bool, feature: Option<String>, diagnostic: Option<String>
     Ok(())
 }
 
+fn print_explain(diagnostic_code: String, json: bool) -> Result<()> {
+    let explanation = crate::support::explain_diagnostic(&diagnostic_code)
+        .ok_or_else(|| anyhow!("unknown diagnostic code '{diagnostic_code}'"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&explanation)?);
+        return Ok(());
+    }
+
+    println!("pp explain: {}", explanation.diagnostic_code);
+    println!("matrix: {}", explanation.matrix_id);
+    println!();
+    println!("{}", explanation.title);
+    println!();
+    println!("Meaning:");
+    println!("  {}", explanation.meaning);
+    println!();
+    println!("Remediation:");
+    println!("  {}", explanation.remediation);
+    if !explanation.features.is_empty() {
+        println!();
+        println!("Related support features:");
+        for feature in explanation.features {
+            println!(
+                "  {}\t{:?}\t{}",
+                feature.id, feature.status, feature.summary
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_check_human(result: &crate::pipeline::CheckResult) {
+    if result.success {
+        println!("pp check: ok");
+    } else {
+        println!("pp check: failed");
+    }
+
+    if let Some(facts) = &result.facts {
+        println!();
+        println!("Spec:");
+        println!("  title: {}", facts.title);
+        println!("  operations: {}", facts.operation_count);
+        println!("  binary: {}", facts.bin_name);
+        println!(
+            "  base url: {}",
+            facts.base_url.as_deref().unwrap_or("none")
+        );
+        println!("  auth: {}", describe_auth_kind(&facts.auth_kind));
+    }
+
+    if !result.reports.is_empty() {
+        println!();
+        println!("Warnings:");
+        for report in &result.reports {
+            println!("  [{}] {}", report.code, report.message);
+        }
+    }
+
+    if !result.diagnostics.is_empty() {
+        println!();
+        println!("Diagnostics:");
+        for diagnostic in &result.diagnostics {
+            println!(
+                "  [{}] {} {}: {}",
+                diagnostic.severity, diagnostic.code, diagnostic.source, diagnostic.message
+            );
+        }
+    }
+
+    if !result.unsupported_operations.is_empty() {
+        println!();
+        println!("Unsupported operations:");
+        for operation in &result.unsupported_operations {
+            let operation_id = operation.operation_id.as_deref().unwrap_or("none");
+            println!(
+                "  {} {} (operationId: {})",
+                operation.method, operation.path, operation_id
+            );
+            println!("    code: {}", operation.diagnostic_code);
+            println!("    reason: {}", operation.reason);
+        }
+    }
+
+    let diagnostic_codes = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<BTreeSet<_>>();
+    if !diagnostic_codes.is_empty() {
+        println!();
+        println!("Explain diagnostics:");
+        for code in diagnostic_codes {
+            println!("  Run: pp explain {code}");
+        }
+    }
+}
+
+fn describe_auth_kind(auth_kind: &crate::spec::AuthKind) -> String {
+    match auth_kind {
+        crate::spec::AuthKind::None => "none".to_string(),
+        crate::spec::AuthKind::Bearer => "http bearer".to_string(),
+        crate::spec::AuthKind::HttpBasic => "http basic".to_string(),
+        crate::spec::AuthKind::ApiKey { header_name } => format!("apiKey header ({header_name})"),
+        crate::spec::AuthKind::QueryApiKey { param_name } => {
+            format!("apiKey query parameter ({param_name})")
+        }
+        crate::spec::AuthKind::Unsupported { reason } => format!("unsupported ({reason})"),
+    }
+}
+
 impl Cli {
     pub fn run(self) -> Result<()> {
         match self.command {
@@ -274,13 +394,8 @@ impl Cli {
                 });
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
-                } else if result.success {
-                    println!("pp check: ok");
                 } else {
-                    println!("pp check: failed");
-                    for diagnostic in &result.diagnostics {
-                        eprintln!("pp: {}: {}", diagnostic.code, diagnostic.message);
-                    }
+                    print_check_human(&result);
                 }
                 if result.success {
                     Ok(())
@@ -371,6 +486,10 @@ impl Cli {
                 feature,
                 diagnostic,
             } => print_support(json, feature, diagnostic),
+            Command::Explain {
+                diagnostic_code,
+                json,
+            } => print_explain(diagnostic_code, json),
         }
     }
 }
@@ -452,6 +571,27 @@ mod tests {
                 assert_eq!(auth_scheme.as_deref(), Some("bearerAuth"));
             }
             _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn explain_accepts_diagnostic_code_and_json_flag() {
+        let cli = Cli::parse_from([
+            "pp",
+            "explain",
+            "direct_http.request_body_json_missing",
+            "--json",
+        ]);
+
+        match cli.command {
+            Command::Explain {
+                diagnostic_code,
+                json,
+            } => {
+                assert_eq!(diagnostic_code, "direct_http.request_body_json_missing");
+                assert!(json);
+            }
+            _ => panic!("expected explain command"),
         }
     }
 }

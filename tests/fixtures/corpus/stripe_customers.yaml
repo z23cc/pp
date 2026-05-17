@@ -1,0 +1,41 @@
+# Source: https://docs.stripe.com/api/customers
+# Trim date: 2026-05-17. Trimmed to supported customer list/create shapes.
+openapi: 3.0.3
+info:
+  title: Stripe API
+  version: '2024-04-10'
+servers:
+  - url: https://api.stripe.com/v1
+security:
+  - bearerAuth: []
+paths:
+  /customers:
+    get:
+      operationId: customers_list
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: email
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: Customers }
+    post:
+      operationId: customers_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                name: { type: string }
+      responses:
+        '200': { description: Customer }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

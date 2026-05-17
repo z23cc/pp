@@ -1,0 +1,32 @@
+# Source: https://docs.datadoghq.com/api/latest/metrics/
+# Trim date: 2026-05-17. Trimmed to supported metric query parameters and header api key.
+openapi: 3.0.3
+info:
+  title: Datadog Metrics API
+  version: '1.0'
+servers:
+  - url: https://api.datadoghq.com/api/v1
+security:
+  - apiKeyAuth: []
+paths:
+  /query:
+    get:
+      operationId: metrics_query
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: to
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: query
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Metrics }
+components:
+  securitySchemes:
+    apiKeyAuth: { type: apiKey, in: header, name: DD-API-KEY }

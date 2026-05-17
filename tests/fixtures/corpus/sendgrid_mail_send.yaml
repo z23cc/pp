@@ -1,0 +1,30 @@
+# Source: https://docs.sendgrid.com/api-reference/mail-send/mail-send
+# Trim date: 2026-05-17. Trimmed to a JSON mail send body.
+openapi: 3.0.3
+info:
+  title: SendGrid Mail Send API
+  version: '3.0'
+servers:
+  - url: https://api.sendgrid.com/v3
+security:
+  - bearerAuth: []
+paths:
+  /mail/send:
+    post:
+      operationId: mail_send
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, subject]
+              properties:
+                from: { type: string }
+                subject: { type: string }
+                content: { type: string }
+      responses:
+        '202': { description: Accepted }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

@@ -192,6 +192,141 @@ fn check_json_public_diagnostic_codes_resolve_in_support_inventory() {
 }
 
 #[test]
+fn explain_human_and_json_use_support_inventory() {
+    let human_output = Command::new(common::pp_bin())
+        .arg("explain")
+        .arg("direct_http.request_body_json_missing")
+        .output()
+        .expect("failed to run pp explain");
+    common::assert_success(human_output, "pp explain");
+
+    let json_output = Command::new(common::pp_bin())
+        .arg("explain")
+        .arg("direct_http.request_body_json_missing")
+        .arg("--json")
+        .output()
+        .expect("failed to run pp explain --json");
+    assert!(
+        json_output.status.success(),
+        "pp explain --json failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&json_output.stdout),
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&json_output.stdout).expect("explain JSON");
+    assert_eq!(value["matrix_id"], "pp.strict-openapi-support.v1");
+    assert_eq!(
+        value["diagnostic_code"],
+        "direct_http.request_body_json_missing"
+    );
+    assert!(value["meaning"].as_str().unwrap().contains("request body"));
+    assert!(value["features"].as_array().unwrap().iter().any(|feature| {
+        feature["id"] == "request_bodies.json" && feature["status"] == "supported"
+    }));
+}
+
+#[test]
+fn explain_spec_load_error_covers_all_pre_model_failures() {
+    let json_output = Command::new(common::pp_bin())
+        .arg("explain")
+        .arg("spec.load_error")
+        .arg("--json")
+        .output()
+        .expect("failed to run pp explain spec.load_error --json");
+    assert!(
+        json_output.status.success(),
+        "pp explain spec.load_error --json failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&json_output.stdout),
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&json_output.stdout).expect("explain JSON");
+    assert_eq!(value["diagnostic_code"], "spec.load_error");
+    let text = format!(
+        "{} {}",
+        value["meaning"].as_str().unwrap(),
+        value["remediation"].as_str().unwrap()
+    );
+    for expected in ["reading", "parsing", "slice", "auth scheme"] {
+        assert!(text.contains(expected), "missing {expected} in: {text}");
+    }
+}
+
+#[test]
+fn explain_unknown_diagnostic_fails_clearly() {
+    let output = Command::new(common::pp_bin())
+        .arg("explain")
+        .arg("not.real")
+        .output()
+        .expect("failed to run pp explain");
+
+    assert!(
+        !output.status.success(),
+        "unknown diagnostic unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown diagnostic code 'not.real'"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_human_success_prints_spec_summary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(temp.path(), "minimal.yaml", MINIMAL_SPEC);
+
+    let output = Command::new(common::pp_bin())
+        .arg("check")
+        .arg(spec)
+        .output()
+        .expect("failed to run pp check");
+    assert!(
+        output.status.success(),
+        "pp check failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pp check: ok"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Spec:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("title: Check Fixture"), "stdout:\n{stdout}");
+    assert!(stdout.contains("operations: 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("auth: none"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn check_human_failure_prints_diagnostics_and_explain_hint() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec = common::write_spec(temp.path(), "unsupported.yaml", DEEP_OBJECT_SPEC);
+
+    let output = Command::new(common::pp_bin())
+        .arg("check")
+        .arg(spec)
+        .output()
+        .expect("failed to run pp check");
+
+    assert!(
+        !output.status.success(),
+        "unsupported check unexpectedly succeeded"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pp check: failed"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Spec:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Diagnostics:"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("direct_http.parameter_type_unsupported"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Unsupported operations:"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Run: pp explain direct_http.parameter_type_unsupported"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
 fn support_json_and_queries_are_backed_by_matrix_inventory() {
     let output = Command::new(common::pp_bin())
         .arg("support")

@@ -1,0 +1,30 @@
+# Source: https://platform.openai.com/docs/api-reference/responses
+# Trim date: 2026-05-17. Trimmed to supported JSON body fields.
+openapi: 3.0.3
+info:
+  title: OpenAI Responses API
+  version: '1.0'
+servers:
+  - url: https://api.openai.com/v1
+security:
+  - bearerAuth: []
+paths:
+  /responses:
+    post:
+      operationId: responses_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model: { type: string }
+                input: { type: string }
+                temperature: { type: number }
+      responses:
+        '200': { description: Response }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

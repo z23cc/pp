@@ -1,0 +1,30 @@
+# Source: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/
+# Trim date: 2026-05-17. Trimmed to expose non-primitive array query item coverage.
+openapi: 3.0.3
+info:
+  title: Jira Issue Search API
+  version: '3'
+servers:
+  - url: https://example.atlassian.net/rest/api/3
+security:
+  - basicAuth: []
+paths:
+  /search:
+    get:
+      operationId: issue_search
+      parameters:
+        - name: fields
+          in: query
+          required: false
+          explode: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        '200': { description: Issues }
+components:
+  securitySchemes:
+    basicAuth: { type: http, scheme: basic }

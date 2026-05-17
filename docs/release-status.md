@@ -20,7 +20,7 @@ The supported input contract is a strict OpenAPI 3.0 subset plus the narrow Open
 Before publishing `0.1.0`:
 
 1. Run fast verification from `docs/verification.md`.
-2. Run the standard generated-workspace smoke profile, including OpenAPI 3.1 safe-subset coverage, query-array runtime coverage, and the generated sliced petstore smoke.
+2. Run the standard generated-workspace smoke profile, including OpenAPI 3.1 safe-subset coverage, query-array runtime coverage, local corpus coverage report generation, and the generated sliced petstore smoke.
 3. Run the deep fixture dogfood profile.
 4. Re-run at least one large-spec or documented slice check when the fixture is available.
 5. Confirm `CHANGELOG.md` has the intended `0.1.0` entry.

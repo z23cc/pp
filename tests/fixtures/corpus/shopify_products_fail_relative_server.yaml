@@ -1,0 +1,19 @@
+# Source: https://shopify.dev/docs/api/admin-rest/latest/resources/product
+# Trim date: 2026-05-17. Trimmed to expose relative server URL coverage.
+openapi: 3.0.3
+info:
+  title: Shopify Products API
+  version: '2024-04'
+servers:
+  - url: /admin/api/2024-04
+paths:
+  /products.json:
+    get:
+      operationId: products_list
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: Products }

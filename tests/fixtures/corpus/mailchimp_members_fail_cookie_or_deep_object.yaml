@@ -1,0 +1,32 @@
+# Source: https://mailchimp.com/developer/marketing/api/list-members/
+# Trim date: 2026-05-17. Trimmed to expose unsupported deepObject query parameter coverage.
+openapi: 3.0.3
+info:
+  title: Mailchimp Members API
+  version: '3.0'
+servers:
+  - url: https://server.api.mailchimp.com/3.0
+security:
+  - apiKeyAuth: []
+paths:
+  /lists/{list_id}/members:
+    get:
+      operationId: members_list
+      parameters:
+        - name: list_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: merge_fields
+          in: query
+          required: false
+          style: deepObject
+          schema:
+            type: object
+            properties:
+              FNAME: { type: string }
+      responses:
+        '200': { description: Members }
+components:
+  securitySchemes:
+    apiKeyAuth: { type: apiKey, in: header, name: X-API-Key }

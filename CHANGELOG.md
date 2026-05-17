@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Manual/scheduled generated-workspace smoke workflow for standard and deep profiles.
 - OpenAPI 3.1 safe-subset generated-workspace smoke coverage.
 - Internal support matrix and diagnostic-code contract for strict OpenAPI subset diagnostics.
+- Local corpus expanded to 20+ curated public API-shape fixtures with `fixture_kind` provenance metadata and deterministic coverage reports under `target/pp-corpus-coverage.{json,md}`.
 
 ## [0.1.0] - TBD
 

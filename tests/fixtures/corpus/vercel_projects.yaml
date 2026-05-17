@@ -1,0 +1,34 @@
+# Source: https://vercel.com/docs/rest-api/reference/endpoints/projects
+# Trim date: 2026-05-17. Trimmed to supported project endpoints.
+openapi: 3.0.3
+info:
+  title: Vercel Projects API
+  version: '1.0'
+servers:
+  - url: https://api.vercel.com
+security:
+  - bearerAuth: []
+paths:
+  /v9/projects:
+    get:
+      operationId: projects_list
+      parameters:
+        - name: teamId
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: Projects }
+  /v9/projects/{idOrName}:
+    get:
+      operationId: projects_get
+      parameters:
+        - name: idOrName
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Project }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
