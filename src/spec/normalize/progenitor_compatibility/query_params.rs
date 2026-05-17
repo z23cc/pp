@@ -4,7 +4,7 @@ use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::ReportEntry;
 use crate::spec::transform::{TransformActionKind, TransformAuditEntry};
 
-use super::OperationTarget;
+use super::actions::OperationTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Target {

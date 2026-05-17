@@ -22,6 +22,9 @@ struct SourceTransformMetadata {
     name: &'static str,
     purpose: SourceTransformPurpose,
     required: SourceTransformRequiredness,
+    requirement_id: &'static str,
+    capability_link: &'static str,
+    retirement_condition: &'static str,
     precondition: &'static str,
     postcondition: &'static str,
     upstream_assumption: &'static str,
@@ -32,6 +35,9 @@ const STRING_VEC_VALUE_PARSER_METADATA: SourceTransformMetadata = SourceTransfor
     name: TRANSFORM_STRING_VEC_VALUE_PARSER,
     purpose: SourceTransformPurpose::ClapParserCompatibility,
     required: SourceTransformRequiredness::Conditional,
+    requirement_id: "progenitor.source_transform.string_vec_value_parser",
+    capability_link: "backend.progenitor.parameters.query_arrays",
+    retirement_condition: "remove when progenitor generated CLI parses Vec<String> arguments without pp source rewriting",
     precondition: "generated CLI contains clap value_parser! calls for Vec<String>",
     postcondition: "generated source contains no Vec<String> clap value_parser! shape requiring pp compatibility",
     upstream_assumption:
@@ -43,6 +49,10 @@ const UNEXPECTED_RESPONSE_BODY_METADATA: SourceTransformMetadata = SourceTransfo
     name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
     purpose: SourceTransformPurpose::ErrorDiagnostics,
     required: SourceTransformRequiredness::Required,
+    requirement_id: "progenitor.source_transform.unexpected_response_body",
+    capability_link: "backend.progenitor.responses.error_diagnostics",
+    retirement_condition:
+        "remove when progenitor fallback errors expose readable status, URL, headers, and body text",
     precondition: "generated client contains a fallback UnexpectedResponse arm",
     postcondition:
         "fallback UnexpectedResponse path captures status, url, headers, and response body text",
@@ -55,6 +65,9 @@ const COMPLEX_CLAP_VALUE_PARSERS_METADATA: SourceTransformMetadata = SourceTrans
     name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
     purpose: SourceTransformPurpose::ClapParserCompatibility,
     required: SourceTransformRequiredness::Conditional,
+    requirement_id: "progenitor.source_transform.complex_clap_value_parsers",
+    capability_link: "backend.progenitor.schemas.generated_type_cli_parsing",
+    retirement_condition: "remove when progenitor generated CLI parses generated schema types without pp source rewriting",
     precondition: "generated CLI contains clap value_parser! calls for generated schema types",
     postcondition:
         "generated source contains no clap value_parser! calls for generated schema types",
@@ -231,6 +244,9 @@ fn source_transform_diagnostic(
         purpose: metadata.purpose,
         required: metadata.required,
         status,
+        requirement_id: metadata.requirement_id,
+        capability_link: metadata.capability_link,
+        retirement_condition: metadata.retirement_condition,
         precondition: metadata.precondition,
         postcondition: metadata.postcondition,
         upstream_assumption: metadata.upstream_assumption,
@@ -380,6 +396,12 @@ mod tests {
             UNEXPECTED_RESPONSE_BODY_METADATA,
             COMPLEX_CLAP_VALUE_PARSERS_METADATA,
         ] {
+            assert!(!metadata.requirement_id.is_empty());
+            assert!(metadata
+                .requirement_id
+                .starts_with("progenitor.source_transform."));
+            assert!(!metadata.capability_link.is_empty());
+            assert!(!metadata.retirement_condition.is_empty());
             assert!(!metadata.precondition.is_empty());
             assert!(!metadata.postcondition.is_empty());
             assert!(!metadata.upstream_assumption.is_empty());
@@ -403,6 +425,9 @@ mod tests {
             purpose: metadata.purpose,
             required: metadata.required,
             status,
+            requirement_id: metadata.requirement_id,
+            capability_link: metadata.capability_link,
+            retirement_condition: metadata.retirement_condition,
             precondition: metadata.precondition,
             postcondition: metadata.postcondition,
             upstream_assumption: metadata.upstream_assumption,

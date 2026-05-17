@@ -18,6 +18,7 @@ const MAIN_TEMPLATE: &str = include_str!("templates/main.rs.j2");
 const CLI_BUILDER_TEMPLATE: &str = include_str!("templates/cli_builder.rs.j2");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/context.rs.j2");
 const AUTH_TEMPLATE: &str = include_str!("templates/auth.rs.j2");
+const DIRECT_HTTP_TEMPLATE: &str = include_str!("templates/direct_http.rs.j2");
 const INVOKE_TEMPLATE: &str = include_str!("templates/invoke.rs.j2");
 const PRINT_TEMPLATE: &str = include_str!("templates/print.rs.j2");
 const RUNTIME_TEMPLATE: &str = include_str!("templates/runtime.rs.j2");
@@ -314,6 +315,12 @@ pub(crate) fn render(manifest: &WrapperManifest, out_dir: &Path) -> Result<()> {
         &out_dir.join("src/auth.rs"),
     )?;
     write_template(
+        "direct_http.rs",
+        DIRECT_HTTP_TEMPLATE,
+        manifest,
+        &out_dir.join("src/direct_http.rs"),
+    )?;
+    write_template(
         "invoke.rs",
         INVOKE_TEMPLATE,
         manifest,
@@ -416,6 +423,30 @@ paths:
     }
 
     #[test]
+    fn direct_http_template_owns_generic_http_helpers() {
+        let manifest = WrapperManifest::new(
+            "petstore".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+            "petstore-api".to_string(),
+        );
+
+        let rendered = render_template("direct_http.rs", DIRECT_HTTP_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("pub(crate) fn build_request_parts("));
+        assert!(rendered.contains("pub(crate) fn build_url("));
+        assert!(rendered.contains("fn collect_query_pairs("));
+        assert!(rendered.contains("fn encode_path_value("));
+        assert!(rendered.contains("ArgBinding::PathParam"));
+        assert!(rendered.contains("ArgBinding::QueryParam"));
+        assert!(rendered.contains("pub(crate) fn headers_to_json("));
+        assert!(rendered.contains("pub(crate) fn transport_error("));
+        assert!(rendered.contains("pub(crate) fn success_response("));
+        assert!(rendered.contains("pub(crate) fn error_response("));
+    }
+
+    #[test]
     fn runtime_template_owns_response_shaping_helpers() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
@@ -515,8 +546,14 @@ paths: {}
         assert!(rendered.contains("requires_generated_cli_command: false"));
         assert!(rendered.contains("uses_temp_json_body_files: false"));
         assert!(rendered.contains("context.client.request(method, url)"));
-        assert!(rendered.contains("ArgBinding::PathParam"));
-        assert!(rendered.contains("ArgBinding::QueryParam"));
+        assert!(rendered.contains("crate::direct_http::build_request_parts"));
+        assert!(rendered.contains("crate::direct_http::success_response"));
+        assert!(rendered.contains("PathParam { wire_name: &'static str }"));
+        assert!(rendered.contains("QueryParam { wire_name: &'static str }"));
+        assert!(!rendered.contains("fn build_request_parts"));
+        assert!(!rendered.contains("fn build_url"));
+        assert!(!rendered.contains("fn collect_query_pairs"));
+        assert!(!rendered.contains("fn parse_body_value"));
         assert!(!rendered.contains("write_json_body"));
         assert_eq!(manifest.mcp_runtime.invocation_adapter_kind, "direct_http");
         assert_eq!(

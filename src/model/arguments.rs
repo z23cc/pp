@@ -1,3 +1,4 @@
+use crate::backend::{DirectInvocationParameterLocation, DirectInvocationRequirements};
 use anyhow::{bail, Result};
 use openapiv3::{
     OpenAPI, Parameter, ParameterData, ParameterSchemaOrContent, PathStyle, QueryStyle,
@@ -7,9 +8,16 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::response::reject_reserved_arg;
-use super::schema::schema_json;
+use super::schema::{schema_projection, ProjectedSchema, SchemaShape};
 
 pub(super) const DIRECT_UNSUPPORTED_PREFIX: &str = "MCP direct HTTP invocation does not support";
+
+pub(super) struct McpArgumentContext<'a> {
+    pub api: &'a OpenAPI,
+    pub capabilities: &'a DirectInvocationRequirements,
+    pub tool_name: &'a str,
+    pub operation_id: &'a str,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct McpArg {
@@ -76,18 +84,40 @@ pub(super) fn add_parameter(
     properties: &mut Map<String, Value>,
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
-    api: &OpenAPI,
-    tool_name: &str,
-    operation_id: &str,
+    ctx: &McpArgumentContext<'_>,
 ) -> Result<()> {
+    let api = ctx.api;
+    let capabilities = ctx.capabilities;
+    let tool_name = ctx.tool_name;
+    let operation_id = ctx.operation_id;
     let ReferenceOr::Item(parameter) = parameter else {
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} unresolved parameter references for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
     let (data, is_path) = match parameter {
-        Parameter::Query { parameter_data, .. } => (parameter_data, false),
-        Parameter::Path { parameter_data, .. } => (parameter_data, true),
+        Parameter::Query { parameter_data, .. } => {
+            reject_unsupported_parameter_location(
+                capabilities,
+                DirectInvocationParameterLocation::Query,
+                "query",
+                &parameter_data.name,
+                tool_name,
+                operation_id,
+            )?;
+            (parameter_data, false)
+        }
+        Parameter::Path { parameter_data, .. } => {
+            reject_unsupported_parameter_location(
+                capabilities,
+                DirectInvocationParameterLocation::Path,
+                "path",
+                &parameter_data.name,
+                tool_name,
+                operation_id,
+            )?;
+            (parameter_data, true)
+        }
         Parameter::Header { parameter_data, .. } => {
             bail!(
                 "{DIRECT_UNSUPPORTED_PREFIX} header parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
@@ -116,6 +146,7 @@ pub(super) fn add_parameter(
         tool_name,
         operation_id,
         is_path,
+        capabilities,
     )?;
     reject_unsupported_direct_parameter_serialization(
         parameter,
@@ -123,8 +154,9 @@ pub(super) fn add_parameter(
         &data.name,
         tool_name,
         operation_id,
+        capabilities,
     )?;
-    properties.insert(data.name.clone(), schema);
+    properties.insert(data.name.clone(), schema.json);
     if is_path || data.required {
         required.push(data.name.clone());
     }
@@ -141,9 +173,9 @@ fn parameter_schema(
     api: &OpenAPI,
     tool_name: &str,
     operation_id: &str,
-) -> Result<Value> {
+) -> Result<ProjectedSchema> {
     match &data.format {
-        ParameterSchemaOrContent::Schema(schema) => Ok(schema_json(schema, api)),
+        ParameterSchemaOrContent::Schema(schema) => Ok(schema_projection(schema, api)),
         ParameterSchemaOrContent::Content(_) => bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} content-encoded parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
             data.name
@@ -151,33 +183,60 @@ fn parameter_schema(
     }
 }
 
+fn reject_unsupported_parameter_location(
+    capabilities: &DirectInvocationRequirements,
+    location: DirectInvocationParameterLocation,
+    label: &str,
+    name: &str,
+    tool_name: &str,
+    operation_id: &str,
+) -> Result<()> {
+    if capabilities
+        .parameters
+        .supported_locations
+        .contains(&location)
+    {
+        return Ok(());
+    }
+    bail!(
+        "{DIRECT_UNSUPPORTED_PREFIX} {label} parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+    );
+}
+
 fn reject_unsupported_direct_parameter_schema(
-    schema: &Value,
+    schema: &ProjectedSchema,
     name: &str,
     tool_name: &str,
     operation_id: &str,
     is_path: bool,
+    capabilities: &DirectInvocationRequirements,
 ) -> Result<()> {
-    let Some(schema_type) = schema.get("type").and_then(Value::as_str) else {
+    let Some(schema_type) = schema.shape.json_type() else {
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} parameter '{name}' without primitive schema type for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
-    match schema_type {
-        "string" | "integer" | "number" | "boolean" => Ok(()),
-        "array" if !is_path => {
-            let item_type = schema
-                .get("items")
-                .and_then(|items| items.get("type"))
-                .and_then(Value::as_str);
-            match item_type {
-                Some("string" | "integer" | "number" | "boolean") => Ok(()),
+    if capabilities
+        .parameters
+        .primitive_schema_types
+        .contains(&schema_type)
+    {
+        return Ok(());
+    }
+    match &schema.shape {
+        SchemaShape::Array { items } if !is_path && capabilities.parameters.supports_query_arrays => {
+            match items.as_deref().and_then(SchemaShape::primitive_json_type) {
+                Some(item_type)
+                    if capabilities
+                        .parameters
+                        .primitive_schema_types
+                        .contains(&item_type) => Ok(()),
                 _ => bail!(
                     "{DIRECT_UNSUPPORTED_PREFIX} non-primitive array parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
                 ),
             }
         }
-        "array" => bail!(
+        SchemaShape::Array { .. } if is_path => bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} array path parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
         ),
         _ => bail!(
@@ -188,10 +247,11 @@ fn reject_unsupported_direct_parameter_schema(
 
 fn reject_unsupported_direct_parameter_serialization(
     parameter: &Parameter,
-    schema: &Value,
+    schema: &ProjectedSchema,
     name: &str,
     tool_name: &str,
     operation_id: &str,
+    capabilities: &DirectInvocationRequirements,
 ) -> Result<()> {
     match parameter {
         Parameter::Query {
@@ -199,12 +259,13 @@ fn reject_unsupported_direct_parameter_serialization(
             style,
             ..
         } => {
-            if *style != QueryStyle::Form {
+            if capabilities.parameters.requires_form_query_style && *style != QueryStyle::Form {
                 bail!(
                     "{DIRECT_UNSUPPORTED_PREFIX} non-form query parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
                 );
             }
-            if schema.get("type").and_then(Value::as_str) == Some("array")
+            if matches!(&schema.shape, SchemaShape::Array { .. })
+                && !capabilities.parameters.supports_non_exploded_query_arrays
                 && parameter_data.explode == Some(false)
             {
                 bail!(
@@ -217,7 +278,9 @@ fn reject_unsupported_direct_parameter_serialization(
             parameter_data,
             style,
         } => {
-            if *style != PathStyle::Simple || parameter_data.explode == Some(true) {
+            if capabilities.parameters.requires_simple_path_style
+                && (*style != PathStyle::Simple || parameter_data.explode == Some(true))
+            {
                 bail!(
                     "{DIRECT_UNSUPPORTED_PREFIX} non-simple path parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
                 );
@@ -233,10 +296,12 @@ pub(super) fn add_body(
     properties: &mut Map<String, Value>,
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
-    api: &OpenAPI,
-    tool_name: &str,
-    operation_id: &str,
+    ctx: &McpArgumentContext<'_>,
 ) -> Result<()> {
+    let api = ctx.api;
+    let capabilities = ctx.capabilities;
+    let tool_name = ctx.tool_name;
+    let operation_id = ctx.operation_id;
     let Some(request_body) = request_body else {
         return Ok(());
     };
@@ -245,7 +310,10 @@ pub(super) fn add_body(
             "{DIRECT_UNSUPPORTED_PREFIX} unresolved requestBody references for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
-    let Some(media_type) = body.content.get("application/json") else {
+    let Some(media_type) = body
+        .content
+        .get(capabilities.request_bodies.json_content_type)
+    else {
         if body.content.is_empty() {
             return Ok(());
         }
@@ -258,46 +326,40 @@ pub(super) fn add_body(
             "{DIRECT_UNSUPPORTED_PREFIX} schemaless JSON request body for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
-    let body_schema = schema_json(schema, api);
-    if let Some(object) = body_schema.as_object() {
-        if object.get("type").and_then(Value::as_str) == Some("object") {
-            if let Some(Value::Object(body_properties)) = object.get("properties") {
-                let has_flattening_collision = body_properties
-                    .keys()
-                    .any(|name| properties.contains_key(name));
-                if has_flattening_collision {
-                    return add_synthetic_body_arg(
-                        body_schema,
-                        body.required,
-                        properties,
-                        required,
-                        args,
-                        tool_name,
-                        operation_id,
-                    );
-                }
-
-                for (name, property_schema) in body_properties {
-                    reject_reserved_arg(name, tool_name, operation_id)?;
-                    properties.insert(name.clone(), property_schema.clone());
-                    args.push(McpArg::flattened_body_field(name.clone()));
-                }
-                if body.required {
-                    if let Some(Value::Array(body_required)) = object.get("required") {
-                        required.extend(
-                            body_required
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(str::to_string),
-                        );
-                    }
-                }
-                return Ok(());
-            }
+    let body_schema = schema_projection(schema, api);
+    if let SchemaShape::Object {
+        properties: body_properties,
+        required: body_required,
+        flattenable: true,
+    } = &body_schema.shape
+    {
+        let has_flattening_collision = body_properties
+            .keys()
+            .any(|name| properties.contains_key(name));
+        if has_flattening_collision {
+            return add_synthetic_body_arg(
+                body_schema.json,
+                body.required,
+                properties,
+                required,
+                args,
+                tool_name,
+                operation_id,
+            );
         }
+
+        for (name, property_schema) in body_properties {
+            reject_reserved_arg(name, tool_name, operation_id)?;
+            properties.insert(name.clone(), property_schema.json.clone());
+            args.push(McpArg::flattened_body_field(name.clone()));
+        }
+        if body.required {
+            required.extend(body_required.iter().cloned());
+        }
+        return Ok(());
     }
     add_synthetic_body_arg(
-        body_schema,
+        body_schema.json,
         body.required,
         properties,
         required,

@@ -9,6 +9,7 @@ mod identity;
 mod response;
 mod schema;
 
+use crate::backend::{BackendCapabilities, DirectInvocationRequirements};
 use anyhow::Result;
 use openapiv3::OpenAPI;
 use serde::Serialize;
@@ -51,12 +52,32 @@ pub struct McpUnsupportedOperation {
 
 #[cfg(test)]
 fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
-    Ok(mcp_model(api, auth_env_var)?.tools)
+    Ok(mcp_model_for_tests(api, auth_env_var)?.tools)
+}
+
+#[cfg(test)]
+fn mcp_model_for_tests(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<identity::McpModel> {
+    let capabilities = BackendCapabilities::progenitor();
+    mcp_model(api, auth_env_var, &capabilities.direct_invocation)
 }
 
 impl ApiModel {
+    #[allow(dead_code)]
     pub fn from_openapi(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Self> {
-        let mcp_model = mcp_model(api, auth_env_var)?;
+        let capabilities = BackendCapabilities::progenitor();
+        Self::from_openapi_with_direct_invocation(
+            api,
+            auth_env_var,
+            &capabilities.direct_invocation,
+        )
+    }
+
+    pub(crate) fn from_openapi_with_direct_invocation(
+        api: &OpenAPI,
+        auth_env_var: Option<&str>,
+        capabilities: &DirectInvocationRequirements,
+    ) -> Result<Self> {
+        let mcp_model = mcp_model(api, auth_env_var, capabilities)?;
         Ok(Self {
             mcp_tools: mcp_model.tools,
             unsupported_mcp_operations: mcp_model.unsupported_operations,
@@ -415,7 +436,7 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let model = mcp_model(&api, None).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert_eq!(model.tools.len(), 1);
         assert_eq!(model.tools[0].name, "search_items");
@@ -512,7 +533,7 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let model = mcp_model(&api, None).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert!(model.tools.is_empty());
         assert_eq!(model.unsupported_operations.len(), 6);
@@ -555,13 +576,51 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let model = mcp_model(&api, None).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert!(model.tools.is_empty());
         assert_eq!(model.unsupported_operations.len(), 1);
         assert!(model.unsupported_operations[0]
             .reason
             .contains("non-exploded query array parameter 'tags'"));
+    }
+
+    #[test]
+    fn direct_invocation_capabilities_gate_query_array_support() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Capability Gated Query Array API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: tags
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let mut capabilities = BackendCapabilities::progenitor();
+        capabilities
+            .direct_invocation
+            .parameters
+            .supports_query_arrays = false;
+
+        let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
+
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("array parameter 'tags'"));
     }
 
     #[test]

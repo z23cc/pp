@@ -1,24 +1,28 @@
-use anyhow::{anyhow, Result};
-use openapiv3::{
-    ArrayType, MediaType, ObjectType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody,
-    Response, Schema, SchemaKind, Type,
-};
-use std::collections::{HashMap, HashSet};
+use anyhow::Result;
+use openapiv3::{MediaType, OpenAPI, Operation, QueryStyle, ReferenceOr, RequestBody, Response};
+use std::collections::HashSet;
 
 use crate::backend::BackendCapabilities;
-use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
-use crate::spec::transform::{json_pointer_escape, TransformActionKind, TransformAuditEntry};
 use crate::spec::traversal;
-use serde_json::json;
 
 pub(super) const JSON_MIME: &str = "application/json";
 #[cfg(test)]
 pub(super) const FORM_MIME: &str = "application/x-www-form-urlencoded";
 
+mod actions;
+mod content_types;
 mod query_params;
+mod request_bodies;
 mod response_variants;
 mod schema_defaults;
+mod schemas;
+
+pub(crate) use actions::CompatibilityTransformPlan;
+use actions::{
+    CompatibilityAggregateProposal, CompatibilityTransformAction, ContentTarget,
+    OperationRequestBodyDropTarget, OperationTarget, ParameterTransformTarget,
+};
 
 pub(crate) fn propose_transforms(
     spec: &OpenAPI,
@@ -78,7 +82,7 @@ fn normalize_components(
     };
     for (name, schema) in components.schemas.iter_mut() {
         if let ReferenceOr::Item(schema) = schema {
-            normalize_schema(
+            schemas::normalize_schema(
                 schema,
                 &format!("component schema {name}"),
                 reports,
@@ -151,603 +155,6 @@ pub(super) struct NormalizeStats {
     dropped_optional_object_query_params: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CompatibilityTransformPlan {
-    actions: Vec<CompatibilityTransformAction>,
-}
-
-impl CompatibilityTransformPlan {
-    pub(crate) fn report_entries(&self) -> Vec<ReportEntry> {
-        self.actions
-            .iter()
-            .map(CompatibilityTransformAction::report_entry)
-            .cloned()
-            .collect()
-    }
-
-    pub(crate) fn audit_entries(&self) -> Vec<TransformAuditEntry> {
-        self.actions
-            .iter()
-            .flat_map(CompatibilityTransformAction::audit_entries)
-            .collect()
-    }
-
-    fn push(&mut self, action: CompatibilityTransformAction) {
-        self.actions.push(action);
-    }
-
-    fn emit_applied_aggregate_reports(
-        &self,
-        reports: &mut Vec<ReportEntry>,
-        stats: &NormalizeStats,
-    ) -> Result<()> {
-        let mut saw_schema_defaults = false;
-        let mut saw_unsupported_request_bodies = false;
-        let mut saw_deep_object_query_params = false;
-        let mut saw_optional_object_query_params = false;
-
-        for action in &self.actions {
-            match action {
-                CompatibilityTransformAction::DropSchemaDefaults(action) => {
-                    saw_schema_defaults = true;
-                    ensure_aggregate_labels(
-                        action.report_entry().code,
-                        action.targets(),
-                        &stats.dropped_schema_defaults,
-                    )?;
-                    reports.push(action.report_entry().clone());
-                }
-                CompatibilityTransformAction::DropUnsupportedRequestBodyOperations {
-                    targets,
-                    report,
-                } => {
-                    saw_unsupported_request_bodies = true;
-                    let expected = targets
-                        .iter()
-                        .map(|target| target.op_name.clone())
-                        .collect::<Vec<_>>();
-                    ensure_aggregate_labels(
-                        report.code,
-                        &expected,
-                        &stats.dropped_unsupported_request_body_ops,
-                    )?;
-                    reports.push(report.clone());
-                }
-                CompatibilityTransformAction::RewriteDeepObjectQueryParams(action) => {
-                    saw_deep_object_query_params = true;
-                    ensure_aggregate_labels(
-                        action.report_entry().code,
-                        &action.labels(),
-                        &stats.normalized_deep_object_query_params,
-                    )?;
-                    reports.push(action.report_entry().clone());
-                }
-                CompatibilityTransformAction::DropOptionalObjectQueryParams(action) => {
-                    saw_optional_object_query_params = true;
-                    ensure_aggregate_labels(
-                        action.report_entry().code,
-                        &action.labels(),
-                        &stats.dropped_optional_object_query_params,
-                    )?;
-                    reports.push(action.report_entry().clone());
-                }
-                _ => {}
-            }
-        }
-
-        if !saw_schema_defaults && !stats.dropped_schema_defaults.is_empty() {
-            return Err(aggregate_drift_error(
-                typed::SCHEMA_DEFAULTS_DROPPED,
-                "no approved aggregate action",
-                &format!("applied {:?}", stats.dropped_schema_defaults),
-            ));
-        }
-        if !saw_unsupported_request_bodies && !stats.dropped_unsupported_request_body_ops.is_empty()
-        {
-            return Err(aggregate_drift_error(
-                typed::UNSUPPORTED_REQUEST_BODIES_DROPPED,
-                "no approved aggregate action",
-                &format!("applied {:?}", stats.dropped_unsupported_request_body_ops),
-            ));
-        }
-        if !saw_deep_object_query_params && !stats.normalized_deep_object_query_params.is_empty() {
-            return Err(aggregate_drift_error(
-                typed::DEEP_OBJECT_QUERY_PARAMS_REWRITTEN,
-                "no approved aggregate action",
-                &format!("applied {:?}", stats.normalized_deep_object_query_params),
-            ));
-        }
-        if !saw_optional_object_query_params
-            && !stats.dropped_optional_object_query_params.is_empty()
-        {
-            return Err(aggregate_drift_error(
-                typed::OPTIONAL_OBJECT_QUERY_PARAMS_DROPPED,
-                "no approved aggregate action",
-                &format!("applied {:?}", stats.dropped_optional_object_query_params),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn response_variants_for(
-        &self,
-        method: &str,
-        path: &str,
-    ) -> Option<&response_variants::Action> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::PruneResponseVariants(action) = action {
-                action.matches(method, path).then_some(action)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn content_for(&self, target: &ContentTarget) -> Option<&CompatibilityTransformAction> {
-        self.actions.iter().find(|action| {
-            matches!(
-                action,
-                CompatibilityTransformAction::PruneContentTypes { target: action_target, .. }
-                    if action_target == target
-            )
-        })
-    }
-
-    fn unsupported_request_body_for(
-        &self,
-        target: &ContentTarget,
-    ) -> Option<&CompatibilityTransformAction> {
-        self.actions.iter().find(|action| {
-            matches!(
-                action,
-                CompatibilityTransformAction::DropUnsupportedRequestBody { target: action_target, .. }
-                    if action_target == target
-            )
-        })
-    }
-
-    fn unsupported_operation_request_body_for(
-        &self,
-        method: &str,
-        path: &str,
-    ) -> Option<&OperationRequestBodyDropTarget> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::DropUnsupportedRequestBodyOperations {
-                targets,
-                ..
-            } = action
-            {
-                targets.iter().find(|target| {
-                    target.operation.method == method && target.operation.path == path
-                })
-            } else {
-                None
-            }
-        })
-    }
-
-    fn should_drop_schema_default(&self, path: &str) -> bool {
-        self.actions.iter().any(|action| {
-            matches!(
-                action,
-                CompatibilityTransformAction::DropSchemaDefaults(action)
-                    if action.contains(path)
-            )
-        })
-    }
-
-    fn deep_object_query_param_for(
-        &self,
-        operation: &OperationTarget,
-        param_name: &str,
-    ) -> Option<&ParameterTransformTarget> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::RewriteDeepObjectQueryParams(action) = action {
-                action.targets().iter().find(|target| {
-                    target.operation == *operation && target.param_name == param_name
-                })
-            } else {
-                None
-            }
-        })
-    }
-
-    fn optional_object_query_param_for(
-        &self,
-        operation: &OperationTarget,
-        param_name: &str,
-    ) -> Option<&ParameterTransformTarget> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::DropOptionalObjectQueryParams(action) = action {
-                action.targets().iter().find(|target| {
-                    target.operation == *operation && target.param_name == param_name
-                })
-            } else {
-                None
-            }
-        })
-    }
-
-    fn schemaless_request_body_for(&self, operation: &OperationTarget) -> Option<&ReportEntry> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::DropSchemalessRequestBody {
-                target, report, ..
-            } = action
-            {
-                (target == operation).then_some(report)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn enum_constraint_for(&self, path: &str) -> Option<&ReportEntry> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::DropEnumConstraint { target, report, .. } = action
-            {
-                (target == path).then_some(report)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn unsupported_schema_type_for(&self, path: &str) -> Option<&ReportEntry> {
-        self.actions.iter().find_map(|action| {
-            if let CompatibilityTransformAction::ReplaceUnsupportedSchemaType {
-                target,
-                report,
-                ..
-            } = action
-            {
-                (target == path).then_some(report)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn colliding_properties_for(&self, path: &str) -> Vec<&CompatibilityTransformAction> {
-        self.actions
-            .iter()
-            .filter(|action| {
-                matches!(
-                    action,
-                    CompatibilityTransformAction::DropCollidingProperties { target, .. }
-                        if target == path
-                )
-            })
-            .collect()
-    }
-}
-
-fn ensure_aggregate_labels(
-    code: &'static str,
-    expected: &[String],
-    actual: &[String],
-) -> Result<()> {
-    if expected == actual {
-        Ok(())
-    } else {
-        Err(aggregate_drift_error(
-            code,
-            &format!("planned {expected:?}"),
-            &format!("applied {actual:?}"),
-        ))
-    }
-}
-
-fn aggregate_drift_error(code: &'static str, expected: &str, actual: &str) -> anyhow::Error {
-    anyhow!("approved aggregate report drift for {code}: {expected}; {actual}")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OperationTarget {
-    method: String,
-    path: String,
-}
-
-impl OperationTarget {
-    fn new(method: &str, path: &str) -> Self {
-        Self {
-            method: method.to_string(),
-            path: path.to_string(),
-        }
-    }
-
-    fn label(&self) -> String {
-        format!("{} {}", self.method, self.path)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ContentTarget {
-    ComponentRequestBody(String),
-    ComponentResponse(String),
-    OperationRequestBody(OperationTarget),
-    OperationResponse {
-        operation: OperationTarget,
-        status: String,
-    },
-    OperationDefaultResponse(OperationTarget),
-}
-
-type ParameterTransformTarget = query_params::Target;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OperationRequestBodyDropTarget {
-    operation: OperationTarget,
-    op_name: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CompatibilityAggregateProposal {
-    schema_defaults: Vec<String>,
-    unsupported_request_body_ops: Vec<OperationRequestBodyDropTarget>,
-    deep_object_query_params: Vec<ParameterTransformTarget>,
-    optional_object_query_params: Vec<ParameterTransformTarget>,
-}
-
-impl CompatibilityAggregateProposal {
-    fn push_actions(self, plan: &mut CompatibilityTransformPlan) {
-        if !self.schema_defaults.is_empty() {
-            plan.push(CompatibilityTransformAction::DropSchemaDefaults(
-                schema_defaults::Action::new(self.schema_defaults),
-            ));
-        }
-        if !self.unsupported_request_body_ops.is_empty() {
-            let op_names = self
-                .unsupported_request_body_ops
-                .iter()
-                .map(|target| target.op_name.clone())
-                .collect::<Vec<_>>();
-            plan.push(
-                CompatibilityTransformAction::DropUnsupportedRequestBodyOperations {
-                    report: unsupported_request_body_operations_report(&op_names),
-                    targets: self.unsupported_request_body_ops,
-                },
-            );
-        }
-        if !self.deep_object_query_params.is_empty() {
-            plan.push(CompatibilityTransformAction::RewriteDeepObjectQueryParams(
-                query_params::DeepObjectAction::new(self.deep_object_query_params),
-            ));
-        }
-        if !self.optional_object_query_params.is_empty() {
-            plan.push(CompatibilityTransformAction::DropOptionalObjectQueryParams(
-                query_params::OptionalObjectAction::new(self.optional_object_query_params),
-            ));
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum CompatibilityTransformAction {
-    PruneResponseVariants(response_variants::Action),
-    PruneContentTypes {
-        target: ContentTarget,
-        kept: String,
-        report: ReportEntry,
-    },
-    DropUnsupportedRequestBody {
-        target: ContentTarget,
-        report: ReportEntry,
-    },
-    DropSchemaDefaults(schema_defaults::Action),
-    DropUnsupportedRequestBodyOperations {
-        targets: Vec<OperationRequestBodyDropTarget>,
-        report: ReportEntry,
-    },
-    RewriteDeepObjectQueryParams(query_params::DeepObjectAction),
-    DropOptionalObjectQueryParams(query_params::OptionalObjectAction),
-    DropSchemalessRequestBody {
-        target: OperationTarget,
-        report: ReportEntry,
-    },
-    DropEnumConstraint {
-        target: String,
-        report: ReportEntry,
-    },
-    ReplaceUnsupportedSchemaType {
-        target: String,
-        report: ReportEntry,
-    },
-    DropCollidingProperties {
-        target: String,
-        dropped: Vec<String>,
-        report: ReportEntry,
-    },
-}
-
-impl CompatibilityTransformAction {
-    fn report_entry(&self) -> &ReportEntry {
-        match self {
-            Self::DropSchemaDefaults(action) => action.report_entry(),
-            Self::PruneResponseVariants(action) => action.report_entry(),
-            Self::PruneContentTypes { report, .. }
-            | Self::DropUnsupportedRequestBody { report, .. }
-            | Self::DropUnsupportedRequestBodyOperations { report, .. }
-            | Self::DropSchemalessRequestBody { report, .. }
-            | Self::DropEnumConstraint { report, .. }
-            | Self::ReplaceUnsupportedSchemaType { report, .. }
-            | Self::DropCollidingProperties { report, .. } => report,
-            Self::RewriteDeepObjectQueryParams(action) => action.report_entry(),
-            Self::DropOptionalObjectQueryParams(action) => action.report_entry(),
-        }
-    }
-
-    fn audit_entries(&self) -> Vec<TransformAuditEntry> {
-        let report = self.report_entry();
-        match self {
-            Self::PruneResponseVariants(action) => action.audit_entries(),
-            Self::PruneContentTypes { target, kept, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    content_target_label(target),
-                    format!("prune content types to {kept}"),
-                )
-                .with_target_pointer(content_target_pointer(target))
-                .with_action_kind(TransformActionKind::Prune)
-                .with_backend_requirement_id("progenitor.content_type.single_supported")
-                .with_backend_requirement("backend requires one supported content type per message")
-                .with_before_after("multiple content types", format!("kept {kept}"))
-                .with_before_after_json(json!({ "content_types": "multiple" }), json!({ "kept": kept })),
-            ],
-            Self::DropUnsupportedRequestBody { target, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    content_target_label(target),
-                    "drop requestBody with only unsupported content types",
-                )
-                .with_target_pointer(content_target_pointer(target))
-                .with_action_kind(TransformActionKind::Drop)
-                .with_backend_requirement_id("progenitor.request_body.supported_content_type")
-                .with_backend_requirement("backend request body content-type support is limited")
-                .with_before_after("requestBody with unsupported content", "requestBody removed")
-                .with_before_after_json(json!({ "requestBody": "unsupported_content" }), json!(null)),
-            ],
-            Self::DropSchemaDefaults(action) => action.audit_entries(),
-            Self::DropUnsupportedRequestBodyOperations { targets, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    summarize_targets(
-                        &targets
-                            .iter()
-                            .map(|target| target.operation.label())
-                            .collect::<Vec<_>>(),
-                    ),
-                    format!("drop {} operations with unsupported request bodies", targets.len()),
-                )
-                .with_action_kind(TransformActionKind::Drop)
-                .with_backend_requirement_id("progenitor.operation.request_body_supported_content_type")
-                .with_backend_requirement("backend cannot generate operations whose request body has no supported media type")
-                .with_before_after("operation requestBody unsupported", "operation removed")
-                .with_before_after_json(json!({ "operation": "requestBody unsupported" }), json!(null)),
-            ],
-            Self::RewriteDeepObjectQueryParams(action) => action.audit_entries(),
-            Self::DropOptionalObjectQueryParams(action) => action.audit_entries(),
-            Self::DropSchemalessRequestBody { target, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    format!("operation {} requestBody", target.label()),
-                    "drop schemaless requestBody",
-                )
-                .with_target_pointer(format!("{}/requestBody", operation_target_pointer(target)))
-                .with_action_kind(TransformActionKind::Drop)
-                .with_backend_requirement_id("progenitor.request_body.schema_required")
-                .with_backend_requirement("backend requires request body content to declare schemas")
-                .with_before_after("requestBody content without schema", "requestBody removed")
-                .with_before_after_json(json!({ "requestBody": "schemaless" }), json!(null)),
-            ],
-            Self::DropEnumConstraint { target, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    target.clone(),
-                    "drop enum constraint with colliding generated identifiers",
-                )
-                .with_action_kind(TransformActionKind::Drop)
-                .with_backend_requirement_id("progenitor.schema.unique_sanitized_enum_variants")
-                .with_backend_requirement("backend requires unique sanitized Rust enum variants")
-                .with_before_after("constrained enum", "free-form string/schema")
-                .with_before_after_json(json!({ "enum": "constrained" }), json!({ "enum": "removed" })),
-            ],
-            Self::ReplaceUnsupportedSchemaType { target, .. } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    target.clone(),
-                    "replace unsupported schema type with fallback",
-                )
-                .with_action_kind(TransformActionKind::Replace)
-                .with_backend_requirement_id("progenitor.schema.supported_types")
-                .with_backend_requirement("backend supports a limited set of OpenAPI schema types")
-                .with_before_after("unsupported schema type", "fallback schema")
-                .with_before_after_json(json!({ "type": "unsupported" }), json!({ "schema": "fallback" })),
-            ],
-            Self::DropCollidingProperties {
-                target, dropped, ..
-            } => vec![
-                TransformAuditEntry::new(
-                    "typed_normalization",
-                    report.code,
-                    target.clone(),
-                    format!("drop colliding properties: {}", dropped.join(", ")),
-                )
-                .with_action_kind(TransformActionKind::Drop)
-                .with_backend_requirement_id("progenitor.schema.unique_sanitized_object_properties")
-                .with_backend_requirement("backend requires unique sanitized Rust field names")
-                .with_before_after("colliding object properties", "kept first property; removed collisions")
-                .with_before_after_json(json!({ "properties": "colliding" }), json!({ "dropped": dropped })),
-            ],
-        }
-    }
-}
-
-fn content_target_label(target: &ContentTarget) -> String {
-    match target {
-        ContentTarget::ComponentRequestBody(name) => format!("component requestBody {name}"),
-        ContentTarget::ComponentResponse(name) => format!("component response {name}"),
-        ContentTarget::OperationRequestBody(operation) => {
-            format!("operation {} requestBody", operation.label())
-        }
-        ContentTarget::OperationResponse { operation, status } => {
-            format!("operation {} response {status}", operation.label())
-        }
-        ContentTarget::OperationDefaultResponse(operation) => {
-            format!("operation {} default response", operation.label())
-        }
-    }
-}
-
-fn operation_target_pointer(target: &OperationTarget) -> String {
-    format!(
-        "/paths/{}/{}",
-        json_pointer_escape(&target.path),
-        target.method.to_ascii_lowercase()
-    )
-}
-
-fn content_target_pointer(target: &ContentTarget) -> String {
-    match target {
-        ContentTarget::ComponentRequestBody(name) => {
-            format!("/components/requestBodies/{}", json_pointer_escape(name))
-        }
-        ContentTarget::ComponentResponse(name) => {
-            format!("/components/responses/{}", json_pointer_escape(name))
-        }
-        ContentTarget::OperationRequestBody(operation) => {
-            format!("{}/requestBody", operation_target_pointer(operation))
-        }
-        ContentTarget::OperationResponse { operation, status } => format!(
-            "{}/responses/{}",
-            operation_target_pointer(operation),
-            json_pointer_escape(status)
-        ),
-        ContentTarget::OperationDefaultResponse(operation) => {
-            format!("{}/responses/default", operation_target_pointer(operation))
-        }
-    }
-}
-
-fn summarize_targets(targets: &[String]) -> String {
-    const MAX_INLINE_TARGETS: usize = 4;
-    if targets.len() <= MAX_INLINE_TARGETS {
-        targets.join(", ")
-    } else {
-        format!(
-            "{} and {} more",
-            targets[..MAX_INLINE_TARGETS].join(", "),
-            targets.len() - MAX_INLINE_TARGETS
-        )
-    }
-}
-
 fn propose_component_transforms(
     spec: &OpenAPI,
     plan: &mut CompatibilityTransformPlan,
@@ -759,7 +166,7 @@ fn propose_component_transforms(
     };
     for (name, schema) in &components.schemas {
         if let ReferenceOr::Item(schema) = schema {
-            propose_schema_transforms(
+            schemas::propose_schema_transforms(
                 schema,
                 &format!("component schema {name}"),
                 plan,
@@ -870,18 +277,17 @@ fn propose_operation_transforms(
                             backend_capabilities,
                         );
                         if !backend_capabilities.request_bodies.accepts_schemaless
-                            && request_body_has_schemaless_content(request_body)
+                            && request_bodies::has_schemaless_content(request_body)
                         {
-                            plan.push(CompatibilityTransformAction::DropSchemalessRequestBody {
-                                target: target.clone(),
-                                report: schemaless_request_body_report(&op_name),
-                            });
+                            plan.push(CompatibilityTransformAction::DropSchemalessRequestBody(
+                                request_bodies::SchemalessAction::new(target.clone(), &op_name),
+                            ));
                         }
                     }
                 }
                 ReferenceOr::Reference { reference } => {
                     if let Some(content) = component_request_body_content(spec, reference) {
-                        if content_has_only_unsupported_request_types(content, backend_capabilities)
+                        if request_bodies::has_only_unsupported_types(content, backend_capabilities)
                         {
                             aggregate.unsupported_request_body_ops.push(
                                 OperationRequestBodyDropTarget {
@@ -1010,7 +416,7 @@ fn propose_parameter_transforms(
             if let openapiv3::ParameterSchemaOrContent::Schema(ReferenceOr::Item(schema)) =
                 &param_data.format
             {
-                propose_schema_transforms(
+                schemas::propose_schema_transforms(
                     schema,
                     &format!("{op_name}.parameters[{i}].{}", param_data.name),
                     plan,
@@ -1036,7 +442,7 @@ fn propose_content_schema_transforms(
             continue;
         }
         if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_ref() {
-            propose_schema_transforms(
+            schemas::propose_schema_transforms(
                 schema,
                 &format!("{op_name}.{segment}.{mime}"),
                 plan,
@@ -1068,7 +474,7 @@ fn propose_request_content_transform(
     aggregate: &mut CompatibilityAggregateProposal,
     backend_capabilities: &BackendCapabilities,
 ) -> ProposedContentTransform {
-    if content_has_only_unsupported_request_types(content, backend_capabilities) {
+    if request_bodies::has_only_unsupported_types(content, backend_capabilities) {
         if let ContentTarget::OperationRequestBody(operation) = &target {
             aggregate
                 .unsupported_request_body_ops
@@ -1077,10 +483,9 @@ fn propose_request_content_transform(
                     op_name: op_name.to_string(),
                 });
         } else {
-            plan.push(CompatibilityTransformAction::DropUnsupportedRequestBody {
-                report: unsupported_request_body_report(op_name, &target, content),
-                target,
-            });
+            plan.push(CompatibilityTransformAction::DropUnsupportedRequestBody(
+                request_bodies::UnsupportedAction::new(op_name, target, content),
+            ));
         }
         return ProposedContentTransform {
             drops_body: true,
@@ -1088,12 +493,11 @@ fn propose_request_content_transform(
         };
     }
 
-    if let Some((kept, dropped)) = propose_request_content_pruning(content, backend_capabilities) {
-        plan.push(CompatibilityTransformAction::PruneContentTypes {
-            report: content_types_report(op_name, &target, &kept, &dropped),
-            target,
-            kept: kept.clone(),
-        });
+    if let Some(action) =
+        content_types::propose_request(content, op_name, target, backend_capabilities)
+    {
+        let kept = action.kept().to_string();
+        plan.push(CompatibilityTransformAction::PruneContentTypes(action));
         return ProposedContentTransform {
             drops_body: false,
             kept: Some(kept),
@@ -1109,12 +513,11 @@ fn propose_response_content_transform(
     plan: &mut CompatibilityTransformPlan,
     backend_capabilities: &BackendCapabilities,
 ) -> Option<String> {
-    if let Some((kept, dropped)) = propose_response_content_pruning(content, backend_capabilities) {
-        plan.push(CompatibilityTransformAction::PruneContentTypes {
-            report: content_types_report(op_name, &target, &kept, &dropped),
-            target,
-            kept: kept.clone(),
-        });
+    if let Some(action) =
+        content_types::propose_response(content, op_name, target, backend_capabilities)
+    {
+        let kept = action.kept().to_string();
+        plan.push(CompatibilityTransformAction::PruneContentTypes(action));
         return Some(kept);
     }
     None
@@ -1124,84 +527,6 @@ fn propose_response_content_transform(
 struct ProposedContentTransform {
     drops_body: bool,
     kept: Option<String>,
-}
-
-fn content_types_report(
-    target_label: &str,
-    target: &ContentTarget,
-    kept: &str,
-    dropped: &[String],
-) -> ReportEntry {
-    rules::typed_warning(
-        typed::CONTENT_TYPES_PRUNED,
-        format!(
-            "normalized {target_label} — kept {kept}, dropped {}",
-            dropped.join(", ")
-        ),
-        Some(content_report_subject(target, target_label)),
-    )
-}
-
-fn unsupported_request_body_report(
-    target_label: &str,
-    target: &ContentTarget,
-    content: &indexmap::IndexMap<String, MediaType>,
-) -> ReportEntry {
-    let dropped = content.keys().cloned().collect::<Vec<_>>().join(", ");
-    rules::typed_warning(
-        typed::UNSUPPORTED_REQUEST_BODIES_DROPPED,
-        format!(
-            "normalized {target_label} — dropped requestBody with only unsupported content types: {dropped}"
-        ),
-        Some(content_report_subject(target, target_label)),
-    )
-}
-
-fn unsupported_request_body_operations_report(op_names: &[String]) -> ReportEntry {
-    rules::typed_warning(
-        typed::UNSUPPORTED_REQUEST_BODIES_DROPPED,
-        format!(
-            "dropped {} operations with progenitor-unsupported request body: {}",
-            op_names.len(),
-            op_names.join(", ")
-        ),
-        None,
-    )
-}
-
-fn schemaless_request_body_report(op_name: &str) -> ReportEntry {
-    rules::typed_warning(
-        typed::SCHEMALESS_REQUEST_BODY_DROPPED,
-        format!("normalized {op_name} — dropped requestBody (no schema specified)"),
-        Some(ReportSubject::operation(op_name)),
-    )
-}
-
-fn enum_constraint_report(path: &str, colliding: &str) -> ReportEntry {
-    rules::typed_warning(
-        typed::ENUM_CONSTRAINT_DROPPED,
-        format!("normalized {path} — dropped enum constraint (values [{colliding}] collide on Rust identifier sanitization); field is now a free-form string preserving wire format"),
-        Some(ReportSubject::schema(path)),
-    )
-}
-
-fn unsupported_schema_type_report(path: &str, typ: &str) -> ReportEntry {
-    rules::typed_warning(
-        typed::UNSUPPORTED_SCHEMA_TYPE_REPLACED,
-        format!("normalized {path} — replaced unsupported type '{typ}' with fallback"),
-        Some(ReportSubject::schema(path)),
-    )
-}
-
-fn colliding_properties_report(path: &str, kept: &str, dropped: &[String]) -> ReportEntry {
-    rules::typed_warning(
-        typed::PROPERTIES_COLLIDING_DROPPED,
-        format!(
-            "normalized {path} — kept property '{kept}', dropped colliding [{}] (Rust identifier sanitization collision); wire format preserved for kept field",
-            dropped.join(", ")
-        ),
-        Some(ReportSubject::schema(path)),
-    )
 }
 
 fn content_report_subject(target: &ContentTarget, target_label: &str) -> ReportSubject {
@@ -1223,7 +548,7 @@ fn component_object_schema_refs(spec: &OpenAPI) -> HashSet<String> {
 
     for (name, schema) in &components.schemas {
         if let ReferenceOr::Item(schema) = schema {
-            if schema_is_object_shaped(schema) {
+            if schemas::schema_is_object_shaped(schema) {
                 refs.insert(format!("#/components/schemas/{name}"));
             }
         }
@@ -1243,20 +568,6 @@ fn component_request_body_content<'a>(
     Some(&request_body.content)
 }
 
-fn schema_is_object_shaped(schema: &Schema) -> bool {
-    match &schema.schema_kind {
-        SchemaKind::Type(Type::Object(_)) => true,
-        SchemaKind::Any(any) => !any.properties.is_empty(),
-        SchemaKind::AllOf { all_of } | SchemaKind::OneOf { one_of: all_of } => all_of.iter().any(
-            |schema| matches!(schema, ReferenceOr::Item(schema) if schema_is_object_shaped(schema)),
-        ),
-        SchemaKind::AnyOf { any_of } => any_of.iter().any(
-            |schema| matches!(schema, ReferenceOr::Item(schema) if schema_is_object_shaped(schema)),
-        ),
-        _ => false,
-    }
-}
-
 fn optional_object_query_param_name(
     param: &openapiv3::Parameter,
     object_schema_refs: &HashSet<String>,
@@ -1272,242 +583,10 @@ fn optional_object_query_param_name(
     };
 
     let is_object = match schema {
-        ReferenceOr::Item(schema) => schema_is_object_shaped(schema),
+        ReferenceOr::Item(schema) => schemas::schema_is_object_shaped(schema),
         ReferenceOr::Reference { reference } => object_schema_refs.contains(reference),
     };
     is_object.then(|| parameter_data.name.clone())
-}
-
-#[allow(clippy::collapsible_match)]
-fn propose_schema_transforms(
-    schema: &Schema,
-    path: &str,
-    plan: &mut CompatibilityTransformPlan,
-    aggregate: &mut CompatibilityAggregateProposal,
-    backend_capabilities: &BackendCapabilities,
-) {
-    if schema_defaults::should_propose(schema, backend_capabilities) {
-        aggregate.schema_defaults.push(path.to_string());
-    }
-
-    match &schema.schema_kind {
-        SchemaKind::Type(Type::String(string)) => {
-            if backend_capabilities
-                .schemas
-                .requires_unique_sanitized_enum_variants
-            {
-                if let Some(colliding) = string_enum_collision(&string.enumeration) {
-                    plan.push(CompatibilityTransformAction::DropEnumConstraint {
-                        target: path.to_string(),
-                        report: enum_constraint_report(path, &colliding),
-                    });
-                }
-            }
-        }
-        SchemaKind::Type(Type::Object(object)) => {
-            propose_object_schema_transforms(object, path, plan, aggregate, backend_capabilities);
-        }
-        SchemaKind::Type(Type::Array(array)) => {
-            if let Some(items) = array.items.as_ref() {
-                propose_boxed_schema_ref_transforms(
-                    items,
-                    &format!("{path}.items"),
-                    plan,
-                    aggregate,
-                    backend_capabilities,
-                );
-            }
-        }
-        SchemaKind::OneOf { one_of } => propose_schema_ref_transforms(
-            one_of,
-            &format!("{path}.oneOf"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        ),
-        SchemaKind::AllOf { all_of } => propose_schema_ref_transforms(
-            all_of,
-            &format!("{path}.allOf"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        ),
-        SchemaKind::AnyOf { any_of } => propose_schema_ref_transforms(
-            any_of,
-            &format!("{path}.anyOf"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        ),
-        SchemaKind::Not { not } => propose_reference_or_schema_transforms(
-            not.as_ref(),
-            &format!("{path}.not"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        ),
-        SchemaKind::Any(any) => {
-            if let Some(typ) = any.typ.as_ref() {
-                if !is_supported_schema_type(typ, backend_capabilities) {
-                    plan.push(CompatibilityTransformAction::ReplaceUnsupportedSchemaType {
-                        target: path.to_string(),
-                        report: unsupported_schema_type_report(path, typ),
-                    });
-                }
-            }
-            if backend_capabilities
-                .schemas
-                .requires_unique_sanitized_enum_variants
-            {
-                if let Some(colliding) = json_enum_collision(&any.enumeration) {
-                    plan.push(CompatibilityTransformAction::DropEnumConstraint {
-                        target: path.to_string(),
-                        report: enum_constraint_report(path, &colliding),
-                    });
-                }
-            }
-            let dropped = if backend_capabilities
-                .schemas
-                .requires_unique_sanitized_object_properties
-            {
-                propose_colliding_property_actions(&any.properties, path, plan)
-            } else {
-                HashSet::new()
-            };
-            for (name, property) in &any.properties {
-                if dropped.contains(name) {
-                    continue;
-                }
-                propose_boxed_schema_ref_transforms(
-                    property,
-                    &format!("{path}.properties.{name}"),
-                    plan,
-                    aggregate,
-                    backend_capabilities,
-                );
-            }
-            if let Some(items) = any.items.as_ref() {
-                propose_boxed_schema_ref_transforms(
-                    items,
-                    &format!("{path}.items"),
-                    plan,
-                    aggregate,
-                    backend_capabilities,
-                );
-            }
-            if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
-                any.additional_properties.as_ref()
-            {
-                propose_reference_or_schema_transforms(
-                    schema.as_ref(),
-                    &format!("{path}.additionalProperties"),
-                    plan,
-                    aggregate,
-                    backend_capabilities,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn propose_object_schema_transforms(
-    object: &ObjectType,
-    path: &str,
-    plan: &mut CompatibilityTransformPlan,
-    aggregate: &mut CompatibilityAggregateProposal,
-    backend_capabilities: &BackendCapabilities,
-) {
-    let dropped = if backend_capabilities
-        .schemas
-        .requires_unique_sanitized_object_properties
-    {
-        propose_colliding_property_actions(&object.properties, path, plan)
-    } else {
-        HashSet::new()
-    };
-    for (name, property) in &object.properties {
-        if dropped.contains(name) {
-            continue;
-        }
-        propose_boxed_schema_ref_transforms(
-            property,
-            &format!("{path}.properties.{name}"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        );
-    }
-    if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
-        object.additional_properties.as_ref()
-    {
-        propose_reference_or_schema_transforms(
-            schema.as_ref(),
-            &format!("{path}.additionalProperties"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        );
-    }
-}
-
-fn propose_schema_ref_transforms(
-    refs: &[ReferenceOr<Schema>],
-    path: &str,
-    plan: &mut CompatibilityTransformPlan,
-    aggregate: &mut CompatibilityAggregateProposal,
-    backend_capabilities: &BackendCapabilities,
-) {
-    for (i, schema) in refs.iter().enumerate() {
-        propose_reference_or_schema_transforms(
-            schema,
-            &format!("{path}[{i}]"),
-            plan,
-            aggregate,
-            backend_capabilities,
-        );
-    }
-}
-
-fn propose_reference_or_schema_transforms(
-    schema: &ReferenceOr<Schema>,
-    path: &str,
-    plan: &mut CompatibilityTransformPlan,
-    aggregate: &mut CompatibilityAggregateProposal,
-    backend_capabilities: &BackendCapabilities,
-) {
-    if let ReferenceOr::Item(schema) = schema {
-        propose_schema_transforms(schema, path, plan, aggregate, backend_capabilities);
-    }
-}
-
-fn propose_boxed_schema_ref_transforms(
-    schema: &ReferenceOr<Box<Schema>>,
-    path: &str,
-    plan: &mut CompatibilityTransformPlan,
-    aggregate: &mut CompatibilityAggregateProposal,
-    backend_capabilities: &BackendCapabilities,
-) {
-    if let ReferenceOr::Item(schema) = schema {
-        propose_schema_transforms(schema.as_ref(), path, plan, aggregate, backend_capabilities);
-    }
-}
-
-fn propose_colliding_property_actions<V>(
-    properties: &indexmap::IndexMap<String, V>,
-    path: &str,
-    plan: &mut CompatibilityTransformPlan,
-) -> HashSet<String> {
-    let mut dropped_names = HashSet::new();
-    for (kept, dropped) in colliding_properties(properties) {
-        dropped_names.extend(dropped.iter().cloned());
-        plan.push(CompatibilityTransformAction::DropCollidingProperties {
-            target: path.to_string(),
-            report: colliding_properties_report(path, &kept, &dropped),
-            dropped,
-        });
-    }
-    dropped_names
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1595,7 +674,7 @@ fn normalize_operation(
             if let openapiv3::ParameterSchemaOrContent::Schema(ReferenceOr::Item(schema)) =
                 &mut param_data.format
             {
-                let _ = normalize_schema(
+                let _ = schemas::normalize_schema(
                     schema,
                     &format!("{op_name}.parameters[{i}].{}", param_data.name),
                     warnings,
@@ -1635,7 +714,7 @@ fn normalize_operation(
                 .push(op_name.to_string());
             return true;
         }
-        if request_body_has_schemaless_content(request_body) {
+        if request_bodies::has_schemaless_content(request_body) {
             if let Some(report) = approved_transforms.schemaless_request_body_for(&operation_target)
             {
                 operation.request_body = None;
@@ -1694,27 +773,22 @@ fn normalize_request_body(
     approved_transforms: &CompatibilityTransformPlan,
     content_target: &ContentTarget,
 ) -> bool {
-    if let Some(CompatibilityTransformAction::PruneContentTypes { kept, report, .. }) =
+    if let Some(CompatibilityTransformAction::PruneContentTypes(action)) =
         approved_transforms.content_for(content_target)
     {
-        apply_content_pruning(&mut request_body.content, kept);
-        warnings.push(report.clone());
+        action.apply_approved(&mut request_body.content, warnings);
     }
-    if let Some(CompatibilityTransformAction::DropUnsupportedRequestBody { report, .. }) =
+    if let Some(CompatibilityTransformAction::DropUnsupportedRequestBody(action)) =
         approved_transforms.unsupported_request_body_for(content_target)
     {
-        request_body.content.clear();
-        if matches!(content_target, ContentTarget::ComponentRequestBody(_)) {
-            warnings.push(report.clone());
-        }
-        return true;
+        return action.apply_approved(request_body, content_target, warnings);
     }
     if request_body.content.is_empty() {
         return false;
     }
     for (mime, media_type) in request_body.content.iter_mut() {
         if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
-            let _ = normalize_schema(
+            let _ = schemas::normalize_schema(
                 schema,
                 &format!("{op_name}.requestBody.{mime}"),
                 warnings,
@@ -1734,15 +808,14 @@ fn normalize_response(
     approved_transforms: &CompatibilityTransformPlan,
     content_target: &ContentTarget,
 ) {
-    if let Some(CompatibilityTransformAction::PruneContentTypes { kept, report, .. }) =
+    if let Some(CompatibilityTransformAction::PruneContentTypes(action)) =
         approved_transforms.content_for(content_target)
     {
-        apply_content_pruning(&mut response.content, kept);
-        warnings.push(report.clone());
+        action.apply_approved(&mut response.content, warnings);
     }
     for (mime, media_type) in response.content.iter_mut() {
         if let Some(ReferenceOr::Item(schema)) = media_type.schema.as_mut() {
-            let _ = normalize_schema(
+            let _ = schemas::normalize_schema(
                 schema,
                 &format!("{op_name}.response.{mime}"),
                 warnings,
@@ -1751,416 +824,6 @@ fn normalize_response(
             );
         }
     }
-}
-
-#[allow(clippy::collapsible_match)]
-fn normalize_schema(
-    schema: &mut Schema,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    if schema_defaults::apply(schema, approved_transforms.should_drop_schema_default(path)) {
-        stats.dropped_schema_defaults.push(path.to_string());
-    }
-
-    match &mut schema.schema_kind {
-        SchemaKind::Type(Type::String(string)) => {
-            if let Some(report) = approved_transforms.enum_constraint_for(path) {
-                warnings.push(report.clone());
-                string.enumeration.clear();
-            }
-        }
-        SchemaKind::Type(Type::Object(object)) => {
-            normalize_object_schema(object, path, warnings, stats, approved_transforms)?
-        }
-        SchemaKind::Type(Type::Array(array)) => {
-            normalize_array_schema(array, path, warnings, stats, approved_transforms)?
-        }
-        SchemaKind::OneOf { one_of } => normalize_schema_refs(
-            one_of,
-            &format!("{path}.oneOf"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?,
-        SchemaKind::AllOf { all_of } => normalize_schema_refs(
-            all_of,
-            &format!("{path}.allOf"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?,
-        SchemaKind::AnyOf { any_of } => normalize_schema_refs(
-            any_of,
-            &format!("{path}.anyOf"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?,
-        SchemaKind::Not { not } => normalize_boxed_reference_or_schema(
-            not,
-            &format!("{path}.not"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?,
-        SchemaKind::Any(any) => {
-            if let Some(report) = approved_transforms.unsupported_schema_type_for(path) {
-                any.typ = None;
-                warnings.push(report.clone());
-            }
-            if let Some(report) = approved_transforms.enum_constraint_for(path) {
-                warnings.push(report.clone());
-                any.enumeration.clear();
-            }
-            drop_colliding_properties(
-                &mut any.properties,
-                &mut any.required,
-                path,
-                warnings,
-                approved_transforms,
-            );
-            for (name, property) in any.properties.iter_mut() {
-                normalize_boxed_schema_ref(
-                    property,
-                    &format!("{path}.properties.{name}"),
-                    warnings,
-                    stats,
-                    approved_transforms,
-                )?;
-            }
-            if let Some(items) = any.items.as_mut() {
-                normalize_boxed_schema_ref(
-                    items,
-                    &format!("{path}.items"),
-                    warnings,
-                    stats,
-                    approved_transforms,
-                )?;
-            }
-            if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
-                any.additional_properties.as_mut()
-            {
-                normalize_boxed_reference_or_schema(
-                    schema,
-                    &format!("{path}.additionalProperties"),
-                    warnings,
-                    stats,
-                    approved_transforms,
-                )?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn normalize_object_schema(
-    object: &mut ObjectType,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    drop_colliding_properties(
-        &mut object.properties,
-        &mut object.required,
-        path,
-        warnings,
-        approved_transforms,
-    );
-    for (name, property) in object.properties.iter_mut() {
-        normalize_boxed_schema_ref(
-            property,
-            &format!("{path}.properties.{name}"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?;
-    }
-    if let Some(openapiv3::AdditionalProperties::Schema(schema)) =
-        object.additional_properties.as_mut()
-    {
-        normalize_boxed_reference_or_schema(
-            schema,
-            &format!("{path}.additionalProperties"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?;
-    }
-    Ok(())
-}
-
-fn normalize_array_schema(
-    array: &mut ArrayType,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    if let Some(items) = array.items.as_mut() {
-        normalize_boxed_schema_ref(
-            items,
-            &format!("{path}.items"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?;
-    }
-    Ok(())
-}
-
-fn normalize_schema_refs(
-    refs: &mut [ReferenceOr<Schema>],
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    for (i, schema) in refs.iter_mut().enumerate() {
-        normalize_schema_ref(
-            schema,
-            &format!("{path}[{i}]"),
-            warnings,
-            stats,
-            approved_transforms,
-        )?;
-    }
-    Ok(())
-}
-
-fn normalize_schema_ref(
-    schema: &mut ReferenceOr<Schema>,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    if let ReferenceOr::Item(schema) = schema {
-        normalize_schema(schema, path, warnings, stats, approved_transforms)?;
-    }
-    Ok(())
-}
-
-fn normalize_boxed_schema_ref(
-    schema: &mut ReferenceOr<Box<Schema>>,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    if let ReferenceOr::Item(schema) = schema {
-        normalize_schema(schema.as_mut(), path, warnings, stats, approved_transforms)?;
-    }
-    Ok(())
-}
-
-fn normalize_boxed_reference_or_schema(
-    schema: &mut Box<ReferenceOr<Schema>>,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    stats: &mut NormalizeStats,
-    approved_transforms: &CompatibilityTransformPlan,
-) -> Result<()> {
-    normalize_schema_ref(schema.as_mut(), path, warnings, stats, approved_transforms)
-}
-
-fn is_supported_schema_type(typ: &str, backend_capabilities: &BackendCapabilities) -> bool {
-    backend_capabilities.schemas.supported_types.contains(&typ)
-}
-
-fn drop_colliding_properties<V>(
-    properties: &mut indexmap::IndexMap<String, V>,
-    required: &mut Vec<String>,
-    path: &str,
-    warnings: &mut Vec<ReportEntry>,
-    approved_transforms: &CompatibilityTransformPlan,
-) {
-    let mut to_drop: Vec<String> = Vec::new();
-    for action in approved_transforms.colliding_properties_for(path) {
-        if let CompatibilityTransformAction::DropCollidingProperties {
-            dropped, report, ..
-        } = action
-        {
-            warnings.push(report.clone());
-            to_drop.extend(dropped.iter().cloned());
-        }
-    }
-    for name in &to_drop {
-        properties.shift_remove(name);
-    }
-    required.retain(|name| !to_drop.contains(name));
-}
-
-fn colliding_properties<V>(
-    properties: &indexmap::IndexMap<String, V>,
-) -> Vec<(String, Vec<String>)> {
-    let mut by_ident: HashMap<String, Vec<String>> = HashMap::new();
-    for name in properties.keys() {
-        by_ident
-            .entry(enum_identifier_form(name))
-            .or_default()
-            .push(name.clone());
-    }
-    by_ident
-        .into_values()
-        .filter_map(|names| {
-            (names.len() > 1).then(|| {
-                let kept = names[0].clone();
-                let dropped = names.into_iter().skip(1).collect();
-                (kept, dropped)
-            })
-        })
-        .collect()
-}
-
-fn string_enum_collision(values: &[Option<String>]) -> Option<String> {
-    let strings: Vec<&str> = values.iter().filter_map(Option::as_deref).collect();
-    find_enum_collision(strings)
-}
-
-fn json_enum_collision(values: &[serde_json::Value]) -> Option<String> {
-    let strings: Vec<&str> = values
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect();
-    find_enum_collision(strings)
-}
-
-fn find_enum_collision(strings: Vec<&str>) -> Option<String> {
-    let mut by_ident: HashMap<String, Vec<&str>> = HashMap::new();
-    for value in strings {
-        by_ident
-            .entry(enum_identifier_form(value))
-            .or_default()
-            .push(value);
-    }
-    by_ident
-        .into_values()
-        .find(|values| values.len() > 1)
-        .map(|values| values.join(", "))
-}
-
-fn enum_identifier_form(value: &str) -> String {
-    let mut out = String::new();
-    let mut previous_underscore = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            previous_underscore = false;
-        } else if !previous_underscore {
-            out.push('_');
-            previous_underscore = true;
-        }
-    }
-    if out.is_empty() {
-        return "_".to_string();
-    }
-    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        out.insert_str(0, "n_");
-    }
-    out
-}
-
-fn request_body_has_schemaless_content(request_body: &RequestBody) -> bool {
-    request_body
-        .content
-        .values()
-        .any(|media_type| media_type.schema.is_none())
-}
-
-fn propose_response_content_pruning(
-    content: &indexmap::IndexMap<String, MediaType>,
-    backend_capabilities: &BackendCapabilities,
-) -> Option<(String, Vec<String>)> {
-    if !backend_capabilities
-        .message_content
-        .requires_single_content_type_per_message
-        || content.len() <= 1
-    {
-        return None;
-    }
-
-    let kept = if content.contains_key(JSON_MIME) {
-        JSON_MIME.to_string()
-    } else {
-        content.keys().min().expect("content has entries").clone()
-    };
-    let dropped: Vec<String> = content
-        .keys()
-        .filter(|mime| *mime != &kept)
-        .cloned()
-        .collect();
-
-    Some((kept, dropped))
-}
-
-fn propose_request_content_pruning(
-    content: &indexmap::IndexMap<String, MediaType>,
-    backend_capabilities: &BackendCapabilities,
-) -> Option<(String, Vec<String>)> {
-    let supported: Vec<String> = content
-        .keys()
-        .filter(|mime| is_supported_request_mime(mime, backend_capabilities))
-        .cloned()
-        .collect();
-    if supported.is_empty() {
-        return None;
-    }
-    if supported.len() == content.len()
-        && (!backend_capabilities
-            .message_content
-            .requires_single_content_type_per_message
-            || content.len() <= 1)
-    {
-        return None;
-    }
-
-    let kept = if content.contains_key(JSON_MIME) && supported.iter().any(|mime| mime == JSON_MIME)
-    {
-        JSON_MIME.to_string()
-    } else {
-        supported
-            .into_iter()
-            .min()
-            .expect("supported content exists")
-    };
-    let dropped: Vec<String> = content
-        .keys()
-        .filter(|mime| *mime != &kept)
-        .cloned()
-        .collect();
-
-    Some((kept, dropped))
-}
-
-fn apply_content_pruning(content: &mut indexmap::IndexMap<String, MediaType>, kept: &str) {
-    let media_type = content
-        .get(kept)
-        .unwrap_or_else(|| panic!("approved content pruning target {kept} must exist"))
-        .clone();
-    content.clear();
-    content.insert(kept.to_string(), media_type);
-}
-
-fn content_has_only_unsupported_request_types(
-    content: &indexmap::IndexMap<String, MediaType>,
-    backend_capabilities: &BackendCapabilities,
-) -> bool {
-    !content.is_empty()
-        && content
-            .keys()
-            .all(|mime| !is_supported_request_mime(mime, backend_capabilities))
-}
-
-fn is_supported_request_mime(mime: &str, backend_capabilities: &BackendCapabilities) -> bool {
-    backend_capabilities
-        .request_bodies
-        .supported_content_types
-        .contains(&mime)
 }
 
 fn operation_name(method: &str, path: &str, operation: &Operation) -> String {

@@ -96,9 +96,10 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         spec_path: request.spec_path.clone(),
     });
 
+    let backend_capabilities = backend.capabilities();
     let load_options = request
         .load_options
-        .with_backend_capabilities(backend.capabilities());
+        .with_backend_capabilities(backend_capabilities.clone());
     let loaded = crate::spec::load_with_options(&request.spec_path, &load_options)?;
 
     for report in &loaded.reports {
@@ -131,7 +132,11 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         facts.auth_kind.clone(),
         api_name.clone(),
     );
-    let api_model = ApiModel::from_openapi(&loaded.api, manifest.auth_env_var.as_deref())?;
+    let api_model = ApiModel::from_openapi_with_direct_invocation(
+        &loaded.api,
+        manifest.auth_env_var.as_deref(),
+        &backend_capabilities.direct_invocation,
+    )?;
     let manifest = manifest.with_api_model(api_model);
 
     if let AuthKind::QueryApiKey { param_name } = &manifest.auth_kind {
@@ -153,7 +158,7 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         backend.name(),
         &api_output.diagnostics,
     ));
-    transform_plan.add_audits(runtime_generation_audits(&manifest));
+    transform_plan.add_audits(runtime_generation_audits(&manifest, &backend_capabilities));
     write_transform_plan(&request.output_path, &transform_plan)?;
 
     progress(GenerateProgress::RenderingWrapperCrate);
@@ -238,22 +243,24 @@ fn backend_diagnostic_audits(
                     action,
                 )
                 .with_action_kind(TransformActionKind::BackendSourceTransform)
-                .with_backend_requirement_id(format!(
-                    "{backend_name}.source_transform.{}",
-                    source_transform.name
-                ))
+                .with_backend_requirement_id(source_transform.requirement_id)
                 .with_backend_requirement(format!(
-                    "requiredness: {}; {}; postcondition: {}; upstream assumption: {}; source shape: {}",
+                    "requiredness: {}; {}; postcondition: {}; upstream assumption: {}; source shape: {}; capability: {}; retirement: {}",
                     source_transform.required.as_str(),
                     source_transform.precondition,
                     source_transform.postcondition,
                     source_transform.upstream_assumption,
-                    source_transform.upstream_version
+                    source_transform.upstream_version,
+                    source_transform.capability_link,
+                    source_transform.retirement_condition
                 ))
                 .with_before_after(before.clone(), after.clone())
                 .with_before_after_json(
                     json!({
                         "required": source_transform.required.as_str(),
+                        "requirement_id": source_transform.requirement_id,
+                        "capability_link": source_transform.capability_link,
+                        "retirement_condition": source_transform.retirement_condition,
                         "precondition": source_transform.precondition,
                         "postcondition": source_transform.postcondition,
                         "matched": source_transform.replacement_count > 0,
@@ -261,6 +268,9 @@ fn backend_diagnostic_audits(
                     json!({
                         "status": source_transform.status.as_str(),
                         "required": source_transform.required.as_str(),
+                        "requirement_id": source_transform.requirement_id,
+                        "capability_link": source_transform.capability_link,
+                        "retirement_condition": source_transform.retirement_condition,
                         "postcondition": source_transform.postcondition,
                         "changed": source_transform.changed,
                         "replacement_count": source_transform.replacement_count,
@@ -272,7 +282,10 @@ fn backend_diagnostic_audits(
         .collect()
 }
 
-fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEntry> {
+fn runtime_generation_audits(
+    manifest: &WrapperManifest,
+    capabilities: &crate::backend::BackendCapabilities,
+) -> Vec<TransformAuditEntry> {
     let mut audits = vec![TransformAuditEntry::new(
         "runtime_generation",
         "runtime.mcp_invocation.direct_http",
@@ -280,10 +293,8 @@ fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEn
         "route MCP tool calls through the direct HTTP adapter",
     )
     .with_action_kind(TransformActionKind::RuntimeDirectInvocation)
-    .with_backend_requirement_id("mcp.direct_http.invocation")
-    .with_backend_requirement(
-        "MCP runtime uses direct HTTP invocation from generated operation method/path metadata",
-    )
+    .with_backend_requirement_id(capabilities.direct_invocation.requirement_id)
+    .with_backend_requirement(capabilities.direct_invocation.invocation_requirement)
     .with_before_after(
         "no explicit runtime-generation direct invocation audit",
         manifest.mcp_runtime.invocation_adapter_kind.as_str(),
@@ -310,8 +321,15 @@ fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEn
         )
         .with_action_kind(TransformActionKind::RuntimeDirectInvocation)
         .with_backend_requirement_id("mcp.direct_http.supported_operation_shape")
-        .with_backend_requirement("MCP direct HTTP invocation currently supports path/query schema parameters and JSON request bodies")
-        .with_before_after("operation selected for generation", "operation excluded from MCP tools/list")
+        .with_backend_requirement(
+            capabilities
+                .direct_invocation
+                .supported_operation_requirement,
+        )
+        .with_before_after(
+            "operation selected for generation",
+            "operation excluded from MCP tools/list",
+        )
         .with_before_after_json(
             json!({
                 "operation_id": operation.operation_id,
@@ -425,6 +443,29 @@ paths:
             properties:
               name:
                 type: string
+      responses:
+        '200':
+          description: ok
+"#;
+
+    const QUERY_ARRAY_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Direct Invocation Capability Fixture
+  version: "1.0.0"
+servers:
+  - url: https://example.test
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: tags
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
       responses:
         '200':
           description: ok
@@ -615,6 +656,46 @@ paths:
     }
 
     #[test]
+    fn generate_uses_backend_capabilities_for_direct_invocation_modeling() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = temp.path().join("spec.yaml");
+        std::fs::write(&spec_path, QUERY_ARRAY_SPEC).expect("write spec");
+        let output_path = temp.path().join("out");
+        let mut capabilities = BackendCapabilities::progenitor();
+        capabilities
+            .direct_invocation
+            .parameters
+            .supports_query_arrays = false;
+        let backend = FakeBackend::with_capabilities(capabilities);
+
+        let result = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path,
+                bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
+                validate: false,
+                load_options: LoadOptions::default(),
+            },
+            &backend,
+            |_| {},
+        )
+        .expect("backend direct invocation capability marks operation unsupported");
+
+        assert!(result.transform_plan.audits.iter().any(|audit| {
+            audit.source_stage == "runtime_generation"
+                && audit.code == "runtime.mcp_invocation.unsupported_operation"
+                && audit.target == "GET /items"
+                && audit
+                    .after_json
+                    .as_ref()
+                    .and_then(|after| after.get("reason"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|reason| reason.contains("array parameter 'tags'"))
+        }));
+    }
+
+    #[test]
     fn generate_uses_backend_capabilities_during_spec_preparation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let spec_path = temp.path().join("spec.yaml");
@@ -708,6 +789,9 @@ paths:
             purpose: SourceTransformPurpose::ClapParserCompatibility,
             required: SourceTransformRequiredness::Conditional,
             status: SourceTransformStatus::Applied,
+            requirement_id: "fake.source_transform.fake_transform",
+            capability_link: "backend.fake.capability",
+            retirement_condition: "remove when fake backend no longer needs this transform",
             precondition: "fake precondition",
             postcondition: "fake postcondition",
             upstream_assumption: "fake upstream assumption",

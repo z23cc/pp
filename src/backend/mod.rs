@@ -27,6 +27,9 @@ pub(crate) struct SourceTransformDiagnostic {
     pub purpose: SourceTransformPurpose,
     pub required: SourceTransformRequiredness,
     pub status: SourceTransformStatus,
+    pub requirement_id: &'static str,
+    pub capability_link: &'static str,
+    pub retirement_condition: &'static str,
     pub precondition: &'static str,
     pub postcondition: &'static str,
     pub upstream_assumption: &'static str,
@@ -79,6 +82,7 @@ pub(crate) struct BackendCapabilities {
     pub message_content: MessageContentRequirements,
     pub parameters: ParameterRequirements,
     pub schemas: SchemaRequirements,
+    pub direct_invocation: DirectInvocationRequirements,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +111,42 @@ pub(crate) struct MessageContentRequirements {
 pub(crate) struct ParameterRequirements {
     pub supports_deep_object_query: bool,
     pub supports_optional_object_query: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectInvocationRequirements {
+    pub requirement_id: &'static str,
+    pub invocation_requirement: &'static str,
+    pub supported_operation_requirement: &'static str,
+    pub parameters: DirectInvocationParameterRequirements,
+    pub request_bodies: DirectInvocationRequestBodyRequirements,
+    pub auth: DirectInvocationAuthRequirements,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectInvocationParameterRequirements {
+    pub supported_locations: &'static [DirectInvocationParameterLocation],
+    pub primitive_schema_types: &'static [&'static str],
+    pub supports_query_arrays: bool,
+    pub supports_non_exploded_query_arrays: bool,
+    pub requires_form_query_style: bool,
+    pub requires_simple_path_style: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectInvocationParameterLocation {
+    Path,
+    Query,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectInvocationRequestBodyRequirements {
+    pub json_content_type: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectInvocationAuthRequirements {
+    pub uses_runtime_auth_context: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +185,30 @@ impl BackendCapabilities {
                 supports_defaults: false,
                 requires_unique_sanitized_enum_variants: true,
                 requires_unique_sanitized_object_properties: true,
+            },
+            direct_invocation: DirectInvocationRequirements {
+                requirement_id: "mcp.direct_http.invocation",
+                invocation_requirement:
+                    "MCP runtime uses direct HTTP invocation from generated operation method/path metadata",
+                supported_operation_requirement:
+                    "MCP direct HTTP invocation currently supports path/query schema parameters and JSON request bodies",
+                parameters: DirectInvocationParameterRequirements {
+                    supported_locations: &[
+                        DirectInvocationParameterLocation::Path,
+                        DirectInvocationParameterLocation::Query,
+                    ],
+                    primitive_schema_types: &["string", "integer", "number", "boolean"],
+                    supports_query_arrays: true,
+                    supports_non_exploded_query_arrays: false,
+                    requires_form_query_style: true,
+                    requires_simple_path_style: true,
+                },
+                request_bodies: DirectInvocationRequestBodyRequirements {
+                    json_content_type: "application/json",
+                },
+                auth: DirectInvocationAuthRequirements {
+                    uses_runtime_auth_context: true,
+                },
             },
         }
     }
@@ -222,6 +286,52 @@ mod tests {
                 .requires_unique_sanitized_object_properties
         );
         assert!(capabilities.responses.requires_relaxed_schemas);
+        assert_eq!(
+            capabilities.direct_invocation.requirement_id,
+            "mcp.direct_http.invocation"
+        );
+        assert_eq!(
+            capabilities
+                .direct_invocation
+                .parameters
+                .supported_locations,
+            &[
+                DirectInvocationParameterLocation::Path,
+                DirectInvocationParameterLocation::Query,
+            ]
+        );
+        assert_eq!(
+            capabilities
+                .direct_invocation
+                .parameters
+                .primitive_schema_types,
+            &["string", "integer", "number", "boolean"]
+        );
+        assert!(
+            capabilities
+                .direct_invocation
+                .parameters
+                .supports_query_arrays
+        );
+        assert!(
+            !capabilities
+                .direct_invocation
+                .parameters
+                .supports_non_exploded_query_arrays
+        );
+        assert_eq!(
+            capabilities
+                .direct_invocation
+                .request_bodies
+                .json_content_type,
+            "application/json"
+        );
+        assert!(
+            capabilities
+                .direct_invocation
+                .auth
+                .uses_runtime_auth_context
+        );
     }
 
     #[test]
@@ -233,6 +343,9 @@ mod tests {
             purpose: SourceTransformPurpose::ErrorDiagnostics,
             required: SourceTransformRequiredness::Required,
             status: SourceTransformStatus::Applied,
+            requirement_id: "example.source_transform.example",
+            capability_link: "backend.example.capability",
+            retirement_condition: "remove once upstream supports example behavior",
             precondition: "generated source contains fallback arm",
             postcondition: "fallback arm includes response body text",
             upstream_assumption: "upstream error hides body details",
@@ -250,6 +363,18 @@ mod tests {
             SourceTransformRequiredness::Required
         );
         assert_eq!(source_transform.status, SourceTransformStatus::Applied);
+        assert_eq!(
+            source_transform.requirement_id,
+            "example.source_transform.example"
+        );
+        assert_eq!(
+            source_transform.capability_link,
+            "backend.example.capability"
+        );
+        assert_eq!(
+            source_transform.retirement_condition,
+            "remove once upstream supports example behavior"
+        );
         assert_eq!(
             source_transform.precondition,
             "generated source contains fallback arm"

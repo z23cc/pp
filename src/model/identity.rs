@@ -1,3 +1,4 @@
+use crate::backend::DirectInvocationRequirements;
 use crate::spec::traversal;
 use anyhow::Result;
 use heck::ToSnakeCase;
@@ -5,7 +6,7 @@ use openapiv3::OpenAPI;
 use serde_json::{json, Map};
 use std::collections::BTreeMap;
 
-use super::arguments::{add_body, add_parameter, DIRECT_UNSUPPORTED_PREFIX};
+use super::arguments::{add_body, add_parameter, McpArgumentContext, DIRECT_UNSUPPORTED_PREFIX};
 use super::response::add_mcp_reserved_properties;
 use super::{McpTool, McpUnsupportedOperation};
 
@@ -14,12 +15,17 @@ pub(crate) struct McpModel {
     pub unsupported_operations: Vec<McpUnsupportedOperation>,
 }
 
-pub(crate) fn mcp_model(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<McpModel> {
+pub(crate) fn mcp_model(
+    api: &OpenAPI,
+    auth_env_var: Option<&str>,
+    capabilities: &DirectInvocationRequirements,
+) -> Result<McpModel> {
     let mut tools = Vec::new();
     let mut unsupported_operations = Vec::new();
     let mut ctx = McpBuildContext {
         auth_env_var,
         api,
+        capabilities,
         seen_tool_names: BTreeMap::new(),
     };
     for operation in traversal::operations(api) {
@@ -50,6 +56,7 @@ pub(crate) fn mcp_model(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Mcp
 struct McpBuildContext<'a> {
     auth_env_var: Option<&'a str>,
     api: &'a OpenAPI,
+    capabilities: &'a DirectInvocationRequirements,
     seen_tool_names: BTreeMap<String, String>,
 }
 
@@ -85,15 +92,19 @@ fn build_operation(
     let mut required = Vec::new();
     let mut args = Vec::new();
 
+    let arg_ctx = McpArgumentContext {
+        api: ctx.api,
+        capabilities: ctx.capabilities,
+        tool_name: &name,
+        operation_id: &raw_name,
+    };
     for parameter in path_params.iter().chain(operation.parameters.iter()) {
         add_parameter(
             parameter,
             &mut properties,
             &mut required,
             &mut args,
-            ctx.api,
-            &name,
-            &raw_name,
+            &arg_ctx,
         )?;
     }
     add_body(
@@ -101,9 +112,7 @@ fn build_operation(
         &mut properties,
         &mut required,
         &mut args,
-        ctx.api,
-        &name,
-        &raw_name,
+        &arg_ctx,
     )?;
     add_mcp_reserved_properties(&mut properties);
 

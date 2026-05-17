@@ -1,6 +1,6 @@
 use openapiv3::{Operation, StatusCode};
 
-use super::{operation_target_pointer, OperationTarget};
+use super::actions::{operation_target_pointer, OperationTarget};
 use crate::backend::BackendCapabilities;
 use crate::spec::normalization_rules::{self as rules, typed};
 use crate::spec::report::{ReportEntry, ReportSubject};
