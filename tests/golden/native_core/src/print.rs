@@ -1,0 +1,45 @@
+use crate::context::{Context, OutputMode};
+use crate::invoke::OperationInvocationResult;
+use anyhow::Result;
+use serde_json::{json, Value};
+
+pub fn emit_cli_success(context: &Context, result: OperationInvocationResult) -> Result<()> {
+    emit_value(context, result.value)
+}
+
+pub fn emit_cli_error(context: &Context, value: Value) -> Result<()> {
+    match &context.output {
+        OutputMode::Human => {
+            eprintln!("API request failed: {value:#?}");
+        }
+        OutputMode::Json(_) => {
+            println!("{}", serde_json::to_string(&cli_error_value(value))?);
+        }
+        OutputMode::Capture(captured) => {
+            captured.lock().expect("capture lock").value = Some(cli_error_value(value));
+        }
+    }
+    Ok(())
+}
+
+fn emit_value(context: &Context, value: Value) -> Result<()> {
+    match &context.output {
+        OutputMode::Human => println!("{value:#?}"),
+        OutputMode::Json(captured) => {
+            println!("{}", serde_json::to_string(&value)?);
+            captured.lock().expect("capture lock").value = Some(value);
+        }
+        OutputMode::Capture(captured) => {
+            captured.lock().expect("capture lock").value = Some(value);
+        }
+    }
+    Ok(())
+}
+
+fn cli_error_value(value: Value) -> Value {
+    if value.get("error").is_some() {
+        value
+    } else {
+        json!({ "error": value })
+    }
+}

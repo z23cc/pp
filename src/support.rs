@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
+use serde::Serialize;
+
 pub(crate) const SUPPORT_MATRIX_ID: &str = "pp.strict-openapi-support.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SupportStatus {
     Supported,
     Unsupported,
@@ -10,12 +13,55 @@ pub(crate) enum SupportStatus {
     Conditional,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct SupportFeature {
     pub id: &'static str,
     pub status: SupportStatus,
     pub summary: &'static str,
     pub diagnostic_codes: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SupportMatrixPayload {
+    pub matrix_id: &'static str,
+    pub features: &'static [SupportFeature],
+    pub diagnostic_codes: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SupportDiagnosticPayload {
+    pub matrix_id: &'static str,
+    pub diagnostic_code: &'static str,
+    pub features: Vec<SupportFeature>,
+}
+
+pub(crate) fn support_payload() -> SupportMatrixPayload {
+    SupportMatrixPayload {
+        matrix_id: SUPPORT_MATRIX_ID,
+        features: SUPPORT_FEATURES,
+        diagnostic_codes: ALL_DIAGNOSTIC_CODES,
+    }
+}
+
+pub(crate) fn feature_by_id(id: &str) -> Option<&'static SupportFeature> {
+    SUPPORT_FEATURES.iter().find(|feature| feature.id == id)
+}
+
+pub(crate) fn features_for_diagnostic(code: &str) -> Option<SupportDiagnosticPayload> {
+    let diagnostic_code = ALL_DIAGNOSTIC_CODES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == code)?;
+    let features = SUPPORT_FEATURES
+        .iter()
+        .copied()
+        .filter(|feature| feature.diagnostic_codes.contains(&diagnostic_code))
+        .collect();
+    Some(SupportDiagnosticPayload {
+        matrix_id: SUPPORT_MATRIX_ID,
+        diagnostic_code,
+        features,
+    })
 }
 
 pub(crate) mod diagnostics {
@@ -43,6 +89,24 @@ pub(crate) mod diagnostics {
             INVALID_TYPE,
             MISSING_SUPPORTED_TYPE,
         ];
+    }
+
+    pub(crate) mod spec {
+        pub(crate) const LOAD_ERROR: &str = "spec.load_error";
+
+        pub(crate) const ALL_CODES: &[&str] = &[LOAD_ERROR];
+    }
+
+    pub(crate) mod runtime {
+        pub(crate) const BASE_URL: &str = "runtime.base_url";
+
+        pub(crate) const ALL_CODES: &[&str] = &[BASE_URL];
+    }
+
+    pub(crate) mod model {
+        pub(crate) const GENERATION_ERROR: &str = "model.generation_error";
+
+        pub(crate) const ALL_CODES: &[&str] = &[GENERATION_ERROR];
     }
 
     pub(crate) mod direct_http {
@@ -112,6 +176,9 @@ pub(crate) mod diagnostics {
 }
 
 pub(crate) const ALL_DIAGNOSTIC_CODES: &[&str] = &[
+    diagnostics::spec::LOAD_ERROR,
+    diagnostics::runtime::BASE_URL,
+    diagnostics::model::GENERATION_ERROR,
     diagnostics::schema::BOOLEAN_OR_NON_OBJECT_SCHEMA,
     diagnostics::schema::REF_SIBLINGS,
     diagnostics::schema::KEYWORD_UNSUPPORTED,
@@ -149,6 +216,12 @@ pub(crate) const ALL_DIAGNOSTIC_CODES: &[&str] = &[
 
 pub(crate) const SUPPORT_FEATURES: &[SupportFeature] = &[
     SupportFeature {
+        id: "spec.load",
+        status: SupportStatus::Required,
+        summary: "Input specs must be readable, parseable OpenAPI documents before check or generation can continue.",
+        diagnostic_codes: &[diagnostics::spec::LOAD_ERROR],
+    },
+    SupportFeature {
         id: "openapi.3_0.strict_subset",
         status: SupportStatus::Supported,
         summary: "OpenAPI 3.0 documents are parsed strictly without repair or fallback generation.",
@@ -173,7 +246,13 @@ pub(crate) const SUPPORT_FEATURES: &[SupportFeature] = &[
         id: "runtime.base_url",
         status: SupportStatus::Required,
         summary: "Generated workspaces require an absolute server URL or --base-url override.",
-        diagnostic_codes: &[],
+        diagnostic_codes: &[diagnostics::runtime::BASE_URL],
+    },
+    SupportFeature {
+        id: "model.generation",
+        status: SupportStatus::Required,
+        summary: "The selected operation set must be modelable by pp's native direct HTTP generator.",
+        diagnostic_codes: &[diagnostics::model::GENERATION_ERROR],
     },
     SupportFeature {
         id: "parameters.path_query_primitives",
@@ -298,7 +377,11 @@ mod tests {
         for code in ALL_DIAGNOSTIC_CODES {
             assert!(codes.insert(*code), "duplicate diagnostic code {code}");
             assert!(
-                code.starts_with("schema.") || code.starts_with("direct_http."),
+                code.starts_with("spec.")
+                    || code.starts_with("runtime.")
+                    || code.starts_with("model.")
+                    || code.starts_with("schema.")
+                    || code.starts_with("direct_http."),
                 "diagnostic code {code} must be in an emitted namespace"
             );
         }
@@ -307,8 +390,11 @@ mod tests {
     #[test]
     fn all_grouped_diagnostic_codes_are_in_inventory() {
         let declared: BTreeSet<_> = ALL_DIAGNOSTIC_CODES.iter().copied().collect();
-        for code in diagnostics::schema::ALL_CODES
+        for code in diagnostics::spec::ALL_CODES
             .iter()
+            .chain(diagnostics::runtime::ALL_CODES.iter())
+            .chain(diagnostics::model::ALL_CODES.iter())
+            .chain(diagnostics::schema::ALL_CODES.iter())
             .chain(diagnostics::direct_http::ALL_CODES.iter())
         {
             assert!(

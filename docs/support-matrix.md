@@ -4,6 +4,16 @@
 
 Matrix ID: `pp.strict-openapi-support.v1`
 
+The same single source of truth is queryable from the CLI:
+
+```bash
+pp support --json
+pp support --feature openapi.3_1.safe_subset --json
+pp support --diagnostic direct_http.request_body_json_missing --json
+```
+
+Run `pp check <spec> --json` to evaluate a spec against this matrix without rendering a generated workspace. Check JSON includes `schema_version: "pp.check.v1"`, the matrix ID, facts/reports where available, diagnostics, and unsupported operations with direct diagnostic codes.
+
 ## Supported / required input contract
 
 - OpenAPI 3.0 strict subset: parsed and generated without source repair, fallback generation, or silent omission.
@@ -20,7 +30,8 @@ Unsupported features remain diagnostics; they are not compatibility rewrites. Cu
 
 User-facing unsupported messages are intentionally stable. Internally, unsupported paths also carry diagnostic codes from `src/support.rs`. The complete emitted inventory is `ALL_DIAGNOSTIC_CODES`, grouped under:
 
+- `spec.*` for spec load/check diagnostics.
+- `runtime.*` for runtime prerequisite diagnostics such as base URL selection.
+- `model.*` for generator model-building diagnostics.
 - `schema.*` for schema projection diagnostics.
 - `direct_http.*` for native direct HTTP model-support diagnostics.
-
-Generation requirements such as explicit `operationId` and absolute base URL are hard errors today; they are documented support requirements, not emitted diagnostic-code namespaces.

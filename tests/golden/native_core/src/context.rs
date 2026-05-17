@@ -66,7 +66,7 @@ impl Context {
         let client = builder.build()?;
         Ok(Self {
             client,
-            base_url: "{{ base_url }}".to_string(),
+            base_url: "https://example.test/api".to_string(),
             auth,
             output,
             debug_enabled: Self::debug_enabled_from_env(),
@@ -74,23 +74,23 @@ impl Context {
     }
 
     fn timeout_from_env() -> Result<Option<Duration>> {
-        let raw = match std::env::var("{{ timeout_env_var }}") {
+        let raw = match std::env::var("NATIVE_CORE_API_TIMEOUT_SECS") {
             Ok(raw) => raw,
             Err(std::env::VarError::NotPresent) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let seconds = raw
             .parse::<f64>()
-            .with_context(|| format!("{{ timeout_env_var }} must be a positive number of seconds"))?;
+            .with_context(|| format!("NATIVE_CORE_API_TIMEOUT_SECS must be a positive number of seconds"))?;
         if !seconds.is_finite() || seconds <= 0.0 {
-            anyhow::bail!("{{ timeout_env_var }} must be a positive number of seconds");
+            anyhow::bail!("NATIVE_CORE_API_TIMEOUT_SECS must be a positive number of seconds");
         }
         let timeout = Duration::try_from_secs_f64(seconds)
-            .with_context(|| format!("{{ timeout_env_var }} must be a positive number of seconds"))?;
+            .with_context(|| format!("NATIVE_CORE_API_TIMEOUT_SECS must be a positive number of seconds"))?;
         Ok(Some(timeout))
     }
 
     fn debug_enabled_from_env() -> bool {
-        std::env::var("{{ debug_env_var }}").as_deref() == Ok("1")
+        std::env::var("NATIVE_CORE_API_DEBUG").as_deref() == Ok("1")
     }
 }

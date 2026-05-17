@@ -16,7 +16,7 @@ pub enum DirectTypedInvocationStatus {
 impl DirectTypedInvocationStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Supported => {{ mcp_runtime.invocation_adapter.direct_typed_invocation_literal }},
+            Self::Supported => "supported",
         }
     }
 }
@@ -24,7 +24,7 @@ impl DirectTypedInvocationStatus {
 impl InvocationAdapterKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::DirectHttp => {{ mcp_runtime.invocation_adapter.kind_literal }},
+            Self::DirectHttp => "direct_http",
         }
     }
 }
@@ -40,12 +40,12 @@ pub struct InvocationAdapterContract {
 }
 
 pub const INVOCATION_ADAPTER_CONTRACT: InvocationAdapterContract = InvocationAdapterContract {
-    kind: {{ mcp_runtime.invocation_adapter.kind_rust_variant }},
-    reason: {{ mcp_runtime.invocation_adapter.reason_literal }},
-    direct_typed_invocation: {{ mcp_runtime.invocation_adapter.direct_typed_invocation_rust_variant }},
+    kind: InvocationAdapterKind::DirectHttp,
+    reason: "MCP tool calls use direct HTTP operation invocation from generated operation metadata",
+    direct_typed_invocation: DirectTypedInvocationStatus::Supported,
     preserves_cli_dispatch: false,
     uses_temp_json_body_files: false,
-    requires_generated_cli_command: {{ mcp_runtime.invocation_adapter.requires_generated_cli_command }},
+    requires_generated_cli_command: false,
 };
 pub const INVOCATION_ADAPTER_KIND: InvocationAdapterKind = INVOCATION_ADAPTER_CONTRACT.kind;
 pub const INVOCATION_ADAPTER_KIND_NAME: &str = INVOCATION_ADAPTER_KIND.as_str();
@@ -191,4 +191,3 @@ fn log_debug_request(
         ),
     }
 }
-

@@ -19,7 +19,9 @@ Purpose:
 - Inspect/slicing/pipeline/model/backend behavior.
 - Auth-selection coverage for fail-ambiguous defaults, removed auth-policy flag handling, and explicit `--auth-scheme` behavior.
 - Transform-plan audit JSON coverage, including structured audit fields and the generated native direct HTTP invocation audit.
-- Support matrix and diagnostic-code contract tests for `src/support.rs`, schema diagnostics, and model unsupported-operation codes.
+- Support matrix and diagnostic-code contract tests for `src/support.rs`, schema diagnostics, model unsupported-operation codes, `pp check --json`, and `pp support --json` query behavior.
+- Golden generated-output snapshot coverage for a fixed native direct HTTP fixture.
+- Local corpus manifest validation for pinned real-world trimmed fixtures.
 
 ## Standard
 
@@ -34,6 +36,7 @@ cargo test --test apikey_smoke -- --ignored
 cargo test --test basic_smoke -- --ignored
 cargo test --test mcp_errors -- --ignored
 cargo test --test mcp_usability -- --ignored
+cargo test --test corpus -- --ignored
 ```
 
 Purpose:
@@ -45,6 +48,7 @@ Purpose:
 - Exercise repeated query-array serialization as repeated query parameters.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
 - Rebuild generated runtimes that expose CLI and MCP through generated native direct HTTP invocation metadata.
+- Run local-only corpus `pp check --json` coverage and generated build smoke for check-pass fixtures.
 
 These are the first ignored tests promoted to scheduled/manual CI because they cover generated artifact correctness without external network dependencies.
 

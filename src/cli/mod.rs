@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -23,6 +23,32 @@ fn auth_policy_from_scheme(auth_scheme: Option<String>) -> crate::spec::AuthSele
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Check an OpenAPI spec against pp's strict native generation contract
+    Check {
+        /// Path to the OpenAPI 3.0/3.1 spec (YAML or JSON)
+        spec: PathBuf,
+        /// Emit machine-readable check JSON
+        #[arg(long)]
+        json: bool,
+        /// Explicit base URL when the spec has no servers[0].url or when overriding it
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Include an operation by operationId (repeatable)
+        #[arg(long = "include-operation")]
+        include_operations: Vec<String>,
+        /// Include operations with this tag (repeatable)
+        #[arg(long = "include-tag")]
+        include_tags: Vec<String>,
+        /// Include operations whose path starts with this prefix (repeatable)
+        #[arg(long = "include-path-prefix")]
+        include_path_prefixes: Vec<String>,
+        /// Exclude an operation by operationId after includes are applied (repeatable)
+        #[arg(long = "exclude-operation")]
+        exclude_operations: Vec<String>,
+        /// Explicit component security scheme name to use for generated auth
+        #[arg(long = "auth-scheme")]
+        auth_scheme: Option<String>,
+    },
     /// Inspect an OpenAPI spec and print the derived facts as JSON
     Inspect {
         /// Path to the OpenAPI 3.0 spec (YAML or JSON)
@@ -85,6 +111,18 @@ pub enum Command {
     Validate {
         /// Path to a generated workspace
         workspace: PathBuf,
+    },
+    /// Query pp's support matrix and diagnostic-code inventory
+    Support {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Query a single support feature by stable ID
+        #[arg(long, conflicts_with = "diagnostic")]
+        feature: Option<String>,
+        /// Query a diagnostic code and the features that document it
+        #[arg(long, conflicts_with = "feature")]
+        diagnostic: Option<String>,
     },
 }
 
@@ -161,9 +199,95 @@ fn validate_workspace_build(workspace: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+fn print_support(json: bool, feature: Option<String>, diagnostic: Option<String>) -> Result<()> {
+    match (feature, diagnostic) {
+        (Some(feature_id), None) => {
+            let feature = crate::support::feature_by_id(&feature_id)
+                .ok_or_else(|| anyhow!("unknown support feature '{feature_id}'"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "matrix_id": crate::support::SUPPORT_MATRIX_ID,
+                        "feature": feature,
+                    }))?
+                );
+            } else {
+                println!("{}\t{:?}\t{}", feature.id, feature.status, feature.summary);
+            }
+        }
+        (None, Some(code)) => {
+            let payload = crate::support::features_for_diagnostic(&code)
+                .ok_or_else(|| anyhow!("unknown diagnostic code '{code}'"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", payload.diagnostic_code);
+                for feature in payload.features {
+                    println!(
+                        "  {}\t{:?}\t{}",
+                        feature.id, feature.status, feature.summary
+                    );
+                }
+            }
+        }
+        (None, None) => {
+            let payload = crate::support::support_payload();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", payload.matrix_id);
+                for feature in payload.features {
+                    println!("{}\t{:?}\t{}", feature.id, feature.status, feature.summary);
+                }
+            }
+        }
+        (Some(_), Some(_)) => unreachable!("clap rejects conflicting support filters"),
+    }
+    Ok(())
+}
+
 impl Cli {
     pub fn run(self) -> Result<()> {
         match self.command {
+            Command::Check {
+                spec,
+                json,
+                base_url,
+                include_operations,
+                include_tags,
+                include_path_prefixes,
+                exclude_operations,
+                auth_scheme,
+            } => {
+                let options = load_options(LoadOptionsArgs {
+                    include_operations,
+                    include_tags,
+                    include_path_prefixes,
+                    exclude_operations,
+                    auth_scheme,
+                });
+                let result = crate::pipeline::check(crate::pipeline::CheckRequest {
+                    spec_path: spec,
+                    base_url,
+                    load_options: options,
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.success {
+                    println!("pp check: ok");
+                } else {
+                    println!("pp check: failed");
+                    for diagnostic in &result.diagnostics {
+                        eprintln!("pp: {}: {}", diagnostic.code, diagnostic.message);
+                    }
+                }
+                if result.success {
+                    Ok(())
+                } else {
+                    Err(anyhow!("check failed"))
+                }
+            }
             Command::Inspect {
                 spec,
                 list_operations,
@@ -242,6 +366,11 @@ impl Cli {
                 Ok(())
             }
             Command::Validate { workspace } => validate_workspace_build(&workspace),
+            Command::Support {
+                json,
+                feature,
+                diagnostic,
+            } => print_support(json, feature, diagnostic),
         }
     }
 }

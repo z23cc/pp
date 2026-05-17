@@ -35,6 +35,7 @@ jobs:
           cargo test --test basic_smoke -- --ignored
           cargo test --test mcp_errors -- --ignored
           cargo test --test mcp_usability -- --ignored
+          cargo test --test corpus -- --ignored
 
       - name: Deep fixture dogfood
         if: github.event_name == 'workflow_dispatch' && inputs.profile == 'deep'

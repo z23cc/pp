@@ -1,0 +1,15 @@
+mod auth;
+mod cli_builder;
+mod context;
+mod direct_http;
+mod invoke;
+mod mcp;
+mod print;
+mod runtime;
+
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    cli_builder::run().await
+}

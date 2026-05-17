@@ -1,0 +1,27 @@
+{
+  "entries": [],
+  "audits": [
+    {
+      "source_stage": "runtime_generation",
+      "code": "runtime.mcp_invocation.direct_http",
+      "target": "generated src/invoke.rs",
+      "action": "route MCP tool calls through the direct HTTP adapter",
+      "backend_requirement": "native HTTP runtime uses generated operation method/path metadata for direct HTTP invocation",
+      "before": "no explicit runtime-generation direct invocation audit",
+      "after": "direct_http",
+      "action_kind": "runtime_direct_invocation",
+      "backend_requirement_id": "native_http.direct_http.invocation",
+      "before_json": null,
+      "after_json": {
+        "backend_profile": "native_http",
+        "direct_tool_count": 2,
+        "direct_typed_invocation": "supported",
+        "invocation_adapter_kind": "direct_http",
+        "invocation_adapter_reason": "MCP tool calls use direct HTTP operation invocation from generated operation metadata",
+        "preserves_runtime_behavior": true,
+        "requires_generated_cli_command": false,
+        "unsupported_tool_count": 0
+      }
+    }
+  ]
+}

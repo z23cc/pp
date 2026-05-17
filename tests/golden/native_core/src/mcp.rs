@@ -1,0 +1,228 @@
+use crate::context::Context;
+use crate::invoke::{invoke_operation, ArgDef, OperationInvocation};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool, ToolsCapability};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::{transport::stdio, ErrorData as McpError, ServerHandler, ServiceExt};
+use std::sync::Arc;
+
+const TOOLS_PAGE_SIZE: usize = 100;
+
+#[derive(Clone)]
+pub struct ApiMcpServer {
+    context: Context,
+}
+
+struct ToolDef {
+    name: &'static str,
+    description: &'static str,
+    input_schema: fn() -> rmcp::model::JsonObject,
+    method: &'static str,
+    path_template: &'static str,
+    args: &'static [ArgDef],
+}
+
+
+fn schema_1() -> rmcp::model::JsonObject {
+    match serde_json::from_str::<serde_json::Value>("{\"additionalProperties\":false,\"properties\":{\"_pp_compact\":{\"description\":\"MCP-only response shaping: remove nulls and empty arrays/objects from successful structured results.\",\"type\":\"boolean\"},\"_pp_fields\":{\"description\":\"MCP-only response shaping: keep only these object dot paths.\",\"items\":{\"type\":\"string\"},\"type\":\"array\"},\"count\":{\"type\":\"integer\"},\"enabled\":{\"type\":\"boolean\"},\"name\":{\"type\":\"string\"}},\"required\":[\"name\"],\"type\":\"object\"}") {
+        Ok(serde_json::Value::Object(object)) => object,
+        _ => rmcp::model::JsonObject::new(),
+    }
+}
+
+static ARGS_1: &[ArgDef] = &[
+
+    ArgDef { json_name: "count", binding: crate::invoke::ArgBinding::FlattenedJsonBodyField },
+
+    ArgDef { json_name: "enabled", binding: crate::invoke::ArgBinding::FlattenedJsonBodyField },
+
+    ArgDef { json_name: "name", binding: crate::invoke::ArgBinding::FlattenedJsonBodyField },
+
+];
+
+fn schema_2() -> rmcp::model::JsonObject {
+    match serde_json::from_str::<serde_json::Value>("{\"additionalProperties\":false,\"properties\":{\"_pp_compact\":{\"description\":\"MCP-only response shaping: remove nulls and empty arrays/objects from successful structured results.\",\"type\":\"boolean\"},\"_pp_fields\":{\"description\":\"MCP-only response shaping: keep only these object dot paths.\",\"items\":{\"type\":\"string\"},\"type\":\"array\"},\"include_details\":{\"type\":\"boolean\"},\"itemId\":{\"type\":\"string\"},\"tag\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"}},\"required\":[\"itemId\"],\"type\":\"object\"}") {
+        Ok(serde_json::Value::Object(object)) => object,
+        _ => rmcp::model::JsonObject::new(),
+    }
+}
+
+static ARGS_2: &[ArgDef] = &[
+
+    ArgDef { json_name: "itemId", binding: crate::invoke::ArgBinding::PathParam { wire_name: "itemId" } },
+
+    ArgDef { json_name: "include_details", binding: crate::invoke::ArgBinding::QueryParam { wire_name: "include_details" } },
+
+    ArgDef { json_name: "tag", binding: crate::invoke::ArgBinding::QueryParam { wire_name: "tag" } },
+
+];
+
+
+static TOOLS: &[ToolDef] = &[
+
+    ToolDef {
+        name: "create_item",
+        description: "Create one item [auth: NATIVE_CORE_API_TOKEN env var]",
+        input_schema: schema_1,
+        method: "POST",
+        path_template: "/items",
+        args: ARGS_1,
+    },
+
+    ToolDef {
+        name: "get_item",
+        description: "Fetch one item [auth: NATIVE_CORE_API_TOKEN env var]",
+        input_schema: schema_2,
+        method: "GET",
+        path_template: "/items/{itemId}",
+        args: ARGS_2,
+    },
+
+];
+
+pub async fn serve(context: Context) -> anyhow::Result<()> {
+    validate_mcp_direct_invocation().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let service = ApiMcpServer { context }.serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+fn validate_mcp_direct_invocation() -> Result<(), McpError> {
+    for tool in TOOLS {
+        crate::invoke::validate_invocation_adapter_contract_for_tool(tool.name, tool.args)?;
+    }
+    Ok(())
+}
+
+impl ApiMcpServer {
+    async fn dispatch(&self, tool: &'static ToolDef, arguments: rmcp::model::JsonObject) -> Result<CallToolResult, McpError> {
+
+        if self.context.auth.is_none() {
+            return Ok(CallToolResult::structured_error(serde_json::json!({
+                "kind": "auth_missing",
+                "message": "missing required auth env var",
+                "env": "NATIVE_CORE_API_TOKEN"
+            })));
+        }
+
+
+        validate_required_arguments(&(tool.input_schema)(), &arguments)?;
+        let response_shaping = crate::runtime::parse_response_shaping(&arguments)?;
+
+        let result = invoke_operation(
+            self.context.clone(),
+            OperationInvocation {
+                name: tool.name,
+                method: tool.method,
+                path_template: tool.path_template,
+                args: tool.args,
+                arguments,
+            },
+        )
+        .await?;
+
+        if result.is_error {
+            return Ok(CallToolResult::structured_error(
+                crate::runtime::classify_tool_error(result.value),
+            ));
+        }
+        Ok(CallToolResult::structured(
+            response_shaping.shape_success(result.value),
+        ))
+    }
+}
+
+fn validate_required_arguments(
+    schema: &rmcp::model::JsonObject,
+    arguments: &rmcp::model::JsonObject,
+) -> Result<(), McpError> {
+    let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    let properties = schema.get("properties").and_then(serde_json::Value::as_object);
+    for name in required.iter().filter_map(serde_json::Value::as_str) {
+        match arguments.get(name) {
+            None => {
+                return Err(McpError::invalid_params(
+                    format!("missing required argument: {name}"),
+                    None,
+                ));
+            }
+            Some(value) if value.is_null() && !property_schema_allows_null(properties, name) => {
+                return Err(McpError::invalid_params(
+                    format!("required argument cannot be null: {name}"),
+                    None,
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn property_schema_allows_null(
+    properties: Option<&serde_json::Map<String, serde_json::Value>>,
+    name: &str,
+) -> bool {
+    properties
+        .and_then(|properties| properties.get(name))
+        .and_then(|property| property.get("type"))
+        .is_some_and(json_type_allows_null)
+}
+
+fn json_type_allows_null(schema_type: &serde_json::Value) -> bool {
+    match schema_type {
+        serde_json::Value::String(value) => value == "null",
+        serde_json::Value::Array(values) => values.iter().any(|value| value.as_str() == Some("null")),
+        _ => false,
+    }
+}
+
+impl ServerHandler for ApiMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        let mut info = ServerInfo::default();
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(ToolsCapability { list_changed: Some(false) });
+        info.capabilities = capabilities;
+        info.server_info = Implementation::new("native-core-api", env!("CARGO_PKG_VERSION"));
+        info
+    }
+
+    async fn list_tools(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let start = match request.and_then(|request| request.cursor) {
+            Some(cursor) => cursor
+                .parse::<usize>()
+                .map_err(|_| McpError::invalid_params("invalid tools/list cursor", None))?,
+            None => 0,
+        };
+        if start > TOOLS.len() {
+            return Err(McpError::invalid_params("invalid tools/list cursor", None));
+        }
+        let end = (start + TOOLS_PAGE_SIZE).min(TOOLS.len());
+        let mut result = ListToolsResult::default();
+        result.tools = TOOLS[start..end]
+            .iter()
+            .map(|tool| Tool::new(tool.name, tool.description, Arc::new((tool.input_schema)())))
+            .collect();
+        if end < TOOLS.len() {
+            result.next_cursor = Some(end.to_string());
+        }
+        Ok(result)
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = request.name.to_string();
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == name)
+            .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {name}"), None))?;
+        self.dispatch(tool, request.arguments.unwrap_or_default()).await
+    }
+}

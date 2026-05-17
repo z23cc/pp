@@ -126,11 +126,15 @@ IDs for unnamed operations, but generation fails until those operations are give
 `operationId` or excluded from the generated surface.
 
 `pp inspect --reports` exposes structured preparation reports for explicit slicing.
+`pp check <spec> --json` runs the same strict load/auth/base-URL/model checks without
+rendering files and emits `pp.check.v1` diagnostics, unsupported operations, and the
+support matrix ID.
+
 Generated workspaces write `pp-transform-plan.json` with machine-readable audit entries
 for runtime-generation seams. Audit entries may include structured fields such as
 `action_kind`, `backend_requirement_id`, `before_json`, and `after_json`.
 
-Current strict subset behavior is documented in [`docs/support-matrix.md`](docs/support-matrix.md): typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output; supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies; OpenAPI 3.1 support remains a narrow safe subset rather than broad JSON Schema 2020-12 compatibility.
+Current strict subset behavior is documented in [`docs/support-matrix.md`](docs/support-matrix.md) and queryable with `pp support --json`: typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output; supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies; OpenAPI 3.1 support remains a narrow safe subset rather than broad JSON Schema 2020-12 compatibility.
 
 Operation slicing remains explicit and reports selected/dropped operations and pruned unreachable components.
 
@@ -166,6 +170,13 @@ Default tests stay fast:
 
 ```bash
 cargo test
+```
+
+Productized spec checks and support queries are available without generating a workspace:
+
+```bash
+pp check ./openapi.yaml --json
+pp support --diagnostic direct_http.request_body_json_missing --json
 ```
 
 `pp validate <workspace>` runs `cargo build --release` in a generated workspace:

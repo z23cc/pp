@@ -10,9 +10,10 @@ use crate::render::WrapperManifest;
 use crate::spec::{
     report::ReportEntry,
     transform::{TransformActionKind, TransformAuditEntry, TransformPlan},
-    AuthKind, LoadOptions, SpecFacts,
+    AuthKind, AuthPlan, LoadOptions, SpecFacts,
 };
 use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -46,6 +47,42 @@ pub(crate) struct ValidationResult {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CheckRequest {
+    pub spec_path: PathBuf,
+    pub base_url: Option<String>,
+    pub load_options: LoadOptions,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CheckResult {
+    pub schema_version: &'static str,
+    pub support_matrix_id: &'static str,
+    pub success: bool,
+    pub facts: Option<SpecFacts>,
+    pub auth_plan: Option<AuthPlan>,
+    pub reports: Vec<ReportEntry>,
+    pub diagnostics: Vec<CheckDiagnostic>,
+    pub unsupported_operations: Vec<CheckUnsupportedOperation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CheckDiagnostic {
+    pub severity: &'static str,
+    pub code: String,
+    pub source: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CheckUnsupportedOperation {
+    pub operation_id: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub reason: String,
+    pub diagnostic_code: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum GenerateProgress {
     Inspecting {
         spec_path: PathBuf,
@@ -72,6 +109,111 @@ pub(crate) enum GenerateProgress {
 #[allow(dead_code)]
 pub(crate) fn generate(request: GenerateRequest) -> Result<GenerateResult> {
     generate_with_progress(request, |_| {})
+}
+
+pub(crate) fn check(request: CheckRequest) -> CheckResult {
+    let backend = NativeHttpBackend;
+    check_with_backend(request, &backend)
+}
+
+pub(crate) fn check_with_backend<B: ApiBackend>(request: CheckRequest, backend: &B) -> CheckResult {
+    let mut result = CheckResult {
+        schema_version: "pp.check.v1",
+        support_matrix_id: crate::support::SUPPORT_MATRIX_ID,
+        success: false,
+        facts: None,
+        auth_plan: None,
+        reports: Vec::new(),
+        diagnostics: Vec::new(),
+        unsupported_operations: Vec::new(),
+    };
+
+    let loaded = match crate::spec::load_with_options(&request.spec_path, &request.load_options) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            result.diagnostics.push(CheckDiagnostic {
+                severity: "error",
+                code: crate::support::diagnostics::spec::LOAD_ERROR.to_string(),
+                source: "spec",
+                message: error.to_string(),
+            });
+            return result;
+        }
+    };
+
+    result.facts = Some(loaded.facts.clone());
+    result.auth_plan = Some(loaded.auth_plan.clone());
+    result.reports = loaded.reports.clone();
+
+    let (base_url, base_url_is_relative) = match effective_base_url(
+        request.base_url.as_deref(),
+        loaded.facts.base_url.as_deref(),
+        loaded.facts.base_url_is_relative,
+    ) {
+        Ok(base_url) => base_url,
+        Err(error) => {
+            result.diagnostics.push(CheckDiagnostic {
+                severity: "error",
+                code: crate::support::diagnostics::runtime::BASE_URL.to_string(),
+                source: "runtime",
+                message: error.to_string(),
+            });
+            ("https://example.invalid".to_string(), false)
+        }
+    };
+
+    let manifest = WrapperManifest::new(
+        loaded.facts.bin_name.clone(),
+        base_url,
+        base_url_is_relative,
+        loaded.facts.auth_kind.clone(),
+    );
+
+    let api_model = match ApiModel::from_spec_with_backend(
+        &loaded.spec,
+        manifest.auth_env_var.as_deref(),
+        backend,
+    ) {
+        Ok(api_model) => api_model,
+        Err(error) => {
+            result.diagnostics.push(CheckDiagnostic {
+                severity: "error",
+                code: crate::support::diagnostics::model::GENERATION_ERROR.to_string(),
+                source: "model",
+                message: error.to_string(),
+            });
+            return result;
+        }
+    };
+
+    result.unsupported_operations = api_model
+        .unsupported_operations
+        .iter()
+        .map(|operation| CheckUnsupportedOperation {
+            operation_id: operation.operation_id.clone(),
+            method: operation.method.clone(),
+            path: operation.path.clone(),
+            reason: operation.reason.clone(),
+            diagnostic_code: operation.diagnostic_code.clone(),
+        })
+        .collect();
+
+    result
+        .diagnostics
+        .extend(
+            result
+                .unsupported_operations
+                .iter()
+                .map(|operation| CheckDiagnostic {
+                    severity: "error",
+                    code: operation.diagnostic_code.clone(),
+                    source: "direct_http",
+                    message: operation.reason.clone(),
+                }),
+        );
+
+    result.success = result.diagnostics.is_empty() && result.unsupported_operations.is_empty();
+    result
 }
 
 pub(crate) fn generate_with_progress(
@@ -310,6 +452,7 @@ pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationRes
 mod tests {
     use super::*;
     use crate::backend::BackendCapabilities;
+    use std::collections::BTreeSet;
 
     const MINIMAL_SPEC: &str = r#"
 openapi: 3.0.0
@@ -392,6 +535,12 @@ paths:
           description: ok
 "#;
 
+    const PUBLIC_CHECK_DIAGNOSTIC_CODES: &[&str] = &[
+        crate::support::diagnostics::spec::LOAD_ERROR,
+        crate::support::diagnostics::runtime::BASE_URL,
+        crate::support::diagnostics::model::GENERATION_ERROR,
+    ];
+
     const MISSING_OPERATION_ID_SPEC: &str = r#"
 openapi: 3.0.0
 info:
@@ -427,6 +576,24 @@ paths:
         '200':
           description: ok
 "#;
+
+    #[test]
+    fn public_check_diagnostic_codes_are_in_support_inventory() {
+        let inventory: BTreeSet<_> = crate::support::ALL_DIAGNOSTIC_CODES
+            .iter()
+            .copied()
+            .collect();
+        for code in PUBLIC_CHECK_DIAGNOSTIC_CODES {
+            assert!(
+                inventory.contains(code),
+                "{code} missing from support inventory"
+            );
+            assert!(
+                crate::support::features_for_diagnostic(code).is_some(),
+                "{code} must resolve via support --diagnostic"
+            );
+        }
+    }
 
     #[test]
     fn generate_returns_result_and_writes_workspace() {

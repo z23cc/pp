@@ -1,0 +1,151 @@
+use rmcp::ErrorData as McpError;
+use serde_json::{json, Value};
+
+pub struct ResponseShaping {
+    field_filter: Option<Vec<String>>,
+    compact: bool,
+}
+
+impl ResponseShaping {
+    pub fn shape_success(&self, value: Value) -> Value {
+        shape_success(value, self.field_filter.as_deref(), self.compact)
+    }
+}
+
+pub fn parse_response_shaping(
+    arguments: &rmcp::model::JsonObject,
+) -> Result<ResponseShaping, McpError> {
+    let field_filter = parse_field_filter(arguments.get("_pp_fields"))?;
+    let compact = arguments
+        .get("_pp_compact")
+        .map(parse_compact)
+        .transpose()?
+        .unwrap_or(false);
+    Ok(ResponseShaping {
+        field_filter,
+        compact,
+    })
+}
+
+pub fn classify_tool_error(value: Value) -> Value {
+    let error = value.get("error").cloned().unwrap_or(value);
+    let kind = error.get("kind").and_then(Value::as_str).unwrap_or("tool_error");
+    let body = error.get("body").cloned().unwrap_or(error.clone());
+    let status = error
+        .get("status")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .or_else(|| status_from_body(&body).map(|status| json!(status)))
+        .unwrap_or(Value::Null);
+    let mapped_kind = match kind {
+        "communication_error" | "invalid_upgrade" | "response_body_error" | "invalid_response_payload" => "transport_error",
+        "error_response" | "unexpected_response" => "upstream_http_error",
+        "custom" if !status.is_null() => "upstream_http_error",
+        "invalid_request" => "invalid_request",
+        other => other,
+    };
+    json!({
+        "kind": mapped_kind,
+        "status": status,
+        "body": body,
+        "headers": error.get("headers").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+fn parse_field_filter(value: Option<&Value>) -> Result<Option<Vec<String>>, McpError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(values) = value.as_array() else {
+        return Err(McpError::invalid_params("_pp_fields must be an array of dot paths", None));
+    };
+    let mut fields = Vec::new();
+    for value in values {
+        let Some(field) = value.as_str() else {
+            return Err(McpError::invalid_params("_pp_fields entries must be strings", None));
+        };
+        if field.is_empty() || field.split('.').any(str::is_empty) || field.contains("[]") {
+            return Err(McpError::invalid_params("_pp_fields supports non-empty object dot paths only", None));
+        }
+        fields.push(field.to_string());
+    }
+    Ok(Some(fields))
+}
+
+fn parse_compact(value: &Value) -> Result<bool, McpError> {
+    value
+        .as_bool()
+        .ok_or_else(|| McpError::invalid_params("_pp_compact must be a boolean", None))
+}
+
+fn shape_success(mut value: Value, fields: Option<&[String]>, compact: bool) -> Value {
+    if let Some(fields) = fields {
+        value = select_fields(&value, fields);
+    }
+    if compact {
+        compact_value(&mut value);
+    }
+    value
+}
+
+fn select_fields(value: &Value, fields: &[String]) -> Value {
+    let mut selected = Value::Object(serde_json::Map::new());
+    for field in fields {
+        let parts: Vec<&str> = field.split('.').collect();
+        if let Some(found) = get_path(value, &parts) {
+            insert_path(&mut selected, &parts, found.clone());
+        }
+    }
+    selected
+}
+
+fn get_path<'a>(value: &'a Value, parts: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for part in parts {
+        current = current.as_object()?.get(*part)?;
+    }
+    Some(current)
+}
+
+fn insert_path(target: &mut Value, parts: &[&str], value: Value) {
+    let Value::Object(object) = target else {
+        return;
+    };
+    if parts.len() == 1 {
+        object.insert(parts[0].to_string(), value);
+        return;
+    }
+    let entry = object
+        .entry(parts[0].to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    insert_path(entry, &parts[1..], value);
+}
+
+fn compact_value(value: &mut Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(values) => {
+            values.retain_mut(|value| !compact_value(value));
+            values.is_empty()
+        }
+        Value::Object(object) => {
+            object.retain(|_, value| !compact_value(value));
+            object.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn status_from_body(body: &Value) -> Option<u16> {
+    let text = body.as_str()?;
+    for token in text.split(|ch: char| !ch.is_ascii_digit()) {
+        if token.len() == 3 {
+            if let Ok(status) = token.parse::<u16>() {
+                if (400..=599).contains(&status) {
+                    return Some(status);
+                }
+            }
+        }
+    }
+    None
+}

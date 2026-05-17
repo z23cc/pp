@@ -1,0 +1,28 @@
+[
+  {
+    "id": "plausible_stats_trimmed",
+    "path": "tests/fixtures/plausible.yaml",
+    "expected_check": "pass",
+    "generate_build": true
+  },
+  {
+    "id": "interzoid_weather_trimmed",
+    "path": "tests/fixtures/interzoid.yaml",
+    "expected_check": "pass",
+    "generate_build": true
+  },
+  {
+    "id": "pokeapi_openapi31_trimmed",
+    "path": "tests/fixtures/pokeapi.yaml",
+    "expected_check": "pass",
+    "generate_build": true
+  },
+  {
+    "id": "petstore_full_strict_subset_rejection",
+    "path": "testdata/petstore.yaml",
+    "expected_check": "fail",
+    "base_url": "https://petstore.example.test/api/v3",
+    "auth_scheme": "api_key",
+    "generate_build": false
+  }
+]

@@ -35,6 +35,8 @@ pub(crate) struct WrapperManifest {
     pub basic_user_env_var: String,
     pub basic_password_env_var: String,
     pub auth_env_var: Option<String>,
+    pub timeout_env_var: String,
+    pub debug_env_var: String,
     pub mcp_tools: Vec<RenderMcpTool>,
     pub unsupported_mcp_operations: Vec<RenderMcpUnsupportedOperation>,
     pub mcp_runtime: McpRuntimeManifest,
@@ -134,6 +136,8 @@ impl WrapperManifest {
             basic_user_env_var: format!("{env_prefix}_USER"),
             basic_password_env_var: format!("{env_prefix}_PASSWORD"),
             auth_env_var: auth_env_var.clone(),
+            timeout_env_var: format!("{env_prefix}_TIMEOUT_SECS"),
+            debug_env_var: format!("{env_prefix}_DEBUG"),
             mcp_tools: Vec::new(),
             unsupported_mcp_operations: Vec::new(),
             mcp_runtime: McpRuntimeManifest {
@@ -654,6 +658,26 @@ paths: {}
     }
 
     #[test]
+    fn context_template_uses_opt_in_runtime_hardening_env() {
+        let manifest = WrapperManifest::new(
+            "pet-store".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+        );
+
+        let rendered = render_template("context.rs", CONTEXT_TEMPLATE, &manifest).unwrap();
+
+        assert_eq!(manifest.timeout_env_var, "PET_STORE_TIMEOUT_SECS");
+        assert_eq!(manifest.debug_env_var, "PET_STORE_DEBUG");
+        assert!(rendered.contains("std::env::var(\"PET_STORE_TIMEOUT_SECS\")"));
+        assert!(rendered.contains("builder = builder.timeout(timeout)"));
+        assert!(rendered.contains("Duration::try_from_secs_f64(seconds)"));
+        assert!(rendered.contains("std::env::var(\"PET_STORE_DEBUG\")"));
+        assert!(rendered.contains("debug_enabled: Self::debug_enabled_from_env()"));
+    }
+
+    #[test]
     fn invocation_template_uses_direct_http_runtime() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
@@ -672,8 +696,16 @@ paths: {}
         assert!(rendered.contains("validate_invocation_adapter_contract_for_tool"));
         assert!(rendered.contains("requires_generated_cli_command: false"));
         assert!(rendered.contains("uses_temp_json_body_files: false"));
-        assert!(rendered.contains("context.client.request(method, url)"));
+        assert!(rendered.contains("context.client.request(method.clone(), url.clone())"));
         assert!(rendered.contains("crate::direct_http::build_request_parts"));
+        assert!(rendered.contains("context.debug_enabled.then(||"));
+        assert!(rendered.contains("eprintln!("));
+        assert!(rendered.contains("invocation.path_template.to_string()"));
+        assert!(rendered.contains("[pp debug] {method} {target}"));
+        assert!(!rendered.contains("redacted_debug_url"));
+        assert!(!rendered.contains("redacted.set_username(\"\")"));
+        assert!(!rendered.contains("redacted.set_password(None)"));
+        assert!(!rendered.contains("Authorization"));
         assert!(rendered.contains("crate::direct_http::success_response"));
         assert!(rendered.contains("PathParam { wire_name: &'static str }"));
         assert!(rendered.contains("QueryParam { wire_name: &'static str }"));
