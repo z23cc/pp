@@ -153,9 +153,10 @@ impl WrapperManifest {
     }
 
     pub(crate) fn with_api_model(mut self, api_model: ApiModel) -> Self {
-        self.mcp_tools = render_mcp_tools(api_model.mcp_tools);
+        self.mcp_tools = render_mcp_tools(api_model.mcp.tools);
         self.unsupported_mcp_operations = api_model
-            .unsupported_mcp_operations
+            .mcp
+            .unsupported_operations
             .into_iter()
             .map(|operation| RenderMcpUnsupportedOperation {
                 operation_id: operation.operation_id,
@@ -164,8 +165,8 @@ impl WrapperManifest {
                 reason: operation.reason,
             })
             .collect();
-        self.mcp_runtime.response_shaping = render_response_shaping(api_model.mcp_response_shaping);
-        let invocation_adapter = render_invocation_adapter(api_model.mcp_invocation_adapter);
+        self.mcp_runtime.response_shaping = render_response_shaping(api_model.mcp.response_shaping);
+        let invocation_adapter = render_invocation_adapter(api_model.mcp.invocation_adapter);
         self.mcp_runtime.invocation_adapter_kind = invocation_adapter.kind.clone();
         self.mcp_runtime.invocation_adapter_reason = invocation_adapter.reason.clone();
         self.mcp_runtime.invocation_adapter = invocation_adapter;

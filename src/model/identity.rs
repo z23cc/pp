@@ -1,38 +1,40 @@
-use crate::backend::DirectInvocationRequirements;
+use crate::backend::ApiBackend;
 use crate::spec::{traversal, OperationRef, PpSpec};
 use anyhow::Result;
 use heck::ToSnakeCase;
-use serde_json::{json, Map};
+use serde_json::json;
 use std::collections::BTreeMap;
 
-use super::arguments::{add_body, add_parameter, McpArgumentContext};
 use super::diagnostics::DirectInvocationUnsupported;
-use super::response::add_mcp_reserved_properties;
-use super::{McpTool, McpUnsupportedOperation};
+use super::response::{add_mcp_reserved_properties, mcp_response_shaping};
+use super::{
+    GeneratedOperation, McpInvocationAdapterContract, McpSurfaceModel, McpTool,
+    OperationInvocationPlanRequest, UnsupportedOperation,
+};
 
-pub(crate) struct McpModel {
-    pub tools: Vec<McpTool>,
-    pub unsupported_operations: Vec<McpUnsupportedOperation>,
+pub(crate) struct CanonicalApiModel {
+    pub operations: Vec<GeneratedOperation>,
+    pub unsupported_operations: Vec<UnsupportedOperation>,
 }
 
-pub(crate) fn mcp_model(
+pub(crate) fn canonical_model<B: ApiBackend>(
     spec: &PpSpec,
     auth_env_var: Option<&str>,
-    capabilities: &DirectInvocationRequirements,
-) -> Result<McpModel> {
-    let mut tools = Vec::new();
+    backend: &B,
+) -> Result<CanonicalApiModel> {
+    let mut operations = Vec::new();
     let mut unsupported_operations = Vec::new();
-    let mut ctx = McpBuildContext {
+    let mut ctx = CanonicalBuildContext {
         auth_env_var,
         spec,
-        capabilities,
-        seen_tool_names: BTreeMap::new(),
+        backend,
+        seen_operation_names: BTreeMap::new(),
     };
     for operation in traversal::operations(spec) {
         match build_operation(operation.clone(), &mut ctx) {
-            Ok(tool) => tools.push(tool),
+            Ok(operation) => operations.push(operation),
             Err(error) => match error.downcast::<DirectInvocationUnsupported>() {
-                Ok(unsupported) => unsupported_operations.push(McpUnsupportedOperation {
+                Ok(unsupported) => unsupported_operations.push(UnsupportedOperation {
                     operation_id: operation.explicit_operation_id().map(str::to_string),
                     method: operation.method_uppercase.to_string(),
                     path: operation.path.to_string(),
@@ -43,23 +45,54 @@ pub(crate) fn mcp_model(
             },
         }
     }
-    Ok(McpModel {
-        tools,
+    Ok(CanonicalApiModel {
+        operations,
         unsupported_operations,
     })
 }
 
-struct McpBuildContext<'a> {
-    auth_env_var: Option<&'a str>,
-    spec: &'a PpSpec,
-    capabilities: &'a DirectInvocationRequirements,
-    seen_tool_names: BTreeMap<String, String>,
+#[cfg(test)]
+pub(crate) fn mcp_model<B: ApiBackend>(
+    spec: &PpSpec,
+    auth_env_var: Option<&str>,
+    backend: &B,
+) -> Result<McpSurfaceModel> {
+    let canonical = canonical_model(spec, auth_env_var, backend)?;
+    mcp_surface_model(
+        canonical.operations,
+        canonical.unsupported_operations,
+        backend.invocation_adapter_contract().into(),
+    )
 }
 
-fn build_operation(
+pub(crate) fn mcp_surface_model(
+    operations: Vec<GeneratedOperation>,
+    unsupported_operations: Vec<UnsupportedOperation>,
+    invocation_adapter: McpInvocationAdapterContract,
+) -> Result<McpSurfaceModel> {
+    let tools = operations
+        .into_iter()
+        .map(mcp_tool_from_operation)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(McpSurfaceModel {
+        tools,
+        unsupported_operations,
+        response_shaping: mcp_response_shaping(),
+        invocation_adapter,
+    })
+}
+
+struct CanonicalBuildContext<'a, B: ApiBackend> {
+    auth_env_var: Option<&'a str>,
+    spec: &'a PpSpec,
+    backend: &'a B,
+    seen_operation_names: BTreeMap<String, String>,
+}
+
+fn build_operation<B: ApiBackend>(
     operation_ref: OperationRef<'_>,
-    ctx: &mut McpBuildContext<'_>,
-) -> Result<McpTool> {
+    ctx: &mut CanonicalBuildContext<'_, B>,
+) -> Result<GeneratedOperation> {
     let method = operation_ref.method_uppercase;
     let path = operation_ref.path;
     let Some(raw_name) = operation_ref.explicit_operation_id().map(str::to_string) else {
@@ -81,55 +114,50 @@ fn build_operation(
         description.push_str(&format!(" [auth: {auth_env_var} env var]"));
     }
 
-    let mut properties = Map::new();
-    let mut required = Vec::new();
-    let mut args = Vec::new();
+    let invocation = ctx
+        .backend
+        .plan_operation_invocation(OperationInvocationPlanRequest {
+            spec: ctx.spec,
+            operation: operation_ref,
+            tool_name: &name,
+            operation_id: &raw_name,
+        })?;
 
-    let arg_ctx = McpArgumentContext {
-        spec: ctx.spec,
-        capabilities: ctx.capabilities,
-        tool_name: &name,
-        operation_id: &raw_name,
-    };
-    for parameter in operation_ref.parameters() {
-        add_parameter(
-            parameter,
-            &mut properties,
-            &mut required,
-            &mut args,
-            &arg_ctx,
-        )?;
-    }
-    add_body(
-        operation_ref.request_body(),
-        &mut properties,
-        &mut required,
-        &mut args,
-        &arg_ctx,
-    )?;
-    add_mcp_reserved_properties(&mut properties);
-
-    let schema = json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    });
-
-    let input_schema = serde_json::to_string(&schema).expect("schema serializes");
-    if let Some(previous_operation_id) = ctx.seen_tool_names.insert(name.clone(), raw_name.clone())
+    if let Some(previous_operation_id) = ctx
+        .seen_operation_names
+        .insert(name.clone(), raw_name.clone())
     {
         anyhow::bail!(
             "MCP tool name collision: operationId '{previous_operation_id}' and operationId '{raw_name}' both produce MCP tool '{name}'"
         );
     }
-    Ok(McpTool {
+    Ok(GeneratedOperation {
         name,
+        operation_id: raw_name,
         description,
-        input_schema,
         method: method.to_string(),
         path_template: path.to_string(),
-        args,
+        invocation,
+    })
+}
+
+fn mcp_tool_from_operation(operation: GeneratedOperation) -> Result<McpTool> {
+    let mut properties = operation.invocation.properties;
+    add_mcp_reserved_properties(&mut properties);
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": operation.invocation.required,
+        "additionalProperties": false,
+    });
+    let input_schema = serde_json::to_string(&schema).expect("schema serializes");
+    Ok(McpTool {
+        name: operation.name,
+        description: operation.description,
+        input_schema,
+        method: operation.method,
+        path_template: operation.path_template,
+        args: operation.invocation.args,
     })
 }
 

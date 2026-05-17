@@ -1,3 +1,7 @@
+use crate::backend::{
+    BackendDirectTypedInvocationStatus, BackendInvocationAdapterContract,
+    BackendInvocationAdapterKind,
+};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -54,14 +58,26 @@ impl McpInvocationAdapterKind {
     }
 }
 
+impl From<BackendInvocationAdapterContract> for McpInvocationAdapterContract {
+    fn from(contract: BackendInvocationAdapterContract) -> Self {
+        Self {
+            kind: match contract.kind {
+                BackendInvocationAdapterKind::DirectHttp => McpInvocationAdapterKind::DirectHttp,
+            },
+            reason: contract.reason,
+            direct_typed_invocation: match contract.direct_typed_invocation {
+                BackendDirectTypedInvocationStatus::Supported => {
+                    McpDirectTypedInvocationStatus::Supported
+                }
+            },
+            requires_generated_cli_command: contract.requires_generated_cli_command,
+        }
+    }
+}
+
 impl McpInvocationAdapterContract {
     pub fn direct_http() -> Self {
-        Self {
-            kind: McpInvocationAdapterKind::DirectHttp,
-            reason: "MCP tool calls use direct HTTP operation invocation from generated operation metadata".to_string(),
-            direct_typed_invocation: McpDirectTypedInvocationStatus::Supported,
-            requires_generated_cli_command: false,
-        }
+        BackendInvocationAdapterContract::direct_http().into()
     }
 }
 

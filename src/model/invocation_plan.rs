@@ -1,13 +1,16 @@
 use crate::backend::{DirectInvocationParameterLocation, DirectInvocationRequirements};
 use crate::spec::{
-    schema_projection, PpParameter, PpParameterLocation, PpParameterRef, PpRequestBodyRef, PpSpec,
-    ProjectedSchema, SchemaPrimitive, SchemaShape,
+    schema_projection, OperationRef, PpParameter, PpParameterLocation, PpParameterRef,
+    PpRequestBodyRef, PpSpec, ProjectedSchema, SchemaPrimitive, SchemaShape,
 };
 use crate::support::diagnostics::direct_http as direct_codes;
 use anyhow::Result;
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Map, Value};
 
+use super::arguments::GeneratedArg;
 use super::diagnostics::DirectInvocationUnsupported;
+use super::response::reject_reserved_arg;
 use super::value_kind::{ArgValueKind, PrimitiveKind};
 
 fn unsupported_error(code: &'static str, detail: impl Into<String>) -> anyhow::Error {
@@ -22,7 +25,22 @@ fn unsupported_schema_error(
     DirectInvocationUnsupported::with_source_code(code, detail, source_code).into()
 }
 
-pub(super) struct DirectHttpPlanContext<'a> {
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct OperationInvocationPlan {
+    pub properties: Map<String, Value>,
+    pub required: Vec<String>,
+    pub args: Vec<GeneratedArg>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OperationInvocationPlanRequest<'a> {
+    pub spec: &'a PpSpec,
+    pub operation: OperationRef<'a>,
+    pub tool_name: &'a str,
+    pub operation_id: &'a str,
+}
+
+pub(super) struct OperationInvocationPlanContext<'a> {
     pub spec: &'a PpSpec,
     pub capabilities: &'a DirectInvocationRequirements,
     pub tool_name: &'a str,
@@ -30,26 +48,26 @@ pub(super) struct DirectHttpPlanContext<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PlannedParameterArg {
+pub(super) struct PlannedInvocationArg {
     pub json_name: String,
     pub wire_name: String,
-    pub binding: PlannedParameterBinding,
+    pub binding: InvocationArgBinding,
     pub required: bool,
     pub schema_json: Value,
     pub value_kind: ArgValueKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PlannedParameterBinding {
+pub(super) enum InvocationArgBinding {
     Path,
     Query,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum PlannedRequestBody {
+pub(super) enum PlannedInvocationBody {
     None,
     Flattened {
-        fields: Vec<PlannedBodyField>,
+        fields: Vec<PlannedInvocationBodyField>,
         required: Vec<String>,
     },
     WholeJson {
@@ -59,18 +77,121 @@ pub(super) enum PlannedRequestBody {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PlannedBodyField {
+pub(super) struct PlannedInvocationBodyField {
     pub json_name: String,
     pub schema_json: Value,
     pub required: bool,
     pub value_kind: ArgValueKind,
 }
 
+pub(crate) fn plan_native_http_operation_invocation(
+    request: OperationInvocationPlanRequest<'_>,
+    capabilities: &DirectInvocationRequirements,
+) -> Result<OperationInvocationPlan> {
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+    let mut args = Vec::new();
+    let ctx = OperationInvocationPlanContext {
+        spec: request.spec,
+        capabilities,
+        tool_name: request.tool_name,
+        operation_id: request.operation_id,
+    };
+
+    for parameter in request.operation.parameters() {
+        let planned = plan_parameter(parameter, &ctx, |name| {
+            reject_reserved_arg(name, request.tool_name, request.operation_id)?;
+            reject_reserved_cli_arg(name, request.tool_name, request.operation_id)?;
+            reject_duplicate_arg(
+                &properties,
+                name,
+                request.tool_name,
+                request.operation_id,
+                "OpenAPI parameter",
+            )
+        })?;
+
+        properties.insert(planned.json_name.clone(), planned.schema_json);
+        if planned.required {
+            required.push(planned.json_name.clone());
+        }
+        match planned.binding {
+            InvocationArgBinding::Path => args.push(GeneratedArg::path_param(
+                planned.json_name,
+                planned.wire_name,
+                planned.required,
+                planned.value_kind,
+            )),
+            InvocationArgBinding::Query => args.push(GeneratedArg::query_param(
+                planned.json_name,
+                planned.wire_name,
+                planned.required,
+                planned.value_kind,
+            )),
+        }
+    }
+
+    match plan_request_body(
+        request.operation.request_body(),
+        &ctx,
+        |field_names| {
+            if field_names.iter().any(|name| properties.contains_key(name)) {
+                return Err(unsupported_error(
+                    direct_codes::REQUEST_BODY_FIELD_COLLISION,
+                    format!(
+                        "flattened JSON request body field collision for tool '{}' (operationId '{}')",
+                        request.tool_name, request.operation_id
+                    ),
+                ));
+            }
+            Ok(())
+        },
+        |field_name| {
+            reject_reserved_arg(field_name, request.tool_name, request.operation_id)?;
+            reject_reserved_cli_arg(field_name, request.tool_name, request.operation_id)
+        },
+    )? {
+        PlannedInvocationBody::None => {}
+        PlannedInvocationBody::Flattened {
+            fields,
+            required: body_required,
+        } => {
+            for field in fields {
+                properties.insert(field.json_name.clone(), field.schema_json);
+                args.push(GeneratedArg::flattened_body_field(
+                    field.json_name,
+                    field.required,
+                    field.value_kind,
+                ));
+            }
+            required.extend(body_required);
+        }
+        PlannedInvocationBody::WholeJson {
+            schema_json,
+            required: body_required,
+        } => add_synthetic_body_arg(
+            schema_json,
+            body_required,
+            &mut properties,
+            &mut required,
+            &mut args,
+            request.tool_name,
+            request.operation_id,
+        )?,
+    }
+
+    Ok(OperationInvocationPlan {
+        properties,
+        required,
+        args,
+    })
+}
+
 pub(super) fn plan_parameter(
     parameter: PpParameterRef<'_>,
-    ctx: &DirectHttpPlanContext<'_>,
+    ctx: &OperationInvocationPlanContext<'_>,
     validate_arg_name: impl FnOnce(&str) -> Result<()>,
-) -> Result<PlannedParameterArg> {
+) -> Result<PlannedInvocationArg> {
     let spec = ctx.spec;
     let capabilities = ctx.capabilities;
     let tool_name = ctx.tool_name;
@@ -103,7 +224,7 @@ pub(super) fn plan_parameter(
                 tool_name,
                 operation_id,
             )?;
-            PlannedParameterBinding::Query
+            InvocationArgBinding::Query
         }
         PpParameterLocation::Path => {
             reject_unsupported_parameter_location(
@@ -114,7 +235,7 @@ pub(super) fn plan_parameter(
                 tool_name,
                 operation_id,
             )?;
-            PlannedParameterBinding::Path
+            InvocationArgBinding::Path
         }
         PpParameterLocation::Header => {
             return Err(unsupported_error(
@@ -134,7 +255,7 @@ pub(super) fn plan_parameter(
         }
     };
     validate_arg_name(name)?;
-    let is_path = matches!(binding, PlannedParameterBinding::Path);
+    let is_path = matches!(binding, InvocationArgBinding::Path);
     let schema = parameter_schema(parameter, name, spec, tool_name, operation_id)?;
     if schema.nullable && (is_path || parameter.required()) {
         return Err(unsupported_error(direct_codes::PARAMETER_REQUIRED_NULLABLE, format!(
@@ -159,7 +280,7 @@ pub(super) fn plan_parameter(
         capabilities,
     )?;
     let value_kind = value_kind_for_schema(&schema);
-    Ok(PlannedParameterArg {
+    Ok(PlannedInvocationArg {
         json_name: name.to_string(),
         wire_name: name.to_string(),
         binding,
@@ -171,16 +292,16 @@ pub(super) fn plan_parameter(
 
 pub(super) fn plan_request_body(
     request_body: Option<PpRequestBodyRef<'_>>,
-    ctx: &DirectHttpPlanContext<'_>,
+    ctx: &OperationInvocationPlanContext<'_>,
     validate_flattened_names: impl FnOnce(&[String]) -> Result<()>,
     mut validate_flattened_field: impl FnMut(&str) -> Result<()>,
-) -> Result<PlannedRequestBody> {
+) -> Result<PlannedInvocationBody> {
     let spec = ctx.spec;
     let capabilities = ctx.capabilities;
     let tool_name = ctx.tool_name;
     let operation_id = ctx.operation_id;
     let Some(request_body) = request_body else {
-        return Ok(PlannedRequestBody::None);
+        return Ok(PlannedInvocationBody::None);
     };
     let Some(body) = request_body.item() else {
         return Err(unsupported_error(direct_codes::UNRESOLVED_REQUEST_BODY_REF, format!(
@@ -228,7 +349,7 @@ pub(super) fn plan_request_body(
                     diagnostic.code(),
                 ));
             }
-            fields.push(PlannedBodyField {
+            fields.push(PlannedInvocationBodyField {
                 json_name: name.clone(),
                 schema_json: property_schema.json.clone(),
                 required: body.required() && body_required.contains(name),
@@ -241,7 +362,7 @@ pub(super) fn plan_request_body(
             for name in body_properties.keys() {
                 validate_flattened_field(name)?;
             }
-            return Ok(PlannedRequestBody::Flattened {
+            return Ok(PlannedInvocationBody::Flattened {
                 fields,
                 required: if body.required() {
                     body_required.clone()
@@ -261,10 +382,63 @@ pub(super) fn plan_request_body(
             diagnostic.code(),
         ));
     }
-    Ok(PlannedRequestBody::WholeJson {
+    Ok(PlannedInvocationBody::WholeJson {
         schema_json: body_schema.json,
         required: body.required(),
     })
+}
+
+fn reject_reserved_cli_arg(name: &str, tool_name: &str, operation_id: &str) -> Result<()> {
+    if matches!(name, "json" | "help") {
+        anyhow::bail!(
+            "MCP/CLI argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{name}' is reserved by the generated CLI"
+        );
+    }
+    Ok(())
+}
+
+fn reject_duplicate_arg(
+    properties: &Map<String, Value>,
+    name: &str,
+    tool_name: &str,
+    operation_id: &str,
+    source: &str,
+) -> Result<()> {
+    if properties.contains_key(name) {
+        anyhow::bail!(
+            "MCP argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{name}' from {source} duplicates an existing MCP argument"
+        );
+    }
+    Ok(())
+}
+
+fn add_synthetic_body_arg(
+    body_schema: Value,
+    body_required: bool,
+    properties: &mut Map<String, Value>,
+    required: &mut Vec<String>,
+    args: &mut Vec<GeneratedArg>,
+    tool_name: &str,
+    operation_id: &str,
+) -> Result<()> {
+    reject_reserved_arg("body", tool_name, operation_id)?;
+    reject_reserved_cli_arg("body", tool_name, operation_id)?;
+    reject_duplicate_arg(
+        properties,
+        "body",
+        tool_name,
+        operation_id,
+        "synthetic request body argument",
+    )?;
+    properties.insert("body".to_string(), body_schema);
+    if body_required {
+        required.push("body".to_string());
+    }
+    args.push(GeneratedArg::whole_json_body(
+        "body".to_string(),
+        body_required,
+    ));
+    Ok(())
 }
 
 fn parameter_schema(

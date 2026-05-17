@@ -121,11 +121,8 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         base_url_is_relative,
         facts.auth_kind.clone(),
     );
-    let api_model = ApiModel::from_spec_with_direct_invocation(
-        &loaded.spec,
-        manifest.auth_env_var.as_deref(),
-        &backend_capabilities.direct_invocation,
-    )?;
+    let api_model =
+        ApiModel::from_spec_with_backend(&loaded.spec, manifest.auth_env_var.as_deref(), backend)?;
     let manifest = manifest.with_api_model(api_model);
     transform_plan.add_audits(runtime_generation_audits(&manifest, &backend_capabilities));
     write_transform_plan(&request.output_path, &transform_plan)?;
@@ -741,6 +738,20 @@ paths:
     impl ApiBackend for FakeBackend {
         fn capabilities(&self) -> BackendCapabilities {
             self.capabilities.clone()
+        }
+
+        fn invocation_adapter_contract(&self) -> crate::backend::BackendInvocationAdapterContract {
+            crate::backend::BackendInvocationAdapterContract::direct_http()
+        }
+
+        fn plan_operation_invocation(
+            &self,
+            request: crate::model::OperationInvocationPlanRequest<'_>,
+        ) -> Result<crate::model::OperationInvocationPlan> {
+            crate::model::invocation_plan::plan_native_http_operation_invocation(
+                request,
+                &self.capabilities.direct_invocation,
+            )
         }
     }
 }

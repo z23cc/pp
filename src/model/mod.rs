@@ -6,17 +6,18 @@
 
 mod arguments;
 mod diagnostics;
-mod direct_http_plan;
 mod identity;
+pub(crate) mod invocation_plan;
 mod response;
 mod value_kind;
 
-use crate::backend::{BackendCapabilities, DirectInvocationRequirements};
+use crate::backend::ApiBackend;
 use crate::spec::PpSpec;
 use anyhow::Result;
 use serde::Serialize;
 
 pub use arguments::{GeneratedArg, McpArg, McpArgBinding};
+pub(crate) use invocation_plan::{OperationInvocationPlan, OperationInvocationPlanRequest};
 #[allow(unused_imports)]
 pub use response::{
     McpDirectTypedInvocationStatus, McpInvocationAdapterContract, McpInvocationAdapterKind,
@@ -24,22 +25,37 @@ pub use response::{
 };
 pub use value_kind::{ArgValueKind, PrimitiveKind};
 
+#[cfg(test)]
 pub(crate) use identity::mcp_model;
-use response::mcp_response_shaping;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModel {
-    /// Canonical generated operation table used by MCP today and by the native CLI renderer later.
-    pub mcp_tools: Vec<McpTool>,
-    pub unsupported_mcp_operations: Vec<McpUnsupportedOperation>,
-    pub mcp_response_shaping: McpResponseShaping,
-    pub mcp_invocation_adapter: McpInvocationAdapterContract,
+    /// Canonical generated operation table, independent of the MCP surface schema.
+    pub operations: Vec<GeneratedOperation>,
+    pub unsupported_operations: Vec<UnsupportedOperation>,
+    pub mcp: McpSurfaceModel,
 }
-
-pub type McpTool = GeneratedOperation;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GeneratedOperation {
+    pub name: String,
+    pub operation_id: String,
+    pub description: String,
+    pub method: String,
+    pub path_template: String,
+    pub invocation: OperationInvocationPlan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpSurfaceModel {
+    pub tools: Vec<McpTool>,
+    pub unsupported_operations: Vec<McpUnsupportedOperation>,
+    pub response_shaping: McpResponseShaping,
+    pub invocation_adapter: McpInvocationAdapterContract,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: String,
@@ -48,8 +64,10 @@ pub struct GeneratedOperation {
     pub args: Vec<GeneratedArg>,
 }
 
+pub type McpUnsupportedOperation = UnsupportedOperation;
+
 #[derive(Debug, Clone, Serialize)]
-pub struct McpUnsupportedOperation {
+pub struct UnsupportedOperation {
     pub operation_id: Option<String>,
     pub method: String,
     pub path: String,
@@ -65,29 +83,33 @@ fn mcp_tools(api: &PpSpec, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
 }
 
 #[cfg(test)]
-fn mcp_model_for_tests(api: &PpSpec, auth_env_var: Option<&str>) -> Result<identity::McpModel> {
-    let capabilities = BackendCapabilities::native_http();
-    mcp_model(api, auth_env_var, &capabilities.direct_invocation)
+fn mcp_model_for_tests(api: &PpSpec, auth_env_var: Option<&str>) -> Result<McpSurfaceModel> {
+    let backend = crate::backend::NativeHttpBackend;
+    mcp_model(api, auth_env_var, &backend)
 }
 
 impl ApiModel {
     #[allow(dead_code)]
     pub fn from_spec(api: &PpSpec, auth_env_var: Option<&str>) -> Result<Self> {
-        let capabilities = BackendCapabilities::native_http();
-        Self::from_spec_with_direct_invocation(api, auth_env_var, &capabilities.direct_invocation)
+        let backend = crate::backend::NativeHttpBackend;
+        Self::from_spec_with_backend(api, auth_env_var, &backend)
     }
 
-    pub(crate) fn from_spec_with_direct_invocation(
+    pub(crate) fn from_spec_with_backend<B: ApiBackend>(
         api: &PpSpec,
         auth_env_var: Option<&str>,
-        capabilities: &DirectInvocationRequirements,
+        backend: &B,
     ) -> Result<Self> {
-        let mcp_model = mcp_model(api, auth_env_var, capabilities)?;
+        let canonical = identity::canonical_model(api, auth_env_var, backend)?;
+        let mcp = identity::mcp_surface_model(
+            canonical.operations.clone(),
+            canonical.unsupported_operations.clone(),
+            backend.invocation_adapter_contract().into(),
+        )?;
         Ok(Self {
-            mcp_tools: mcp_model.tools,
-            unsupported_mcp_operations: mcp_model.unsupported_operations,
-            mcp_response_shaping: mcp_response_shaping(),
-            mcp_invocation_adapter: McpInvocationAdapterContract::direct_http(),
+            operations: canonical.operations,
+            unsupported_operations: canonical.unsupported_operations,
+            mcp,
         })
     }
 }
@@ -95,7 +117,34 @@ impl ApiModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{
+        BackendCapabilities, BackendInvocationAdapterContract, NativeHttpBackend,
+    };
     use serde_json::{json, Value};
+
+    struct CapabilityBackend {
+        capabilities: BackendCapabilities,
+    }
+
+    impl ApiBackend for CapabilityBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.capabilities.clone()
+        }
+
+        fn invocation_adapter_contract(&self) -> BackendInvocationAdapterContract {
+            BackendInvocationAdapterContract::direct_http()
+        }
+
+        fn plan_operation_invocation(
+            &self,
+            request: OperationInvocationPlanRequest<'_>,
+        ) -> Result<OperationInvocationPlan> {
+            crate::model::invocation_plan::plan_native_http_operation_invocation(
+                request,
+                &self.capabilities.direct_invocation,
+            )
+        }
+    }
 
     fn has_path_param(tool: &McpTool, json_name: &str, wire_name: &str) -> bool {
         tool.args.iter().any(|arg| {
@@ -132,31 +181,32 @@ paths:
         let model = ApiModel::from_spec(&api, None).unwrap();
 
         assert_eq!(
-            model.mcp_response_shaping.field_filter.json_name,
+            model.mcp.response_shaping.field_filter.json_name,
             "_pp_fields"
         );
         assert_eq!(
-            model.mcp_response_shaping.field_filter.schema["items"]["type"],
+            model.mcp.response_shaping.field_filter.schema["items"]["type"],
             "string"
         );
         assert_eq!(
-            model.mcp_response_shaping.field_filter.invalid_type_message,
+            model.mcp.response_shaping.field_filter.invalid_type_message,
             "_pp_fields must be an array of dot paths"
         );
-        assert_eq!(model.mcp_response_shaping.compact.json_name, "_pp_compact");
-        assert_eq!(model.mcp_response_shaping.compact.schema["type"], "boolean");
+        assert_eq!(model.mcp.response_shaping.compact.json_name, "_pp_compact");
+        assert_eq!(model.mcp.response_shaping.compact.schema["type"], "boolean");
         assert_eq!(
-            model.mcp_invocation_adapter.kind,
+            model.mcp.invocation_adapter.kind,
             McpInvocationAdapterKind::DirectHttp
         );
-        assert_eq!(model.mcp_invocation_adapter.kind.as_str(), "direct_http");
+        assert_eq!(model.mcp.invocation_adapter.kind.as_str(), "direct_http");
         assert_eq!(
-            model.mcp_invocation_adapter.direct_typed_invocation,
+            model.mcp.invocation_adapter.direct_typed_invocation,
             McpDirectTypedInvocationStatus::Supported
         );
-        assert!(!model.mcp_invocation_adapter.requires_generated_cli_command);
+        assert!(!model.mcp.invocation_adapter.requires_generated_cli_command);
         assert!(model
-            .mcp_invocation_adapter
+            .mcp
+            .invocation_adapter
             .reason
             .contains("direct HTTP operation invocation"));
     }
@@ -591,8 +641,8 @@ paths:
           description: ok
 "#;
         let api = crate::spec::parse_spec_for_tests(spec).unwrap();
-        let capabilities = BackendCapabilities::native_http();
-        let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
+        let backend = NativeHttpBackend;
+        let model = mcp_model(&api, None, &backend).unwrap();
 
         assert!(model.tools.is_empty());
         assert_eq!(model.unsupported_operations.len(), 1);
@@ -638,8 +688,10 @@ paths:
             .parameters
             .supports_query_arrays = false;
 
-        let disabled_model =
-            mcp_model(&api, None, &query_arrays_disabled.direct_invocation).unwrap();
+        let disabled_backend = CapabilityBackend {
+            capabilities: query_arrays_disabled,
+        };
+        let disabled_model = mcp_model(&api, None, &disabled_backend).unwrap();
 
         assert!(disabled_model.tools.is_empty());
         assert_eq!(disabled_model.unsupported_operations.len(), 1);
@@ -647,8 +699,8 @@ paths:
             .reason
             .contains("array parameter 'tags'"));
 
-        let native_capabilities = BackendCapabilities::native_http();
-        let native_model = mcp_model(&api, None, &native_capabilities.direct_invocation).unwrap();
+        let native_backend = NativeHttpBackend;
+        let native_model = mcp_model(&api, None, &native_backend).unwrap();
 
         assert_eq!(native_model.tools.len(), 1);
         assert!(native_model.unsupported_operations.is_empty());

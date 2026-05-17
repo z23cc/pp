@@ -1,7 +1,10 @@
-//! Backend capability profile for generated native HTTP workspaces.
+//! Backend interface and capability profile for generated native HTTP workspaces.
 //!
-//! The generation pipeline uses this module to describe the strict direct-HTTP
-//! subset supported by generated CLI and MCP runtimes.
+//! The generation pipeline asks a backend adapter to plan operation invocation
+//! instead of threading concrete direct-HTTP planning details through the model.
+
+use crate::model::{OperationInvocationPlan, OperationInvocationPlanRequest};
+use anyhow::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendCapabilities {
@@ -90,8 +93,44 @@ impl BackendCapabilities {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackendInvocationAdapterContract {
+    pub kind: BackendInvocationAdapterKind,
+    pub reason: String,
+    pub direct_typed_invocation: BackendDirectTypedInvocationStatus,
+    pub requires_generated_cli_command: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendInvocationAdapterKind {
+    DirectHttp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendDirectTypedInvocationStatus {
+    Supported,
+}
+
+impl BackendInvocationAdapterContract {
+    pub(crate) fn direct_http() -> Self {
+        Self {
+            kind: BackendInvocationAdapterKind::DirectHttp,
+            reason: "MCP tool calls use direct HTTP operation invocation from generated operation metadata".to_string(),
+            direct_typed_invocation: BackendDirectTypedInvocationStatus::Supported,
+            requires_generated_cli_command: false,
+        }
+    }
+}
+
 pub(crate) trait ApiBackend {
     fn capabilities(&self) -> BackendCapabilities;
+
+    fn invocation_adapter_contract(&self) -> BackendInvocationAdapterContract;
+
+    fn plan_operation_invocation(
+        &self,
+        request: OperationInvocationPlanRequest<'_>,
+    ) -> Result<OperationInvocationPlan>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -100,6 +139,21 @@ pub(crate) struct NativeHttpBackend;
 impl ApiBackend for NativeHttpBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::native_http()
+    }
+
+    fn invocation_adapter_contract(&self) -> BackendInvocationAdapterContract {
+        BackendInvocationAdapterContract::direct_http()
+    }
+
+    fn plan_operation_invocation(
+        &self,
+        request: OperationInvocationPlanRequest<'_>,
+    ) -> Result<OperationInvocationPlan> {
+        let capabilities = self.capabilities();
+        crate::model::invocation_plan::plan_native_http_operation_invocation(
+            request,
+            &capabilities.direct_invocation,
+        )
     }
 }
 
@@ -163,5 +217,14 @@ mod tests {
                 .auth
                 .uses_runtime_auth_context
         );
+
+        let adapter = NativeHttpBackend.invocation_adapter_contract();
+        assert_eq!(adapter.kind, BackendInvocationAdapterKind::DirectHttp);
+        assert_eq!(
+            adapter.direct_typed_invocation,
+            BackendDirectTypedInvocationStatus::Supported
+        );
+        assert!(!adapter.requires_generated_cli_command);
+        assert!(adapter.reason.contains("direct HTTP operation invocation"));
     }
 }
