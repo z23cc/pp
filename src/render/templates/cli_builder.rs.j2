@@ -19,6 +19,7 @@ enum CliValueKind {
     Number,
     Boolean,
     PrimitiveArray { item: CliPrimitiveKind },
+    NullablePrimitive { item: CliPrimitiveKind },
     Json,
 }
 
@@ -197,6 +198,13 @@ fn parse_cli_value(raw: &str, value_kind: CliValueKind, arg_name: &str) -> Resul
         CliValueKind::Boolean => parse_boolean(raw, arg_name),
         CliValueKind::Json => serde_json::from_str(raw)
             .with_context(|| format!("--{arg_name} must be valid JSON")),
+        CliValueKind::NullablePrimitive { item } => {
+            if raw == "null" {
+                Ok(Value::Null)
+            } else {
+                parse_primitive(raw, item, arg_name)
+            }
+        }
         CliValueKind::PrimitiveArray { item } => parse_primitive(raw, item, arg_name),
     }
 }

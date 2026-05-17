@@ -121,8 +121,8 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         base_url_is_relative,
         facts.auth_kind.clone(),
     );
-    let api_model = ApiModel::from_openapi_with_direct_invocation(
-        &loaded.api,
+    let api_model = ApiModel::from_spec_with_direct_invocation(
+        &loaded.spec,
         manifest.auth_env_var.as_deref(),
         &backend_capabilities.direct_invocation,
     )?;

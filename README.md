@@ -134,7 +134,8 @@ Current strict subset behavior:
 
 - Typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output.
 - Supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies.
-- OpenAPI 3.1 input must be parseable by the current typed parser; `pp` does not perform raw 3.1-to-3.0 repair passes.
+- OpenAPI 3.0 and a narrow OpenAPI 3.1 safe subset are supported. The 3.1 subset includes primitive path/query parameters, exploded primitive query arrays, JSON request bodies, `components/schemas` plus `$defs` references, and nullable unions of the form `type: [T, null]`.
+- `pp` does not claim broad JSON Schema 2020-12 support. Unsupported 3.1 schema features fail with operation-specific diagnostics instead of raw 3.1-to-3.0 repair, source rewriting, fallback generation, or silent omission.
 - Operation slicing remains explicit and reports selected/dropped operations and pruned unreachable components.
 
 ## Auth
@@ -159,7 +160,7 @@ MY_API_TOKEN=foo ./out/my-api/target/release/my-api get-ping
 
 ## Known limitations
 
-- OpenAPI 3.1 support is limited to shapes accepted by the current typed parser.
+- OpenAPI 3.1 support is intentionally limited to the safe subset above; unsupported JSON Schema features such as composition/conditionals, tuple arrays, `additionalProperties`, and unresolved refs are diagnostics, not compatibility rewrites.
 - OAuth2 flows are not implemented; use an explicit HTTP bearer scheme for token-based APIs.
 - Very large or broad specs may include operations outside the native direct HTTP subset; slice to supported operations or fix the source spec.
 
@@ -179,7 +180,7 @@ pp validate ./out/ping
 
 Generated-workspace smoke tests are ignored in normal PR runs and covered by a manual/scheduled workflow. See `docs/verification.md` for the fast, standard, and deep verification profiles.
 
-The standard smoke profile covers clean generated-workspace builds, full-Petstore strict native-subset rejection, sliced-Petstore native builds, auth headers, repeated query-array parameters, MCP error shapes, `tools/list` pagination, and MCP response shaping against local `mockito` servers.
+The standard smoke profile covers clean generated-workspace builds, full-Petstore strict native-subset rejection, sliced-Petstore native builds, an OpenAPI 3.1 safe-subset generated workspace, auth headers, repeated query-array parameters, MCP error shapes, `tools/list` pagination, and MCP response shaping against local `mockito` servers.
 
 ## Contributing
 

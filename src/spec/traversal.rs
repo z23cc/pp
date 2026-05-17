@@ -1,138 +1,71 @@
-use openapiv3::{OpenAPI, Operation, Parameter, ReferenceOr};
+use crate::spec::{OperationRef, PpParameterRef, PpSpec};
+use serde_json::Value;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct OperationRef<'a> {
-    pub method: &'static str,
-    pub method_uppercase: &'static str,
-    pub path: &'a str,
-    pub path_parameters: &'a [ReferenceOr<Parameter>],
-    pub operation: &'a Operation,
-}
+const METHODS: &[(&str, &str)] = &[
+    ("get", "GET"),
+    ("put", "PUT"),
+    ("post", "POST"),
+    ("delete", "DELETE"),
+    ("options", "OPTIONS"),
+    ("head", "HEAD"),
+    ("patch", "PATCH"),
+    ("trace", "TRACE"),
+];
 
-pub(crate) fn operations(api: &OpenAPI) -> Vec<OperationRef<'_>> {
+pub(crate) fn operations(spec: &PpSpec) -> Vec<OperationRef<'_>> {
     let mut out = Vec::new();
-    for (path, path_item) in api.paths.iter() {
-        let ReferenceOr::Item(item) = path_item else {
+    let Some(paths) = spec.document().get("paths").and_then(Value::as_object) else {
+        return out;
+    };
+    for (path, path_item) in paths {
+        let Some(item) = path_item.as_object() else {
             continue;
         };
-        let path_parameters = item.parameters.as_slice();
-        if let Some(operation) = item.get.as_ref() {
-            out.push(operation_ref(
-                "get",
-                "GET",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.put.as_ref() {
-            out.push(operation_ref(
-                "put",
-                "PUT",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.post.as_ref() {
-            out.push(operation_ref(
-                "post",
-                "POST",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.delete.as_ref() {
-            out.push(operation_ref(
-                "delete",
-                "DELETE",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.options.as_ref() {
-            out.push(operation_ref(
-                "options",
-                "OPTIONS",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.head.as_ref() {
-            out.push(operation_ref(
-                "head",
-                "HEAD",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.patch.as_ref() {
-            out.push(operation_ref(
-                "patch",
-                "PATCH",
-                path,
-                path_parameters,
-                operation,
-            ));
-        }
-        if let Some(operation) = item.trace.as_ref() {
-            out.push(operation_ref(
-                "trace",
-                "TRACE",
-                path,
-                path_parameters,
-                operation,
-            ));
+        let path_parameters = item
+            .get("parameters")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(PpParameterRef::new)
+            .collect::<Vec<_>>();
+        for (method, method_uppercase) in METHODS {
+            if let Some(operation) = item.get(*method) {
+                out.push(OperationRef::new(
+                    method,
+                    method_uppercase,
+                    path,
+                    path_parameters.clone(),
+                    operation,
+                ));
+            }
         }
     }
     out
 }
 
-pub(crate) fn explicit_operation_id(operation: &Operation) -> Option<&str> {
-    operation
-        .operation_id
-        .as_deref()
-        .filter(|operation_id| !operation_id.trim().is_empty())
+#[allow(dead_code)]
+pub(crate) fn explicit_operation_id<'a>(operation: &'a OperationRef<'a>) -> Option<&'a str> {
+    operation.explicit_operation_id()
 }
 
 pub(crate) fn derived_operation_identifier(method: &str, path: &str) -> String {
     format!("{method} {path}")
 }
 
-pub(crate) fn operation_identifier(method: &str, path: &str, operation: &Operation) -> String {
+#[allow(dead_code)]
+pub(crate) fn operation_identifier(operation: &OperationRef<'_>) -> String {
     explicit_operation_id(operation)
         .map(str::to_string)
-        .unwrap_or_else(|| derived_operation_identifier(method, path))
-}
-
-fn operation_ref<'a>(
-    method: &'static str,
-    method_uppercase: &'static str,
-    path: &'a str,
-    path_parameters: &'a [ReferenceOr<Parameter>],
-    operation: &'a Operation,
-) -> OperationRef<'a> {
-    OperationRef {
-        method,
-        method_uppercase,
-        path,
-        path_parameters,
-        operation,
-    }
+        .unwrap_or_else(|| derived_operation_identifier(operation.method, operation.path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openapiv3::Parameter;
 
     #[test]
     fn operations_preserve_path_and_method_order() {
-        let api: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info: { title: Traversal Order, version: '1.0' }
@@ -158,15 +91,9 @@ paths:
         )
         .unwrap();
 
-        let got = operations(&api)
+        let got = operations(&spec)
             .into_iter()
-            .map(|op| {
-                (
-                    op.method,
-                    op.method_uppercase,
-                    operation_identifier(op.method, op.path, op.operation),
-                )
-            })
+            .map(|op| (op.method, op.method_uppercase, operation_identifier(&op)))
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -183,7 +110,7 @@ paths:
 
     #[test]
     fn operation_ref_exposes_path_level_parameters() {
-        let api: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info: { title: Traversal Params, version: '1.0' }
@@ -205,20 +132,19 @@ paths:
         )
         .unwrap();
 
-        let ops = operations(&api);
+        let ops = operations(&spec);
         assert_eq!(ops.len(), 1);
         let names = ops[0]
-            .path_parameters
-            .iter()
-            .map(|param| match param {
-                ReferenceOr::Item(Parameter::Path { parameter_data, .. })
-                | ReferenceOr::Item(Parameter::Query { parameter_data, .. }) => {
-                    parameter_data.name.as_str()
-                }
-                _ => panic!("unexpected parameter"),
+            .parameters()
+            .into_iter()
+            .map(|param| {
+                param
+                    .item()
+                    .map(|param| param.name().unwrap_or("<unnamed>").to_string())
+                    .unwrap_or_else(|| panic!("unexpected parameter"))
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["id", "api_key"]);
+        assert_eq!(names, vec!["id".to_string(), "api_key".to_string()]);
     }
 }

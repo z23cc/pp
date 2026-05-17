@@ -13,14 +13,14 @@
 
 The default generator is native direct HTTP. Generated human CLI commands and MCP tools share the same operation table and runtime request path. The emitted workspace contains a single generated crate and does not depend on an external OpenAPI client generator.
 
-The supported input contract is a strict OpenAPI 3.0 subset: explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, JSON request bodies, and the documented auth schemes. Unsupported shapes fail during modeling or generated build validation; `pp` does not repair or mutate specs to broaden support.
+The supported input contract is a strict OpenAPI 3.0 subset plus a narrow OpenAPI 3.1 safe subset: explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, JSON request bodies, `components/schemas` plus `$defs` references, nullable unions of the form `type: [T, null]`, and the documented auth schemes. Unsupported shapes fail during modeling or generated build validation; `pp` does not repair, mutate, fall back, or silently omit specs/features to broaden support. The OpenAPI 3.1 support is not broad JSON Schema 2020-12 compliance.
 
 ## Release checklist
 
 Before publishing `0.1.0`:
 
 1. Run fast verification from `docs/verification.md`.
-2. Run the standard generated-workspace smoke profile, including query-array runtime coverage and the generated sliced petstore smoke.
+2. Run the standard generated-workspace smoke profile, including OpenAPI 3.1 safe-subset coverage, query-array runtime coverage, and the generated sliced petstore smoke.
 3. Run the deep fixture dogfood profile.
 4. Re-run at least one large-spec or documented slice check when the fixture is available.
 5. Confirm `CHANGELOG.md` has the intended `0.1.0` entry.

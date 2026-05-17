@@ -1,8 +1,7 @@
 use crate::backend::DirectInvocationRequirements;
-use crate::spec::traversal;
+use crate::spec::{traversal, OperationRef, PpSpec};
 use anyhow::Result;
 use heck::ToSnakeCase;
-use openapiv3::OpenAPI;
 use serde_json::{json, Map};
 use std::collections::BTreeMap;
 
@@ -16,7 +15,7 @@ pub(crate) struct McpModel {
 }
 
 pub(crate) fn mcp_model(
-    api: &OpenAPI,
+    spec: &PpSpec,
     auth_env_var: Option<&str>,
     capabilities: &DirectInvocationRequirements,
 ) -> Result<McpModel> {
@@ -24,19 +23,18 @@ pub(crate) fn mcp_model(
     let mut unsupported_operations = Vec::new();
     let mut ctx = McpBuildContext {
         auth_env_var,
-        api,
+        spec,
         capabilities,
         seen_tool_names: BTreeMap::new(),
     };
-    for operation in traversal::operations(api) {
-        match build_operation(operation, &mut ctx) {
+    for operation in traversal::operations(spec) {
+        match build_operation(operation.clone(), &mut ctx) {
             Ok(tool) => tools.push(tool),
             Err(error) => {
                 let reason = error.to_string();
                 if reason.starts_with(DIRECT_UNSUPPORTED_PREFIX) {
                     unsupported_operations.push(McpUnsupportedOperation {
-                        operation_id: traversal::explicit_operation_id(operation.operation)
-                            .map(str::to_string),
+                        operation_id: operation.explicit_operation_id().map(str::to_string),
                         method: operation.method_uppercase.to_string(),
                         path: operation.path.to_string(),
                         reason,
@@ -55,20 +53,18 @@ pub(crate) fn mcp_model(
 
 struct McpBuildContext<'a> {
     auth_env_var: Option<&'a str>,
-    api: &'a OpenAPI,
+    spec: &'a PpSpec,
     capabilities: &'a DirectInvocationRequirements,
     seen_tool_names: BTreeMap<String, String>,
 }
 
 fn build_operation(
-    operation_ref: traversal::OperationRef<'_>,
+    operation_ref: OperationRef<'_>,
     ctx: &mut McpBuildContext<'_>,
 ) -> Result<McpTool> {
     let method = operation_ref.method_uppercase;
     let path = operation_ref.path;
-    let path_params = operation_ref.path_parameters;
-    let operation = operation_ref.operation;
-    let Some(raw_name) = traversal::explicit_operation_id(operation).map(str::to_string) else {
+    let Some(raw_name) = operation_ref.explicit_operation_id().map(str::to_string) else {
         let derived_id = traversal::derived_operation_identifier(operation_ref.method, path);
         anyhow::bail!(
             "operation {method} {path} is missing operationId; explicit operationId is required for codegen/MCP identity. Add a stable operationId to this selected operation or exclude it from generation with `--exclude-operation \"{derived_id}\"`."
@@ -77,10 +73,8 @@ fn build_operation(
     let name = operation_name(&raw_name);
     reject_reserved_operation_name(&name, &raw_name)?;
     let derived_description = format!("{method} {path}");
-    let mut description = operation
-        .summary
-        .as_deref()
-        .or(operation.description.as_deref())
+    let mut description = operation_ref
+        .summary_or_description()
         .unwrap_or(&derived_description)
         .chars()
         .take(1024)
@@ -94,12 +88,12 @@ fn build_operation(
     let mut args = Vec::new();
 
     let arg_ctx = McpArgumentContext {
-        api: ctx.api,
+        spec: ctx.spec,
         capabilities: ctx.capabilities,
         tool_name: &name,
         operation_id: &raw_name,
     };
-    for parameter in path_params.iter().chain(operation.parameters.iter()) {
+    for parameter in operation_ref.parameters() {
         add_parameter(
             parameter,
             &mut properties,
@@ -109,7 +103,7 @@ fn build_operation(
         )?;
     }
     add_body(
-        operation.request_body.as_ref(),
+        operation_ref.request_body(),
         &mut properties,
         &mut required,
         &mut args,

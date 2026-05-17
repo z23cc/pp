@@ -7,11 +7,10 @@
 mod arguments;
 mod identity;
 mod response;
-mod schema;
 
 use crate::backend::{BackendCapabilities, DirectInvocationRequirements};
+use crate::spec::PpSpec;
 use anyhow::Result;
-use openapiv3::OpenAPI;
 use serde::Serialize;
 
 pub use arguments::{ArgValueKind, GeneratedArg, McpArg, McpArgBinding, PrimitiveKind};
@@ -54,29 +53,25 @@ pub struct McpUnsupportedOperation {
 }
 
 #[cfg(test)]
-fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
+fn mcp_tools(api: &PpSpec, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
     Ok(mcp_model_for_tests(api, auth_env_var)?.tools)
 }
 
 #[cfg(test)]
-fn mcp_model_for_tests(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<identity::McpModel> {
+fn mcp_model_for_tests(api: &PpSpec, auth_env_var: Option<&str>) -> Result<identity::McpModel> {
     let capabilities = BackendCapabilities::native_http();
     mcp_model(api, auth_env_var, &capabilities.direct_invocation)
 }
 
 impl ApiModel {
     #[allow(dead_code)]
-    pub fn from_openapi(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Self> {
+    pub fn from_spec(api: &PpSpec, auth_env_var: Option<&str>) -> Result<Self> {
         let capabilities = BackendCapabilities::native_http();
-        Self::from_openapi_with_direct_invocation(
-            api,
-            auth_env_var,
-            &capabilities.direct_invocation,
-        )
+        Self::from_spec_with_direct_invocation(api, auth_env_var, &capabilities.direct_invocation)
     }
 
-    pub(crate) fn from_openapi_with_direct_invocation(
-        api: &OpenAPI,
+    pub(crate) fn from_spec_with_direct_invocation(
+        api: &PpSpec,
         auth_env_var: Option<&str>,
         capabilities: &DirectInvocationRequirements,
     ) -> Result<Self> {
@@ -126,8 +121,8 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let model = ApiModel::from_openapi(&api, None).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let model = ApiModel::from_spec(&api, None).unwrap();
 
         assert_eq!(
             model.mcp_response_shaping.field_filter.json_name,
@@ -180,7 +175,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let tools = mcp_tools(&api, None).unwrap();
 
         assert_eq!(tools[0].name, "list_items");
@@ -196,8 +191,8 @@ paths:
     #[test]
     fn mcp_petstore_request_body_ref_is_flattened() {
         let spec = std::fs::read_to_string("testdata/petstore.yaml").unwrap();
-        let mut api: OpenAPI = serde_yaml::from_str(&spec).unwrap();
-        api.paths.paths.retain(|path, _| !path.starts_with("/user"));
+        let mut api = crate::spec::parse_spec_for_tests(&spec).unwrap();
+        api.retain_paths_for_tests(|path| !path.starts_with("/user"));
         let tools = mcp_tools(&api, Some("SWAGGER_PETSTORE_API_KEY")).unwrap();
         let add_pet = tools.iter().find(|tool| tool.name == "add_pet").unwrap();
         let schema: Value = serde_json::from_str(&add_pet.input_schema).unwrap();
@@ -268,7 +263,7 @@ components:
         a:
           $ref: '#/components/schemas/A'
 "##;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let tools = mcp_tools(&api, None).unwrap();
         let tool = tools
             .iter()
@@ -289,8 +284,8 @@ components:
     #[test]
     fn mcp_schema_includes_reserved_response_shaping_args() {
         let spec = std::fs::read_to_string("testdata/petstore.yaml").unwrap();
-        let mut api: OpenAPI = serde_yaml::from_str(&spec).unwrap();
-        api.paths.paths.retain(|path, _| !path.starts_with("/user"));
+        let mut api = crate::spec::parse_spec_for_tests(&spec).unwrap();
+        api.retain_paths_for_tests(|path| !path.starts_with("/user"));
         let tools = mcp_tools(&api, None).unwrap();
         let add_pet = tools.iter().find(|tool| tool.name == "add_pet").unwrap();
         let schema: Value = serde_json::from_str(&add_pet.input_schema).unwrap();
@@ -325,7 +320,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let tools = mcp_tools(&api, None).unwrap();
         let tool = tools.iter().find(|tool| tool.name == "get_item").unwrap();
         let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
@@ -359,7 +354,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err().to_string();
 
         assert!(error.contains("operation PATCH /items/{id} is missing operationId"));
@@ -382,7 +377,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err().to_string();
 
         assert!(error.contains("operation GET /items is missing operationId"));
@@ -410,7 +405,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err().to_string();
 
         assert!(error.contains("MCP tool name collision"));
@@ -448,7 +443,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert_eq!(model.tools.len(), 1);
@@ -545,7 +540,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert!(model.tools.is_empty());
@@ -588,7 +583,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let capabilities = BackendCapabilities::native_http();
         let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
 
@@ -621,7 +616,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let mut query_arrays_disabled = BackendCapabilities::native_http();
         query_arrays_disabled
             .direct_invocation
@@ -685,7 +680,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert!(model.tools.is_empty());
@@ -713,7 +708,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let model = mcp_model_for_tests(&api, None).unwrap();
 
         assert!(model.tools.is_empty());
@@ -751,7 +746,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err().to_string();
 
         assert!(error.contains("MCP argument collision"));
@@ -776,7 +771,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err().to_string();
 
         assert!(error.contains("reserved generated CLI command"));
@@ -803,7 +798,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err().to_string();
 
         assert!(error.contains("reserved by the generated CLI"));
@@ -830,7 +825,7 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err();
 
         assert!(error.to_string().contains("reserved pp namespace"));
@@ -861,10 +856,255 @@ paths:
         '200':
           description: ok
 "#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let error = mcp_tools(&api, None).unwrap_err();
 
         assert!(error.to_string().contains("reserved pp namespace"));
         assert!(error.to_string().contains("_pp_compact"));
+    }
+
+    #[test]
+    fn openapi_31_subset_projects_nullable_defs_query_arrays_and_body() {
+        let spec = r##"
+openapi: 3.1.0
+info: { title: OpenAPI 31 Subset API, version: '1.0' }
+paths:
+  /items/{id}:
+    post:
+      operationId: updateItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: tags
+          in: query
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateItem'
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    UpdateItem:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: [string, 'null']
+        rating:
+          $ref: '#/$defs/RatingAlias'
+      $defs:
+        RatingAlias:
+          $ref: '#/$defs/Rating'
+        Rating:
+          type: integer
+"##;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let tools = mcp_tools(&api, None).unwrap();
+        assert_eq!(tools.len(), 1);
+        let tool = &tools[0];
+        let schema: Value = serde_json::from_str(&tool.input_schema).unwrap();
+
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert_eq!(schema["properties"]["tags"]["type"], "array");
+        assert_eq!(schema["properties"]["tags"]["items"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["name"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(schema["properties"]["rating"]["type"], "integer");
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("name")));
+        assert!(tool.args.iter().any(|arg| arg.json_name == "name"
+            && matches!(
+                arg.value_kind,
+                ArgValueKind::NullablePrimitive {
+                    item: PrimitiveKind::String
+                }
+            )));
+        assert!(tool.args.iter().any(|arg| arg.json_name == "tags"
+            && matches!(
+                arg.value_kind,
+                ArgValueKind::PrimitiveArray {
+                    item: PrimitiveKind::String
+                }
+            )));
+    }
+
+    #[test]
+    fn openapi_31_unsupported_json_schema_feature_is_operation_audit() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Unsupported 31 API, version: '1.0' }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            oneOf:
+              - type: string
+              - type: integer
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("unsupported JSON Schema feature 'oneOf'"));
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("parameter 'filter'"));
+    }
+
+    #[test]
+    fn openapi_31_nested_unsupported_json_schema_feature_is_operation_audit() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Nested Unsupported 31 API, version: '1.0' }
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filter:
+                  type: object
+                  properties:
+                    mode:
+                      oneOf:
+                        - type: string
+                        - type: integer
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("unsupported JSON request body field 'filter'"));
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("unsupported JSON Schema feature 'oneOf'"));
+    }
+
+    #[test]
+    fn malformed_parameters_are_unsupported_instead_of_defaulted() {
+        let missing_name = r#"
+openapi: 3.1.0
+info: { title: Missing Parameter Name API, version: '1.0' }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - in: query
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(missing_name).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("parameter without non-empty string name"));
+
+        let missing_location = r#"
+openapi: 3.1.0
+info: { title: Missing Parameter Location API, version: '1.0' }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: q
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(missing_location).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("parameter 'q' without supported 'in' location"));
+    }
+
+    #[test]
+    fn free_form_object_request_body_is_unsupported_instead_of_dropped() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Free Form Body API, version: '1.0' }
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("unsupported JSON request body schema"));
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("unsupported JSON Schema feature 'additionalProperties'"));
+    }
+
+    #[test]
+    fn openapi_31_required_nullable_parameter_is_unsupported() {
+        let spec = r#"
+openapi: 3.1.0
+info: { title: Nullable Param API, version: '1.0' }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: [string, 'null']
+      responses:
+        '200': { description: ok }
+"#;
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
+        let model = mcp_model_for_tests(&api, None).unwrap();
+        assert!(model.tools.is_empty());
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("required nullable parameter 'q'"));
     }
 }

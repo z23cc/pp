@@ -1,19 +1,18 @@
 use crate::backend::{DirectInvocationParameterLocation, DirectInvocationRequirements};
-use anyhow::{bail, Result};
-use openapiv3::{
-    OpenAPI, Parameter, ParameterData, ParameterSchemaOrContent, PathStyle, QueryStyle,
-    ReferenceOr, RequestBody,
+use crate::spec::{
+    schema_projection, PpParameterLocation, PpParameterRef, PpRequestBodyRef, PpSpec,
+    ProjectedSchema, SchemaPrimitive, SchemaShape,
 };
+use anyhow::{bail, Result};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::response::reject_reserved_arg;
-use super::schema::{schema_projection, ProjectedSchema, SchemaPrimitive, SchemaShape};
 
 pub(super) const DIRECT_UNSUPPORTED_PREFIX: &str = "MCP direct HTTP invocation does not support";
 
 pub(super) struct McpArgumentContext<'a> {
-    pub api: &'a OpenAPI,
+    pub spec: &'a PpSpec,
     pub capabilities: &'a DirectInvocationRequirements,
     pub tool_name: &'a str,
     pub operation_id: &'a str,
@@ -47,6 +46,7 @@ pub enum ArgValueKind {
     Number,
     Boolean,
     PrimitiveArray { item: PrimitiveKind },
+    NullablePrimitive { item: PrimitiveKind },
     Json,
 }
 
@@ -136,70 +136,83 @@ fn reject_duplicate_arg(
 }
 
 pub(super) fn add_parameter(
-    parameter: &ReferenceOr<Parameter>,
+    parameter: PpParameterRef<'_>,
     properties: &mut Map<String, Value>,
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
     ctx: &McpArgumentContext<'_>,
 ) -> Result<()> {
-    let api = ctx.api;
+    let spec = ctx.spec;
     let capabilities = ctx.capabilities;
     let tool_name = ctx.tool_name;
     let operation_id = ctx.operation_id;
-    let ReferenceOr::Item(parameter) = parameter else {
+    let Some(parameter) = parameter.item() else {
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} unresolved parameter references for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
-    let (data, is_path) = match parameter {
-        Parameter::Query { parameter_data, .. } => {
+    let name = parameter.name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{DIRECT_UNSUPPORTED_PREFIX} parameter without non-empty string name for tool '{tool_name}' (operationId '{operation_id}')"
+        )
+    })?;
+    let location = parameter.location().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{DIRECT_UNSUPPORTED_PREFIX} parameter '{name}' without supported 'in' location for tool '{tool_name}' (operationId '{operation_id}')"
+        )
+    })?;
+    let is_path = match location {
+        PpParameterLocation::Query => {
             reject_unsupported_parameter_location(
                 capabilities,
                 DirectInvocationParameterLocation::Query,
                 "query",
-                &parameter_data.name,
+                name,
                 tool_name,
                 operation_id,
             )?;
-            (parameter_data, false)
+            false
         }
-        Parameter::Path { parameter_data, .. } => {
+        PpParameterLocation::Path => {
             reject_unsupported_parameter_location(
                 capabilities,
                 DirectInvocationParameterLocation::Path,
                 "path",
-                &parameter_data.name,
+                name,
                 tool_name,
                 operation_id,
             )?;
-            (parameter_data, true)
+            true
         }
-        Parameter::Header { parameter_data, .. } => {
+        PpParameterLocation::Header => {
             bail!(
-                "{DIRECT_UNSUPPORTED_PREFIX} header parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
-                parameter_data.name
+                "{DIRECT_UNSUPPORTED_PREFIX} header parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
             );
         }
-        Parameter::Cookie { parameter_data, .. } => {
+        PpParameterLocation::Cookie => {
             bail!(
-                "{DIRECT_UNSUPPORTED_PREFIX} cookie parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
-                parameter_data.name
+                "{DIRECT_UNSUPPORTED_PREFIX} cookie parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
             );
         }
     };
-    reject_reserved_arg(&data.name, tool_name, operation_id)?;
-    reject_reserved_cli_arg(&data.name, tool_name, operation_id)?;
+    reject_reserved_arg(name, tool_name, operation_id)?;
+    reject_reserved_cli_arg(name, tool_name, operation_id)?;
     reject_duplicate_arg(
         properties,
-        &data.name,
+        name,
         tool_name,
         operation_id,
         "OpenAPI parameter",
     )?;
-    let schema = parameter_schema(data, api, tool_name, operation_id)?;
+    let schema = parameter_schema(parameter, name, spec, tool_name, operation_id)?;
+    if schema.nullable && (is_path || parameter.required()) {
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} required nullable parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+        );
+    }
     reject_unsupported_direct_parameter_schema(
         &schema,
-        &data.name,
+        name,
         tool_name,
         operation_id,
         is_path,
@@ -207,29 +220,30 @@ pub(super) fn add_parameter(
     )?;
     reject_unsupported_direct_parameter_serialization(
         parameter,
+        location,
         &schema,
-        &data.name,
+        name,
         tool_name,
         operation_id,
         capabilities,
     )?;
-    properties.insert(data.name.clone(), schema.json);
-    let arg_required = is_path || data.required;
+    let value_kind = value_kind_for_schema(&schema);
+    properties.insert(name.to_string(), schema.json);
+    let arg_required = is_path || parameter.required();
     if arg_required {
-        required.push(data.name.clone());
+        required.push(name.to_string());
     }
-    let value_kind = value_kind_for_shape(&schema.shape);
     if is_path {
         args.push(McpArg::path_param(
-            data.name.clone(),
-            data.name.clone(),
+            name.to_string(),
+            name.to_string(),
             arg_required,
             value_kind,
         ));
     } else {
         args.push(McpArg::query_param(
-            data.name.clone(),
-            data.name.clone(),
+            name.to_string(),
+            name.to_string(),
             arg_required,
             value_kind,
         ));
@@ -238,18 +252,23 @@ pub(super) fn add_parameter(
 }
 
 fn parameter_schema(
-    data: &ParameterData,
-    api: &OpenAPI,
+    parameter: crate::spec::PpParameter<'_>,
+    name: &str,
+    spec: &PpSpec,
     tool_name: &str,
     operation_id: &str,
 ) -> Result<ProjectedSchema> {
-    match &data.format {
-        ParameterSchemaOrContent::Schema(schema) => Ok(schema_projection(schema, api)),
-        ParameterSchemaOrContent::Content(_) => bail!(
-            "{DIRECT_UNSUPPORTED_PREFIX} content-encoded parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
-            data.name
-        ),
+    if let Some(schema) = parameter.schema() {
+        return Ok(schema_projection(schema, spec));
     }
+    if parameter.has_content_format() {
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} content-encoded parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+        );
+    }
+    bail!(
+        "{DIRECT_UNSUPPORTED_PREFIX} parameter '{name}' without schema for tool '{tool_name}' (operationId '{operation_id}')"
+    )
 }
 
 fn reject_unsupported_parameter_location(
@@ -280,6 +299,11 @@ fn reject_unsupported_direct_parameter_schema(
     is_path: bool,
     capabilities: &DirectInvocationRequirements,
 ) -> Result<()> {
+    if let Some(reason) = &schema.unsupported_reason {
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} unsupported parameter schema for '{name}' on tool '{tool_name}' (operationId '{operation_id}'): {reason}"
+        );
+    }
     let Some(schema_type) = schema.shape.json_type() else {
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} parameter '{name}' without primitive schema type for tool '{tool_name}' (operationId '{operation_id}')"
@@ -315,27 +339,25 @@ fn reject_unsupported_direct_parameter_schema(
 }
 
 fn reject_unsupported_direct_parameter_serialization(
-    parameter: &Parameter,
+    parameter: crate::spec::PpParameter<'_>,
+    location: PpParameterLocation,
     schema: &ProjectedSchema,
     name: &str,
     tool_name: &str,
     operation_id: &str,
     capabilities: &DirectInvocationRequirements,
 ) -> Result<()> {
-    match parameter {
-        Parameter::Query {
-            parameter_data,
-            style,
-            ..
-        } => {
-            if capabilities.parameters.requires_form_query_style && *style != QueryStyle::Form {
+    match location {
+        PpParameterLocation::Query => {
+            if capabilities.parameters.requires_form_query_style && !parameter.query_style_is_form()
+            {
                 bail!(
                     "{DIRECT_UNSUPPORTED_PREFIX} non-form query parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
                 );
             }
             if matches!(&schema.shape, SchemaShape::Array { .. })
                 && !capabilities.parameters.supports_non_exploded_query_arrays
-                && parameter_data.explode == Some(false)
+                && parameter.query_explode_is_false()
             {
                 bail!(
                     "{DIRECT_UNSUPPORTED_PREFIX} non-exploded query array parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
@@ -343,12 +365,9 @@ fn reject_unsupported_direct_parameter_serialization(
             }
             Ok(())
         }
-        Parameter::Path {
-            parameter_data,
-            style,
-        } => {
+        PpParameterLocation::Path => {
             if capabilities.parameters.requires_simple_path_style
-                && (*style != PathStyle::Simple || parameter_data.explode == Some(true))
+                && (!parameter.path_style_is_simple() || parameter.path_explode_is_true())
             {
                 bail!(
                     "{DIRECT_UNSUPPORTED_PREFIX} non-simple path parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
@@ -356,34 +375,32 @@ fn reject_unsupported_direct_parameter_serialization(
             }
             Ok(())
         }
-        Parameter::Header { .. } | Parameter::Cookie { .. } => Ok(()),
+        PpParameterLocation::Header | PpParameterLocation::Cookie => Ok(()),
     }
 }
 
 pub(super) fn add_body(
-    request_body: Option<&ReferenceOr<RequestBody>>,
+    request_body: Option<PpRequestBodyRef<'_>>,
     properties: &mut Map<String, Value>,
     required: &mut Vec<String>,
     args: &mut Vec<McpArg>,
     ctx: &McpArgumentContext<'_>,
 ) -> Result<()> {
-    let api = ctx.api;
+    let spec = ctx.spec;
     let capabilities = ctx.capabilities;
     let tool_name = ctx.tool_name;
     let operation_id = ctx.operation_id;
     let Some(request_body) = request_body else {
         return Ok(());
     };
-    let ReferenceOr::Item(body) = request_body else {
+    let Some(body) = request_body.item() else {
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} unresolved requestBody references for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
-    let Some(media_type) = body
-        .content
-        .get(capabilities.request_bodies.json_content_type)
-    else {
-        if body.content.is_empty() {
+    let json_content_type = capabilities.request_bodies.json_content_type;
+    if !body.has_content_type(json_content_type) {
+        if body.content_is_empty() {
             bail!(
                 "{DIRECT_UNSUPPORTED_PREFIX} requestBody without JSON content for tool '{tool_name}' (operationId '{operation_id}')"
             );
@@ -391,13 +408,13 @@ pub(super) fn add_body(
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} non-JSON request bodies for tool '{tool_name}' (operationId '{operation_id}')"
         );
-    };
-    let Some(schema) = media_type.schema.as_ref() else {
+    }
+    let Some(schema) = body.schema_for_content_type(json_content_type) else {
         bail!(
             "{DIRECT_UNSUPPORTED_PREFIX} schemaless JSON request body for tool '{tool_name}' (operationId '{operation_id}')"
         );
     };
-    let body_schema = schema_projection(schema, api);
+    let body_schema = schema_projection(schema, spec);
     if let SchemaShape::Object {
         properties: body_properties,
         required: body_required,
@@ -416,21 +433,31 @@ pub(super) fn add_body(
         for (name, property_schema) in body_properties {
             reject_reserved_arg(name, tool_name, operation_id)?;
             reject_reserved_cli_arg(name, tool_name, operation_id)?;
+            if let Some(reason) = &property_schema.unsupported_reason {
+                bail!(
+                    "{DIRECT_UNSUPPORTED_PREFIX} unsupported JSON request body field '{name}' for tool '{tool_name}' (operationId '{operation_id}'): {reason}"
+                );
+            }
             properties.insert(name.clone(), property_schema.json.clone());
             args.push(McpArg::flattened_body_field(
                 name.clone(),
-                body.required && body_required.contains(name),
-                value_kind_for_shape(&property_schema.shape),
+                body.required() && body_required.contains(name),
+                value_kind_for_schema(property_schema),
             ));
         }
-        if body.required {
+        if body.required() {
             required.extend(body_required.iter().cloned());
         }
         return Ok(());
     }
+    if let Some(reason) = &body_schema.unsupported_reason {
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} unsupported JSON request body schema for tool '{tool_name}' (operationId '{operation_id}'): {reason}"
+        );
+    }
     add_synthetic_body_arg(
         body_schema.json,
-        body.required,
+        body.required(),
         properties,
         required,
         args,
@@ -463,6 +490,15 @@ fn add_synthetic_body_arg(
     }
     args.push(McpArg::whole_json_body("body".to_string(), body_required));
     Ok(())
+}
+
+fn value_kind_for_schema(schema: &ProjectedSchema) -> ArgValueKind {
+    if schema.nullable {
+        if let Some(item) = PrimitiveKind::from_shape(&schema.shape) {
+            return ArgValueKind::NullablePrimitive { item };
+        }
+    }
+    value_kind_for_shape(&schema.shape)
 }
 
 fn value_kind_for_shape(shape: &SchemaShape) -> ArgValueKind {

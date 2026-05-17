@@ -234,6 +234,10 @@ fn render_arg_value_kind(value_kind: &ArgValueKind) -> String {
         ArgValueKind::Number => "CliValueKind::Number".to_string(),
         ArgValueKind::Boolean => "CliValueKind::Boolean".to_string(),
         ArgValueKind::Json => "CliValueKind::Json".to_string(),
+        ArgValueKind::NullablePrimitive { item } => format!(
+            "CliValueKind::NullablePrimitive {{ item: {} }}",
+            render_primitive_kind(*item)
+        ),
         ArgValueKind::PrimitiveArray { item } => format!(
             "CliValueKind::PrimitiveArray {{ item: {} }}",
             render_primitive_kind(*item)
@@ -387,6 +391,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_template_required_validation_accepts_explicit_null() {
+        let manifest = WrapperManifest::new(
+            "nullable-api".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+        );
+
+        let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("if !arguments.contains_key(name)"));
+        assert!(!rendered.contains("serde_json::Value::is_null"));
+    }
+
+    #[test]
     fn mcp_template_uses_manifest_runtime_metadata() {
         let spec = r#"
 openapi: 3.0.0
@@ -406,14 +425,14 @@ paths:
         '200':
           description: ok
 "#;
-        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
             "https://example.test".to_string(),
             false,
             AuthKind::Bearer,
         );
-        let api_model = ApiModel::from_openapi(&api, manifest.auth_env_var.as_deref()).unwrap();
+        let api_model = ApiModel::from_spec(&api, manifest.auth_env_var.as_deref()).unwrap();
         let manifest = manifest.with_api_model(api_model);
 
         let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
@@ -489,14 +508,14 @@ paths:
         '200':
           description: ok
 "#;
-        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let manifest = WrapperManifest::new(
             "cli-api".to_string(),
             "https://example.test".to_string(),
             false,
             AuthKind::None,
         );
-        let api_model = ApiModel::from_openapi(&api, None).unwrap();
+        let api_model = ApiModel::from_spec(&api, None).unwrap();
         let manifest = manifest.with_api_model(api_model);
 
         let rendered = render_template("cli_builder.rs", CLI_BUILDER_TEMPLATE, &manifest).unwrap();
@@ -587,14 +606,14 @@ paths:
         '200':
           description: ok
 "#;
-        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let manifest = WrapperManifest::new(
             "noargs".to_string(),
             "https://example.test".to_string(),
             false,
             AuthKind::None,
         );
-        let api_model = ApiModel::from_openapi(&api, None).unwrap();
+        let api_model = ApiModel::from_spec(&api, None).unwrap();
         let manifest = manifest.with_api_model(api_model);
 
         let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();
@@ -613,14 +632,14 @@ info:
   version: "1.0.0"
 paths: {}
 "#;
-        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let api = crate::spec::parse_spec_for_tests(spec).unwrap();
         let manifest = WrapperManifest::new(
             "empty".to_string(),
             "https://example.test".to_string(),
             false,
             AuthKind::None,
         );
-        let api_model = ApiModel::from_openapi(&api, None).unwrap();
+        let api_model = ApiModel::from_spec(&api, None).unwrap();
         let manifest = manifest.with_api_model(api_model);
 
         let rendered = render_template("mcp.rs", MCP_TEMPLATE, &manifest).unwrap();

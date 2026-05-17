@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
-use openapiv3::{OpenAPI, Parameter, ReferenceOr, SecurityScheme};
 use serde::Serialize;
+use serde_json::Value;
 
-use crate::spec::{traversal, AuthKind};
+use crate::spec::{traversal, AuthKind, PpParameterLocation, PpSpec};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum AuthSelectionPolicy {
@@ -95,20 +95,24 @@ pub(crate) enum AuthSelectionSource {
 }
 
 #[allow(dead_code)]
-pub(super) fn derive_auth_kind(spec: &OpenAPI) -> Result<AuthKind> {
+pub(super) fn derive_auth_kind(spec: &PpSpec) -> Result<AuthKind> {
     Ok(derive_auth_plan(spec)?.selected)
 }
 
-pub(super) fn derive_auth_plan(spec: &OpenAPI) -> Result<AuthPlan> {
+pub(super) fn derive_auth_plan(spec: &PpSpec) -> Result<AuthPlan> {
     derive_auth_plan_with_policy(spec, &AuthSelectionPolicy::default())
 }
 
 pub(crate) fn derive_auth_plan_with_policy(
-    spec: &OpenAPI,
+    spec: &PpSpec,
     policy: &AuthSelectionPolicy,
 ) -> Result<AuthPlan> {
     let requirements = derive_requirement_model(spec);
-    let Some(components) = &spec.components else {
+    let Some(security_schemes) = spec
+        .document()
+        .pointer("/components/securitySchemes")
+        .and_then(Value::as_object)
+    else {
         return match policy {
             AuthSelectionPolicy::ExplicitScheme { name } => {
                 bail!("auth scheme '{name}' was not found in components.securitySchemes")
@@ -116,7 +120,7 @@ pub(crate) fn derive_auth_plan_with_policy(
             AuthSelectionPolicy::FailAmbiguous => Ok(plan_from_query_heuristic(spec, requirements)),
         };
     };
-    if components.security_schemes.is_empty() {
+    if security_schemes.is_empty() {
         return match policy {
             AuthSelectionPolicy::ExplicitScheme { name } => {
                 bail!("auth scheme '{name}' was not found in components.securitySchemes")
@@ -128,36 +132,33 @@ pub(crate) fn derive_auth_plan_with_policy(
     let mut candidates = Vec::new();
     let mut unsupported = Vec::new();
 
-    for (name, scheme_ref) in &components.security_schemes {
-        match scheme_ref {
-            ReferenceOr::Item(scheme) => {
-                let auth_kind = auth_kind_for_scheme(scheme);
-                let supported = is_supported_auth_kind(&auth_kind);
-                let reason = unsupported_reason(&auth_kind);
-                let index = candidates.len();
-                candidates.push(AuthCandidate::SecurityScheme {
-                    name: name.clone(),
-                    auth_kind,
-                    supported,
-                    reason,
-                });
-                if !supported {
-                    unsupported.push(index);
-                }
-            }
-            ReferenceOr::Reference { reference } => {
-                let reason = format!("$ref security scheme not supported in MVP: {reference}");
-                let index = candidates.len();
-                candidates.push(AuthCandidate::SecurityScheme {
-                    name: name.clone(),
-                    auth_kind: AuthKind::Unsupported {
-                        reason: reason.clone(),
-                    },
-                    supported: false,
-                    reason: Some(reason),
-                });
-                unsupported.push(index);
-            }
+    for (name, scheme) in security_schemes {
+        if let Some(reference) = scheme.get("$ref").and_then(Value::as_str) {
+            let reason = format!("$ref security scheme not supported in MVP: {reference}");
+            let index = candidates.len();
+            candidates.push(AuthCandidate::SecurityScheme {
+                name: name.clone(),
+                auth_kind: AuthKind::Unsupported {
+                    reason: reason.clone(),
+                },
+                supported: false,
+                reason: Some(reason),
+            });
+            unsupported.push(index);
+            continue;
+        }
+        let auth_kind = auth_kind_for_scheme(scheme);
+        let supported = is_supported_auth_kind(&auth_kind);
+        let reason = unsupported_reason(&auth_kind);
+        let index = candidates.len();
+        candidates.push(AuthCandidate::SecurityScheme {
+            name: name.clone(),
+            auth_kind,
+            supported,
+            reason,
+        });
+        if !supported {
+            unsupported.push(index);
         }
     }
 
@@ -243,7 +244,7 @@ pub(crate) fn derive_auth_plan_with_policy(
     })
 }
 
-fn plan_from_query_heuristic(spec: &OpenAPI, requirements: AuthRequirementModel) -> AuthPlan {
+fn plan_from_query_heuristic(spec: &PpSpec, requirements: AuthRequirementModel) -> AuthPlan {
     let candidates = derive_query_api_key_candidates(spec);
     if let Some((selected, decision)) = select_from_candidate_indexes(
         &candidates,
@@ -270,21 +271,20 @@ fn plan_from_query_heuristic(spec: &OpenAPI, requirements: AuthRequirementModel)
     }
 }
 
-fn derive_requirement_model(spec: &OpenAPI) -> AuthRequirementModel {
+fn derive_requirement_model(spec: &PpSpec) -> AuthRequirementModel {
     let global = spec
-        .security
-        .as_deref()
+        .root_security_requirements()
         .map(requirement_alternatives)
         .unwrap_or_default();
     let mut operations_inheriting_global = 0;
     let mut operation_overrides = Vec::new();
 
     for operation_ref in traversal::operations(spec) {
-        match &operation_ref.operation.security {
+        match operation_ref.security_requirement_names() {
             Some(requirements) => operation_overrides.push(AuthOperationRequirement {
                 method: operation_ref.method.to_string(),
                 path: operation_ref.path.to_string(),
-                operation_id: operation_ref.operation.operation_id.clone(),
+                operation_id: operation_ref.raw_operation_id(),
                 requirements: requirement_alternatives(requirements),
             }),
             None if !global.is_empty() => operations_inheriting_global += 1,
@@ -299,14 +299,10 @@ fn derive_requirement_model(spec: &OpenAPI) -> AuthRequirementModel {
     }
 }
 
-fn requirement_alternatives(
-    requirements: &[openapiv3::SecurityRequirement],
-) -> Vec<AuthRequirementAlternative> {
+fn requirement_alternatives(requirements: Vec<Vec<String>>) -> Vec<AuthRequirementAlternative> {
     requirements
-        .iter()
-        .map(|requirement| AuthRequirementAlternative {
-            scheme_names: requirement.keys().cloned().collect(),
-        })
+        .into_iter()
+        .map(|scheme_names| AuthRequirementAlternative { scheme_names })
         .collect()
 }
 
@@ -399,7 +395,7 @@ impl AuthCandidate {
     }
 }
 
-fn derive_query_api_key_candidates(spec: &OpenAPI) -> Vec<AuthCandidate> {
+fn derive_query_api_key_candidates(spec: &PpSpec) -> Vec<AuthCandidate> {
     let operations = traversal::operations(spec);
 
     if operations.is_empty() {
@@ -410,25 +406,24 @@ fn derive_query_api_key_candidates(spec: &OpenAPI) -> Vec<AuthCandidate> {
     let mut first_required_query_names = Vec::new();
 
     for operation_ref in operations {
-        let required_query_params = required_query_params(
-            operation_ref
-                .path_parameters
-                .iter()
-                .chain(operation_ref.operation.parameters.iter()),
-        );
+        let parameters = operation_ref.parameters();
+        let required_query_params = required_query_params(parameters.iter());
         let Some(first_param) = required_query_params.first() else {
             first_required_query_names.push(None);
             continue;
         };
-        first_required_query_names.push(Some(first_param.name.clone()));
+        first_required_query_names.push(first_param.name().map(str::to_string));
 
         for param in required_query_params {
-            if !is_auth_query_param_name(&param.name) {
+            let Some(name) = param.name() else {
+                continue;
+            };
+            if !is_auth_query_param_name(name) {
                 continue;
             }
-            let key = param.name.to_ascii_lowercase();
+            let key = name.to_ascii_lowercase();
             let stats = candidates.entry(key).or_insert_with(|| QueryAuthStats {
-                param_name: param.name.clone(),
+                param_name: name.to_string(),
                 appearances: 0,
             });
             stats.appearances += 1;
@@ -460,16 +455,14 @@ struct QueryAuthStats {
 }
 
 fn required_query_params<'a>(
-    params: impl Iterator<Item = &'a ReferenceOr<Parameter>>,
-) -> Vec<&'a openapiv3::ParameterData> {
+    params: impl Iterator<Item = &'a crate::spec::PpParameterRef<'a>>,
+) -> Vec<crate::spec::PpParameter<'a>> {
     params
-        .filter_map(|param| match param {
-            ReferenceOr::Item(Parameter::Query { parameter_data, .. })
-                if parameter_data.required =>
-            {
-                Some(parameter_data)
-            }
-            _ => None,
+        .filter_map(|param| {
+            param.item().and_then(|param| {
+                (param.location() == Some(PpParameterLocation::Query) && param.required())
+                    .then_some(param)
+            })
         })
         .collect()
 }
@@ -493,31 +486,38 @@ fn is_auth_query_param_name(name: &str) -> bool {
     )
 }
 
-fn auth_kind_for_scheme(scheme: &SecurityScheme) -> AuthKind {
-    match scheme {
-        SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("bearer") => {
-            AuthKind::Bearer
-        }
-        SecurityScheme::HTTP { scheme, .. } if scheme.eq_ignore_ascii_case("basic") => {
-            AuthKind::HttpBasic
-        }
-        SecurityScheme::HTTP { scheme, .. } => AuthKind::Unsupported {
-            reason: format!("http auth scheme '{scheme}' not supported in MVP (only bearer/basic)"),
+fn auth_kind_for_scheme(scheme: &Value) -> AuthKind {
+    match scheme.get("type").and_then(Value::as_str).unwrap_or("") {
+        "http" => match scheme.get("scheme").and_then(Value::as_str).unwrap_or("") {
+            value if value.eq_ignore_ascii_case("bearer") => AuthKind::Bearer,
+            value if value.eq_ignore_ascii_case("basic") => AuthKind::HttpBasic,
+            value => AuthKind::Unsupported {
+                reason: format!(
+                    "http auth scheme '{value}' not supported in MVP (only bearer/basic)"
+                ),
+            },
         },
-        SecurityScheme::APIKey { location, name, .. } => match location {
-            openapiv3::APIKeyLocation::Header => AuthKind::ApiKey {
-                header_name: name.clone(),
+        "apiKey" => match scheme.get("in").and_then(Value::as_str).unwrap_or("") {
+            "header" => AuthKind::ApiKey {
+                header_name: scheme
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             },
             other => AuthKind::Unsupported {
-                reason: format!("apiKey in '{other:?}' not supported in MVP (only header)"),
+                reason: format!("apiKey in '{other}' not supported in MVP (only header)"),
             },
         },
-        SecurityScheme::OAuth2 { .. } => AuthKind::Unsupported {
+        "oauth2" => AuthKind::Unsupported {
             reason: "OAuth2 flows are not implemented; use an explicit bearer security scheme"
                 .into(),
         },
-        SecurityScheme::OpenIDConnect { .. } => AuthKind::Unsupported {
+        "openIdConnect" => AuthKind::Unsupported {
             reason: "OpenID Connect not supported in MVP".into(),
+        },
+        other => AuthKind::Unsupported {
+            reason: format!("security scheme type '{other}' not supported in MVP"),
         },
     }
 }
@@ -572,13 +572,13 @@ components:
 
     #[test]
     fn bearer_auth_detected() {
-        let spec: OpenAPI = serde_yaml::from_str(BEARER_SPEC).unwrap();
+        let spec = crate::spec::parse_spec_for_tests(BEARER_SPEC).unwrap();
         assert_eq!(derive_auth_kind(&spec).unwrap(), AuthKind::Bearer);
     }
 
     #[test]
     fn auth_plan_documents_unambiguous_supported_auth() {
-        let spec: OpenAPI = serde_yaml::from_str(BEARER_SPEC).unwrap();
+        let spec = crate::spec::parse_spec_for_tests(BEARER_SPEC).unwrap();
         let plan = derive_auth_plan(&spec).unwrap();
 
         assert_eq!(plan.selected, AuthKind::Bearer);
@@ -604,7 +604,7 @@ components:
 
     #[test]
     fn http_basic_auth_detected() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -625,7 +625,7 @@ components:
 
     #[test]
     fn ambiguous_multi_scheme_plan_fails_by_default() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -660,7 +660,7 @@ components:
 
     #[test]
     fn fail_ambiguous_policy_errors_on_multiple_selectable_component_schemes() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -689,7 +689,7 @@ components:
 
     #[test]
     fn explicit_policy_selects_named_component_scheme() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -731,7 +731,7 @@ components:
 
     #[test]
     fn explicit_policy_errors_when_scheme_is_missing() {
-        let spec: OpenAPI = serde_yaml::from_str(BEARER_SPEC).unwrap();
+        let spec = crate::spec::parse_spec_for_tests(BEARER_SPEC).unwrap();
 
         let err = derive_auth_plan_with_policy(
             &spec,
@@ -747,7 +747,7 @@ components:
 
     #[test]
     fn explicit_policy_errors_when_scheme_is_unsupported() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -778,7 +778,7 @@ components:
 
     #[test]
     fn auth_plan_records_security_requirements_for_explicit_selection() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -827,7 +827,7 @@ components:
 
     #[test]
     fn oauth2_first_bearer_second_selects_supported_scheme() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -851,7 +851,7 @@ components:
 
     #[test]
     fn oauth2_first_apikey_second_selects_supported_scheme() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -896,7 +896,7 @@ components:
 
     #[test]
     fn oauth2_only_plan_is_unsupported() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -953,7 +953,7 @@ components:
 
     #[test]
     fn all_unsupported_auth_returns_first_unsupported() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -982,7 +982,7 @@ components:
 
     #[test]
     fn unsupported_only_plan_documents_first_reason() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -1020,7 +1020,7 @@ components:
 
     #[test]
     fn apikey_header_detected() {
-        let spec: OpenAPI = serde_yaml::from_str(APIKEY_SPEC).unwrap();
+        let spec = crate::spec::parse_spec_for_tests(APIKEY_SPEC).unwrap();
         assert_eq!(
             derive_auth_kind(&spec).unwrap(),
             AuthKind::ApiKey {
@@ -1031,7 +1031,7 @@ components:
 
     #[test]
     fn required_license_query_param_in_all_ops_detects_query_api_key() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -1068,7 +1068,7 @@ paths:
 
     #[test]
     fn query_api_key_plan_documents_heuristic_basis() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -1119,7 +1119,7 @@ paths:
 
     #[test]
     fn path_level_query_api_key_detects_query_api_key() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:
@@ -1155,7 +1155,7 @@ paths:
 
     #[test]
     fn inconsistent_auth_like_query_param_is_not_auth() {
-        let spec: OpenAPI = serde_yaml::from_str(
+        let spec = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info:

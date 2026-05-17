@@ -186,7 +186,7 @@ impl Cli {
                     for report in &loaded.reports {
                         eprintln!("pp: {}", report.formatted_warning());
                     }
-                    for operation in crate::spec::slice::list_operations(&loaded.api) {
+                    for operation in crate::spec::slice::list_operations(&loaded.spec) {
                         println!("{}", serde_json::to_string(&operation)?);
                     }
                 } else {

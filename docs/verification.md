@@ -27,6 +27,7 @@ Run manually or by the weekly `Generated Workspace Smoke` workflow. When runtime
 ```bash
 cargo test --test petstore_smoke -- --ignored
 cargo test --test slicing -- --ignored
+cargo test --test openapi31 -- --ignored
 cargo test --test bearer_smoke -- --ignored
 cargo test --test apikey_smoke -- --ignored
 cargo test --test basic_smoke -- --ignored
@@ -38,6 +39,7 @@ Purpose:
 
 - Prove representative clean generated workspaces compile with `cargo build --release`.
 - Keep full Petstore as strict native-subset rejection coverage and sliced Petstore as representative generated native workspace build coverage.
+- Build and run a generated workspace from the OpenAPI 3.1 safe subset, including nullable `[T, null]`, `$defs`, JSON body fields, path params, and repeated query-array serialization.
 - Exercise bearer, API key, and basic auth header behavior against local `mockito` servers.
 - Exercise repeated query-array serialization as repeated query parameters.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
@@ -53,7 +55,7 @@ Run manually before release candidates or after large generator/runtime changes,
 cargo test --test dogfood -- --ignored
 ```
 
-Optional large-spec manual checks should use strict, parser-ready OpenAPI 3.0 fixtures. Public specs that require shape repair are intentionally expected to fail until their source specs are fixed upstream or preprocessed outside `pp`.
+Optional large-spec manual checks should use strict, parser-ready OpenAPI 3.0 fixtures or specs that fit the documented OpenAPI 3.1 safe subset. Public specs that require shape repair or broad JSON Schema 2020-12 support are intentionally expected to fail until their source specs are fixed upstream or preprocessed outside `pp`.
 
 Purpose:
 

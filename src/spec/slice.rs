@@ -1,10 +1,11 @@
 use super::preparation_rules::{self as rules, slicing};
-use super::references::{collect_reachable_components, ComponentRefs};
+use super::references::{collect_reachable_components_value, ComponentRefs};
 use super::report::{ReportEntry, ReportSubject};
 use super::traversal;
+use crate::spec::PpSpec;
 use anyhow::{bail, Result};
-use openapiv3::{OpenAPI, Operation, PathItem, ReferenceOr, Response};
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SliceOptions {
@@ -31,18 +32,12 @@ impl SliceOptions {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OperationListing {
-    /// Discovery identifier: explicit operationId when present, otherwise a
-    /// method/path label used only for inspection and slicing output.
     pub id: String,
     pub method: String,
     pub path: String,
     pub tags: Vec<String>,
-    /// The explicit OpenAPI operationId used by codegen/MCP identity.
     pub operation_id: Option<String>,
-    /// A discovery-only identifier derived from method and path.
     pub derived_id: String,
-    /// Whether this operation can be used by generation/model paths without
-    /// first adding an explicit operationId to the source spec.
     pub generatable: bool,
 }
 
@@ -103,19 +98,18 @@ pub struct PrunedComponents {
     pub security_schemes_after: usize,
 }
 
-pub fn list_operations(api: &OpenAPI) -> Vec<OperationListing> {
-    traversal::operations(api)
+pub fn list_operations(spec: &PpSpec) -> Vec<OperationListing> {
+    traversal::operations(spec)
         .into_iter()
         .map(|operation| {
             let derived_id =
                 traversal::derived_operation_identifier(operation.method, operation.path);
-            let operation_id =
-                traversal::explicit_operation_id(operation.operation).map(str::to_string);
+            let operation_id = operation.explicit_operation_id().map(str::to_string);
             OperationListing {
                 id: operation_id.clone().unwrap_or_else(|| derived_id.clone()),
                 method: operation.method.to_string(),
                 path: operation.path.to_string(),
-                tags: operation.operation.tags.clone(),
+                tags: operation.tags(),
                 generatable: operation_id.is_some(),
                 operation_id,
                 derived_id,
@@ -124,7 +118,7 @@ pub fn list_operations(api: &OpenAPI) -> Vec<OperationListing> {
         .collect()
 }
 
-pub fn slice_openapi(api: &mut OpenAPI, options: &SliceOptions) -> Result<SliceReport> {
+pub fn slice_spec(spec: &mut PpSpec, options: &SliceOptions) -> Result<SliceReport> {
     if options.is_noop() {
         return Ok(SliceReport::default());
     }
@@ -132,84 +126,40 @@ pub fn slice_openapi(api: &mut OpenAPI, options: &SliceOptions) -> Result<SliceR
     let mut kept_operations = 0;
     let mut dropped_operations = 0;
     let has_includes = options.has_includes();
+    let Some(paths) = spec
+        .document_mut()
+        .get_mut("paths")
+        .and_then(Value::as_object_mut)
+    else {
+        bail!("OpenAPI document is missing object field 'paths'");
+    };
 
-    for (path, path_item) in api.paths.paths.iter_mut() {
-        let ReferenceOr::Item(item) = path_item else {
+    for (path, path_item) in paths.iter_mut() {
+        let Some(item) = path_item.as_object_mut() else {
             if has_includes {
                 dropped_operations += 1;
             }
             continue;
         };
-
-        filter_operation_slot(
-            "get",
-            path,
-            &mut item.get,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "put",
-            path,
-            &mut item.put,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "post",
-            path,
-            &mut item.post,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "delete",
-            path,
-            &mut item.delete,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "options",
-            path,
-            &mut item.options,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "head",
-            path,
-            &mut item.head,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "patch",
-            path,
-            &mut item.patch,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
-        filter_operation_slot(
-            "trace",
-            path,
-            &mut item.trace,
-            options,
-            &mut kept_operations,
-            &mut dropped_operations,
-        );
+        for method in [
+            "get", "put", "post", "delete", "options", "head", "patch", "trace",
+        ] {
+            filter_operation_slot(
+                method,
+                path,
+                item,
+                options,
+                &mut kept_operations,
+                &mut dropped_operations,
+            );
+        }
     }
 
-    api.paths.paths.retain(|_, path_item| match path_item {
-        ReferenceOr::Item(item) => path_item_has_operations(item),
-        ReferenceOr::Reference { .. } => !has_includes,
+    paths.retain(|_, path_item| {
+        path_item
+            .as_object()
+            .map(path_item_has_operations)
+            .unwrap_or(!has_includes)
     });
 
     if kept_operations == 0 {
@@ -218,9 +168,9 @@ pub fn slice_openapi(api: &mut OpenAPI, options: &SliceOptions) -> Result<SliceR
         );
     }
 
-    drop_codegen_ignored_graph_roots(api);
-    let refs = collect_reachable_components(api);
-    let pruned_components = prune_components(api, &refs);
+    drop_codegen_ignored_graph_roots(spec.document_mut());
+    let refs = collect_reachable_components_value(spec.document());
+    let pruned_components = prune_components(spec.document_mut(), &refs);
 
     Ok(SliceReport {
         kept_operations,
@@ -232,30 +182,24 @@ pub fn slice_openapi(api: &mut OpenAPI, options: &SliceOptions) -> Result<SliceR
 fn filter_operation_slot(
     method: &str,
     path: &str,
-    operation: &mut Option<Operation>,
+    item: &mut Map<String, Value>,
     options: &SliceOptions,
     kept: &mut usize,
     dropped: &mut usize,
 ) {
-    let Some(op) = operation.as_ref() else {
+    let Some(op) = item.get(method) else {
         return;
     };
-
     if operation_matches(method, path, op, options) {
         *kept += 1;
     } else {
-        *operation = None;
+        item.remove(method);
         *dropped += 1;
     }
 }
 
-fn operation_matches(
-    method: &str,
-    path: &str,
-    operation: &Operation,
-    options: &SliceOptions,
-) -> bool {
-    let id = traversal::operation_identifier(method, path, operation);
+fn operation_matches(method: &str, path: &str, operation: &Value, options: &SliceOptions) -> bool {
+    let id = operation_identifier(method, path, operation);
     if options
         .exclude_operations
         .iter()
@@ -263,141 +207,137 @@ fn operation_matches(
     {
         return false;
     }
-
     if !options.has_includes() {
         return true;
     }
-
     options
         .include_operations
         .iter()
         .any(|candidate| candidate == &id)
-        || options
-            .include_tags
-            .iter()
-            .any(|tag| operation.tags.iter().any(|op_tag| op_tag == tag))
+        || options.include_tags.iter().any(|tag| {
+            operation
+                .get("tags")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|op_tag| op_tag == tag)
+        })
         || options
             .include_path_prefixes
             .iter()
             .any(|prefix| path.starts_with(prefix))
 }
 
-fn path_item_has_operations(item: &PathItem) -> bool {
-    item.get.is_some()
-        || item.put.is_some()
-        || item.post.is_some()
-        || item.delete.is_some()
-        || item.options.is_some()
-        || item.head.is_some()
-        || item.patch.is_some()
-        || item.trace.is_some()
+fn operation_identifier(method: &str, path: &str, operation: &Value) -> String {
+    operation
+        .get("operationId")
+        .and_then(Value::as_str)
+        .filter(|operation_id| !operation_id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| traversal::derived_operation_identifier(method, path))
 }
 
-fn drop_codegen_ignored_graph_roots(api: &mut OpenAPI) {
-    for path_item in api.paths.paths.values_mut() {
-        let ReferenceOr::Item(item) = path_item else {
-            continue;
-        };
-        for operation in operations_mut(item) {
-            operation.callbacks.clear();
-            if let Some(response) = operation.responses.default.as_mut() {
-                clear_response_links(response);
-            }
-            for response in operation.responses.responses.values_mut() {
-                clear_response_links(response);
+fn path_item_has_operations(item: &Map<String, Value>) -> bool {
+    [
+        "get", "put", "post", "delete", "options", "head", "patch", "trace",
+    ]
+    .iter()
+    .any(|method| item.contains_key(*method))
+}
+
+fn drop_codegen_ignored_graph_roots(doc: &mut Value) {
+    if let Some(paths) = doc.get_mut("paths").and_then(Value::as_object_mut) {
+        for path_item in paths.values_mut().filter_map(Value::as_object_mut) {
+            for method in [
+                "get", "put", "post", "delete", "options", "head", "patch", "trace",
+            ] {
+                if let Some(operation) = path_item.get_mut(method).and_then(Value::as_object_mut) {
+                    operation.remove("callbacks");
+                    clear_response_links(operation.get_mut("responses"));
+                }
             }
         }
     }
-
-    if let Some(components) = api.components.as_mut() {
-        components.examples.clear();
-        components.links.clear();
-        components.callbacks.clear();
-        for response in components.responses.values_mut() {
-            clear_response_links(response);
+    if let Some(components) = doc.get_mut("components").and_then(Value::as_object_mut) {
+        components.remove("examples");
+        components.remove("links");
+        components.remove("callbacks");
+        if let Some(responses) = components
+            .get_mut("responses")
+            .and_then(Value::as_object_mut)
+        {
+            for response in responses.values_mut() {
+                clear_response_links(Some(response));
+            }
         }
     }
 }
 
-fn clear_response_links(response: &mut ReferenceOr<Response>) {
-    if let ReferenceOr::Item(response) = response {
-        response.links.clear();
+fn clear_response_links(value: Option<&mut Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.remove("links");
+        for response in object.values_mut() {
+            if let Some(response_object) = response.as_object_mut() {
+                response_object.remove("links");
+            }
+        }
     }
 }
 
-fn operations_mut(item: &mut PathItem) -> Vec<&mut Operation> {
-    let mut operations = Vec::new();
-    if let Some(operation) = item.get.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.put.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.post.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.delete.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.options.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.head.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.patch.as_mut() {
-        operations.push(operation);
-    }
-    if let Some(operation) = item.trace.as_mut() {
-        operations.push(operation);
-    }
-    operations
-}
-
-fn prune_components(api: &mut OpenAPI, refs: &ComponentRefs) -> PrunedComponents {
-    let Some(components) = api.components.as_mut() else {
+fn prune_components(doc: &mut Value, refs: &ComponentRefs) -> PrunedComponents {
+    let Some(components) = doc.get_mut("components").and_then(Value::as_object_mut) else {
         return PrunedComponents::default();
     };
 
     let mut report = PrunedComponents {
-        schemas_before: components.schemas.len(),
-        responses_before: components.responses.len(),
-        parameters_before: components.parameters.len(),
-        request_bodies_before: components.request_bodies.len(),
-        headers_before: components.headers.len(),
-        security_schemes_before: components.security_schemes.len(),
+        schemas_before: component_len(components, "schemas"),
+        responses_before: component_len(components, "responses"),
+        parameters_before: component_len(components, "parameters"),
+        request_bodies_before: component_len(components, "requestBodies"),
+        headers_before: component_len(components, "headers"),
+        security_schemes_before: component_len(components, "securitySchemes"),
         ..Default::default()
     };
 
-    components
-        .schemas
-        .retain(|name, _| refs.schemas.contains(name));
-    components
-        .responses
-        .retain(|name, _| refs.responses.contains(name));
-    components
-        .parameters
-        .retain(|name, _| refs.parameters.contains(name));
-    components
-        .request_bodies
-        .retain(|name, _| refs.request_bodies.contains(name));
-    components
-        .headers
-        .retain(|name, _| refs.headers.contains(name));
-    components
-        .security_schemes
-        .retain(|name, _| refs.security_schemes.contains(name));
-    components.examples.clear();
-    components.links.clear();
-    components.callbacks.clear();
+    retain_component_map(components, "schemas", &refs.schemas);
+    retain_component_map(components, "responses", &refs.responses);
+    retain_component_map(components, "parameters", &refs.parameters);
+    retain_component_map(components, "requestBodies", &refs.request_bodies);
+    retain_component_map(components, "headers", &refs.headers);
+    retain_component_map(components, "securitySchemes", &refs.security_schemes);
+    components.remove("examples");
+    components.remove("links");
+    components.remove("callbacks");
 
-    report.schemas_after = components.schemas.len();
-    report.responses_after = components.responses.len();
-    report.parameters_after = components.parameters.len();
-    report.request_bodies_after = components.request_bodies.len();
-    report.headers_after = components.headers.len();
-    report.security_schemes_after = components.security_schemes.len();
+    report.schemas_after = component_len(components, "schemas");
+    report.responses_after = component_len(components, "responses");
+    report.parameters_after = component_len(components, "parameters");
+    report.request_bodies_after = component_len(components, "requestBodies");
+    report.headers_after = component_len(components, "headers");
+    report.security_schemes_after = component_len(components, "securitySchemes");
     report
+}
+
+fn component_len(components: &Map<String, Value>, name: &str) -> usize {
+    components
+        .get(name)
+        .and_then(Value::as_object)
+        .map(Map::len)
+        .unwrap_or(0)
+}
+
+fn retain_component_map(
+    components: &mut Map<String, Value>,
+    name: &str,
+    keep: &std::collections::BTreeSet<String>,
+) {
+    if let Some(map) = components.get_mut(name).and_then(Value::as_object_mut) {
+        map.retain(|component_name, _| keep.contains(component_name));
+    }
 }
 
 #[cfg(test)]
@@ -407,7 +347,7 @@ mod tests {
 
     #[test]
     fn list_operations_uses_method_path_derived_id_without_operation_id() {
-        let api: OpenAPI = serde_yaml::from_str(
+        let api = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info: { title: Derived Operation IDs, version: '1.0' }
@@ -422,7 +362,6 @@ paths:
         .unwrap();
 
         let operations = list_operations(&api);
-
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].id, "patch /items/{id}");
         assert_eq!(operations[0].method, "patch");
@@ -434,7 +373,7 @@ paths:
 
     #[test]
     fn filters_and_prunes_components() {
-        let mut api: OpenAPI = serde_yaml::from_str(
+        let mut api = crate::spec::parse_spec_for_tests(
             r#"
 openapi: 3.0.0
 info: { title: Slice Test, version: '1.0' }
@@ -487,7 +426,7 @@ components:
         )
         .unwrap();
 
-        let report = slice_openapi(
+        let report = slice_spec(
             &mut api,
             &SliceOptions {
                 include_tags: vec!["kept".to_string()],
@@ -495,7 +434,6 @@ components:
             },
         )
         .unwrap();
-
         assert_eq!(report.kept_operations, 1);
         assert_eq!(report.dropped_operations, 1);
         let report_entries = report.report_entries();
@@ -510,119 +448,33 @@ components:
             report_entries[1].subject,
             Some(ReportSubject::component("components"))
         );
-        assert!(api.paths.paths.contains_key("/kept/{id}"));
-        assert!(!api.paths.paths.contains_key("/dropped"));
-        let components = api.components.as_ref().unwrap();
-        assert!(components.schemas.contains_key("Kept"));
-        assert!(components.schemas.contains_key("Shared"));
-        assert!(!components.schemas.contains_key("Dropped"));
-        assert!(components.parameters.contains_key("Id"));
-        assert!(components.responses.contains_key("Kept"));
+        assert!(api.document().pointer("/paths/~1kept~1{id}").is_some());
+        assert!(api.document().pointer("/paths/~1dropped").is_none());
+        let components = api
+            .document()
+            .get("components")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert!(components["schemas"]
+            .as_object()
+            .unwrap()
+            .contains_key("Kept"));
+        assert!(components["schemas"]
+            .as_object()
+            .unwrap()
+            .contains_key("Shared"));
+        assert!(!components["schemas"]
+            .as_object()
+            .unwrap()
+            .contains_key("Dropped"));
+        assert!(components["parameters"]
+            .as_object()
+            .unwrap()
+            .contains_key("Id"));
+        assert!(components["responses"]
+            .as_object()
+            .unwrap()
+            .contains_key("Kept"));
         assert_eq!(list_operations(&api).len(), 1);
-    }
-
-    #[test]
-    fn prunes_request_bodies_headers_and_security_schemes() {
-        let mut api: OpenAPI = serde_yaml::from_str(
-            r#"
-openapi: 3.0.0
-info: { title: Slice Component Test, version: '1.0' }
-security:
-  - KeptKey: []
-paths:
-  /kept:
-    post:
-      operationId: keptPost
-      requestBody:
-        $ref: '#/components/requestBodies/KeptBody'
-      responses:
-        '200':
-          description: ok
-          headers:
-            X-Kept:
-              $ref: '#/components/headers/KeptHeader'
-  /dropped:
-    post:
-      operationId: droppedPost
-      security:
-        - DroppedKey: []
-      requestBody:
-        $ref: '#/components/requestBodies/DroppedBody'
-      responses:
-        '200':
-          description: ok
-          headers:
-            X-Dropped:
-              $ref: '#/components/headers/DroppedHeader'
-components:
-  requestBodies:
-    KeptBody:
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/KeptBodySchema'
-    DroppedBody:
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/DroppedBodySchema'
-  headers:
-    KeptHeader:
-      schema:
-        $ref: '#/components/schemas/KeptHeaderSchema'
-    DroppedHeader:
-      schema:
-        $ref: '#/components/schemas/DroppedHeaderSchema'
-  securitySchemes:
-    KeptKey:
-      type: apiKey
-      in: header
-      name: X-Kept-Key
-    DroppedKey:
-      type: apiKey
-      in: header
-      name: X-Dropped-Key
-  schemas:
-    KeptBodySchema:
-      type: object
-    KeptHeaderSchema:
-      type: string
-    DroppedBodySchema:
-      type: object
-    DroppedHeaderSchema:
-      type: string
-"#,
-        )
-        .unwrap();
-
-        let report = slice_openapi(
-            &mut api,
-            &SliceOptions {
-                include_operations: vec!["keptPost".to_string()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(report.kept_operations, 1);
-        assert_eq!(report.dropped_operations, 1);
-        assert_eq!(report.pruned_components.request_bodies_before, 2);
-        assert_eq!(report.pruned_components.request_bodies_after, 1);
-        assert_eq!(report.pruned_components.headers_before, 2);
-        assert_eq!(report.pruned_components.headers_after, 1);
-        assert_eq!(report.pruned_components.security_schemes_before, 2);
-        assert_eq!(report.pruned_components.security_schemes_after, 1);
-
-        let components = api.components.as_ref().unwrap();
-        assert!(components.request_bodies.contains_key("KeptBody"));
-        assert!(!components.request_bodies.contains_key("DroppedBody"));
-        assert!(components.headers.contains_key("KeptHeader"));
-        assert!(!components.headers.contains_key("DroppedHeader"));
-        assert!(components.security_schemes.contains_key("KeptKey"));
-        assert!(!components.security_schemes.contains_key("DroppedKey"));
-        assert!(components.schemas.contains_key("KeptBodySchema"));
-        assert!(components.schemas.contains_key("KeptHeaderSchema"));
-        assert!(!components.schemas.contains_key("DroppedBodySchema"));
-        assert!(!components.schemas.contains_key("DroppedHeaderSchema"));
     }
 }

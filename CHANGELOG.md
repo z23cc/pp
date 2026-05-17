@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Verification profiles are documented in `docs/verification.md`.
 - Manual/scheduled generated-workspace smoke workflow for standard and deep profiles.
+- OpenAPI 3.1 safe-subset generated-workspace smoke coverage.
 
 ## [0.1.0] - TBD
 
@@ -24,12 +25,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - MCP `tools/list` cursor pagination.
 - MCP response shaping via `_pp_fields` and `_pp_compact`.
 - Internal generation pipeline, API/MCP model layer, and backend adapter seam.
+- Strict OpenAPI 3.1 safe-subset support for primitive path/query params, exploded primitive query arrays, JSON request bodies, `components/schemas` plus `$defs` refs, and nullable `type: [T, null]` unions.
 
 ### Changed
 
 - Wrapper rendering consumes precomputed model data instead of walking raw OpenAPI.
 - Generated workspaces use the native direct HTTP runtime for both human CLI commands and MCP tools.
-- Strict generation rejects unsupported selected operation shapes instead of rewriting or omitting them.
+- Strict generation rejects unsupported selected operation shapes and unsupported OpenAPI 3.1 JSON Schema features instead of rewriting, falling back, or omitting them.
 
 ### Fixed
 

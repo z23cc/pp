@@ -20,11 +20,11 @@ pub(crate) fn build_request_parts(
         let Some(value) = invocation.arguments.get(arg.json_name) else {
             continue;
         };
-        if value.is_null() {
-            continue;
-        }
         match arg.binding {
             ArgBinding::PathParam { wire_name } => {
+                if value.is_null() {
+                    continue;
+                }
                 let encoded = encode_path_value(value)?;
                 let placeholder = format!("{}{}{}", "{", wire_name, "}");
                 if !path.contains(&placeholder) {
@@ -35,7 +35,12 @@ pub(crate) fn build_request_parts(
                 }
                 path = path.replace(&placeholder, &encoded);
             }
-            ArgBinding::QueryParam { wire_name } => query.push((wire_name, value.clone())),
+            ArgBinding::QueryParam { wire_name } => {
+                if value.is_null() {
+                    continue;
+                }
+                query.push((wire_name, value.clone()))
+            }
             ArgBinding::FlattenedJsonBodyField => {
                 flattened_body.insert(arg.json_name.to_string(), value.clone());
             }

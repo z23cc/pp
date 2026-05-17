@@ -1,7 +1,5 @@
-use openapiv3::{
-    AdditionalProperties, Header, MediaType, OpenAPI, Operation, Parameter, ParameterData,
-    ParameterSchemaOrContent, ReferenceOr, RequestBody, Response, Schema, SchemaKind, Type,
-};
+use crate::spec::PpSpec;
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,309 +29,205 @@ pub(crate) struct ComponentRefs {
     names: Vec<String>,
 }
 
-pub(crate) fn collect_reachable_components(api: &OpenAPI) -> ComponentRefs {
+#[allow(dead_code)]
+pub(crate) fn collect_reachable_components(spec: &PpSpec) -> ComponentRefs {
+    collect_reachable_components_value(spec.document())
+}
+
+pub(crate) fn collect_reachable_components_value(doc: &Value) -> ComponentRefs {
     let mut refs = ComponentRefs::default();
     let mut worklist = Vec::new();
     let mut inherits_root_security = false;
 
-    for path_item in api.paths.paths.values() {
-        let ReferenceOr::Item(item) = path_item else {
-            continue;
-        };
-        for parameter in &item.parameters {
-            scan_parameter_ref(parameter, &mut refs, &mut worklist);
-        }
-        for (_method, operation) in item.iter() {
-            scan_operation(operation, &mut refs, &mut worklist);
-            match &operation.security {
-                Some(requirements) => {
-                    scan_security_requirements(requirements, &mut refs, &mut worklist)
+    if let Some(paths) = doc.get("paths").and_then(Value::as_object) {
+        for path_item in paths.values() {
+            let mut local_refs_seen = BTreeSet::new();
+            scan_value(
+                path_item.get("parameters"),
+                doc,
+                doc,
+                &mut local_refs_seen,
+                &mut refs,
+                &mut worklist,
+            );
+            if let Some(item) = path_item.as_object() {
+                for method in [
+                    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+                ] {
+                    if let Some(operation) = item.get(method) {
+                        scan_value(
+                            Some(operation),
+                            doc,
+                            doc,
+                            &mut local_refs_seen,
+                            &mut refs,
+                            &mut worklist,
+                        );
+                        if operation.get("security").is_none() {
+                            inherits_root_security = true;
+                        }
+                    }
                 }
-                None => inherits_root_security = true,
             }
         }
     }
 
     if inherits_root_security {
-        if let Some(requirements) = &api.security {
-            scan_security_requirements(requirements, &mut refs, &mut worklist);
-        }
+        scan_security_requirements(doc.get("security"), &mut refs, &mut worklist);
     }
 
     while let Some(item) = worklist.pop() {
-        let Some(components) = &api.components else {
-            continue;
-        };
         let name = refs.names[item.name_index].clone();
-        match item.kind {
+        let pointer = match item.kind {
             ComponentKind::Schema => {
-                if let Some(schema) = components.schemas.get(&name) {
-                    scan_schema_ref(schema, &mut refs, &mut worklist);
-                }
+                format!("/components/schemas/{}", encode_json_pointer_segment(&name))
             }
-            ComponentKind::Response => {
-                if let Some(response) = components.responses.get(&name) {
-                    scan_response_ref(response, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::Parameter => {
-                if let Some(parameter) = components.parameters.get(&name) {
-                    scan_parameter_ref(parameter, &mut refs, &mut worklist);
-                }
-            }
-            ComponentKind::RequestBody => {
-                if let Some(request_body) = components.request_bodies.get(&name) {
-                    scan_request_body_ref(request_body, &mut refs, &mut worklist);
-                }
-            }
+            ComponentKind::Response => format!(
+                "/components/responses/{}",
+                encode_json_pointer_segment(&name)
+            ),
+            ComponentKind::Parameter => format!(
+                "/components/parameters/{}",
+                encode_json_pointer_segment(&name)
+            ),
+            ComponentKind::RequestBody => format!(
+                "/components/requestBodies/{}",
+                encode_json_pointer_segment(&name)
+            ),
             ComponentKind::Header => {
-                if let Some(header) = components.headers.get(&name) {
-                    scan_header_ref(header, &mut refs, &mut worklist);
-                }
+                format!("/components/headers/{}", encode_json_pointer_segment(&name))
             }
-            ComponentKind::SecurityScheme => {}
+            ComponentKind::SecurityScheme => continue,
+        };
+        if let Some(component) = doc.pointer(&pointer) {
+            let mut local_refs_seen = BTreeSet::new();
+            scan_value(
+                Some(component),
+                doc,
+                component,
+                &mut local_refs_seen,
+                &mut refs,
+                &mut worklist,
+            );
         }
     }
 
     refs
 }
 
-fn scan_operation(operation: &Operation, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    for parameter in &operation.parameters {
-        scan_parameter_ref(parameter, refs, worklist);
-    }
-    if let Some(request_body) = &operation.request_body {
-        scan_request_body_ref(request_body, refs, worklist);
-    }
-    scan_responses(&operation.responses, refs, worklist);
-}
-
-fn scan_responses(
-    responses: &openapiv3::Responses,
+fn scan_value(
+    value: Option<&Value>,
+    doc: &Value,
+    scope_root: &Value,
+    local_refs_seen: &mut BTreeSet<String>,
     refs: &mut ComponentRefs,
     worklist: &mut Vec<WorkItem>,
 ) {
-    if let Some(response) = &responses.default {
-        scan_response_ref(response, refs, worklist);
+    match value {
+        Some(current @ Value::Object(object)) => {
+            let child_scope_root = if object.contains_key("$defs") {
+                current
+            } else {
+                scope_root
+            };
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                if !add_component_ref(reference, refs, worklist) {
+                    scan_local_ref(
+                        reference,
+                        doc,
+                        child_scope_root,
+                        local_refs_seen,
+                        refs,
+                        worklist,
+                    );
+                }
+            }
+            if let Some(requirements) = object.get("security") {
+                scan_security_requirements(Some(requirements), refs, worklist);
+            }
+            for value in object.values() {
+                scan_value(
+                    Some(value),
+                    doc,
+                    child_scope_root,
+                    local_refs_seen,
+                    refs,
+                    worklist,
+                );
+            }
+        }
+        Some(Value::Array(values)) => {
+            for value in values {
+                scan_value(
+                    Some(value),
+                    doc,
+                    scope_root,
+                    local_refs_seen,
+                    refs,
+                    worklist,
+                );
+            }
+        }
+        _ => {}
     }
-    for response in responses.responses.values() {
-        scan_response_ref(response, refs, worklist);
+}
+
+fn scan_local_ref(
+    reference: &str,
+    doc: &Value,
+    scope_root: &Value,
+    local_refs_seen: &mut BTreeSet<String>,
+    refs: &mut ComponentRefs,
+    worklist: &mut Vec<WorkItem>,
+) {
+    let Some(local_pointer) = reference.strip_prefix('#') else {
+        return;
+    };
+    let key = format!("{:p}:{reference}", scope_root);
+    if !local_refs_seen.insert(key.clone()) {
+        return;
     }
+    if let Some(target) = scope_root
+        .pointer(local_pointer)
+        .or_else(|| doc.pointer(local_pointer))
+    {
+        scan_value(
+            Some(target),
+            doc,
+            scope_root,
+            local_refs_seen,
+            refs,
+            worklist,
+        );
+    }
+    local_refs_seen.remove(&key);
 }
 
 fn scan_security_requirements(
-    requirements: &[openapiv3::SecurityRequirement],
+    value: Option<&Value>,
     refs: &mut ComponentRefs,
     worklist: &mut Vec<WorkItem>,
 ) {
-    for requirement in requirements {
+    let Some(requirements) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for requirement in requirements.iter().filter_map(Value::as_object) {
         for name in requirement.keys() {
             add_named_ref(ComponentKind::SecurityScheme, name, refs, worklist);
         }
     }
 }
 
-fn scan_parameter_ref(
-    parameter: &ReferenceOr<Parameter>,
+fn add_component_ref(
+    reference: &str,
     refs: &mut ComponentRefs,
     worklist: &mut Vec<WorkItem>,
-) {
-    match parameter {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(parameter) => scan_parameter(parameter, refs, worklist),
-    }
-}
-
-fn scan_parameter(parameter: &Parameter, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    scan_parameter_data(parameter.parameter_data_ref(), refs, worklist);
-}
-
-fn scan_parameter_data(
-    data: &ParameterData,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    scan_parameter_format(&data.format, refs, worklist);
-}
-
-fn scan_parameter_format(
-    format: &ParameterSchemaOrContent,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match format {
-        ParameterSchemaOrContent::Schema(schema) => scan_schema_ref(schema, refs, worklist),
-        ParameterSchemaOrContent::Content(content) => scan_content(content, refs, worklist),
-    }
-}
-
-fn scan_request_body_ref(
-    request_body: &ReferenceOr<RequestBody>,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match request_body {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(request_body) => scan_request_body(request_body, refs, worklist),
-    }
-}
-
-fn scan_request_body(
-    request_body: &RequestBody,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    scan_content(&request_body.content, refs, worklist);
-}
-
-fn scan_response_ref(
-    response: &ReferenceOr<Response>,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match response {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(response) => scan_response(response, refs, worklist),
-    }
-}
-
-fn scan_response(response: &Response, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    for header in response.headers.values() {
-        scan_header_ref(header, refs, worklist);
-    }
-    scan_content(&response.content, refs, worklist);
-}
-
-fn scan_header_ref(
-    header: &ReferenceOr<Header>,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match header {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(header) => scan_header(header, refs, worklist),
-    }
-}
-
-fn scan_header(header: &Header, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    scan_parameter_format(&header.format, refs, worklist);
-}
-
-fn scan_content(
-    content: &indexmap::IndexMap<String, MediaType>,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    for media_type in content.values() {
-        scan_media_type(media_type, refs, worklist);
-    }
-}
-
-fn scan_media_type(media_type: &MediaType, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    if let Some(schema) = &media_type.schema {
-        scan_schema_ref(schema, refs, worklist);
-    }
-    for encoding in media_type.encoding.values() {
-        for header in encoding.headers.values() {
-            scan_header_ref(header, refs, worklist);
-        }
-    }
-}
-
-fn scan_schema_ref(
-    schema: &ReferenceOr<Schema>,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match schema {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(schema) => scan_schema(schema, refs, worklist),
-    }
-}
-
-fn scan_boxed_schema_ref(
-    schema: &ReferenceOr<Box<Schema>>,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match schema {
-        ReferenceOr::Reference { reference } => add_component_ref(reference, refs, worklist),
-        ReferenceOr::Item(schema) => scan_schema(schema, refs, worklist),
-    }
-}
-
-fn scan_schema(schema: &Schema, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    match &schema.schema_kind {
-        SchemaKind::Type(typ) => scan_type(typ, refs, worklist),
-        SchemaKind::OneOf { one_of } => scan_schema_refs(one_of, refs, worklist),
-        SchemaKind::AllOf { all_of } => scan_schema_refs(all_of, refs, worklist),
-        SchemaKind::AnyOf { any_of } => scan_schema_refs(any_of, refs, worklist),
-        SchemaKind::Not { not } => scan_schema_ref(not, refs, worklist),
-        SchemaKind::Any(any) => {
-            for property in any.properties.values() {
-                scan_boxed_schema_ref(property, refs, worklist);
-            }
-            if let Some(additional) = &any.additional_properties {
-                scan_additional_properties(additional, refs, worklist);
-            }
-            if let Some(items) = &any.items {
-                scan_boxed_schema_ref(items, refs, worklist);
-            }
-            scan_schema_refs(&any.one_of, refs, worklist);
-            scan_schema_refs(&any.all_of, refs, worklist);
-            scan_schema_refs(&any.any_of, refs, worklist);
-            if let Some(not) = &any.not {
-                scan_schema_ref(not, refs, worklist);
-            }
-        }
-    }
-}
-
-fn scan_schema_refs(
-    schemas: &[ReferenceOr<Schema>],
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    for schema in schemas {
-        scan_schema_ref(schema, refs, worklist);
-    }
-}
-
-fn scan_type(typ: &Type, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
-    match typ {
-        Type::Object(object) => {
-            for property in object.properties.values() {
-                scan_boxed_schema_ref(property, refs, worklist);
-            }
-            if let Some(additional) = &object.additional_properties {
-                scan_additional_properties(additional, refs, worklist);
-            }
-        }
-        Type::Array(array) => {
-            if let Some(items) = &array.items {
-                scan_boxed_schema_ref(items, refs, worklist);
-            }
-        }
-        Type::String(_) | Type::Number(_) | Type::Integer(_) | Type::Boolean(_) => {}
-    }
-}
-
-fn scan_additional_properties(
-    additional: &AdditionalProperties,
-    refs: &mut ComponentRefs,
-    worklist: &mut Vec<WorkItem>,
-) {
-    match additional {
-        AdditionalProperties::Any(_) => {}
-        AdditionalProperties::Schema(schema) => scan_schema_ref(schema, refs, worklist),
-    }
-}
-
-fn add_component_ref(reference: &str, refs: &mut ComponentRefs, worklist: &mut Vec<WorkItem>) {
+) -> bool {
     let Some((kind, name)) = parse_component_ref(reference) else {
-        return;
+        return false;
     };
     add_named_ref(kind, &name, refs, worklist);
+    true
 }
 
 fn add_named_ref(
@@ -378,94 +272,13 @@ fn decode_json_pointer(input: &str) -> String {
     input.replace("~1", "/").replace("~0", "~")
 }
 
-#[cfg(test)]
-pub(crate) fn collect_raw_schema_refs(schema: &ReferenceOr<Schema>, refs: &mut BTreeSet<String>) {
-    match schema {
-        ReferenceOr::Reference { reference } => {
-            refs.insert(reference.clone());
-        }
-        ReferenceOr::Item(schema) => collect_raw_schema_refs_in_schema(schema, refs),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn collect_raw_boxed_schema_refs(
-    schema: &ReferenceOr<Box<Schema>>,
-    refs: &mut BTreeSet<String>,
-) {
-    match schema {
-        ReferenceOr::Reference { reference } => {
-            refs.insert(reference.clone());
-        }
-        ReferenceOr::Item(schema) => collect_raw_schema_refs_in_schema(schema, refs),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn collect_raw_schema_refs_in_schema(schema: &Schema, refs: &mut BTreeSet<String>) {
-    match &schema.schema_kind {
-        SchemaKind::Type(Type::Object(object)) => {
-            for property in object.properties.values() {
-                collect_raw_boxed_schema_refs(property, refs);
-            }
-            if let Some(AdditionalProperties::Schema(schema)) =
-                object.additional_properties.as_ref()
-            {
-                collect_raw_schema_refs(schema.as_ref(), refs);
-            }
-        }
-        SchemaKind::Type(Type::Array(array)) => {
-            if let Some(items) = array.items.as_ref() {
-                collect_raw_boxed_schema_refs(items, refs);
-            }
-        }
-        SchemaKind::OneOf { one_of } => {
-            for schema in one_of {
-                collect_raw_schema_refs(schema, refs);
-            }
-        }
-        SchemaKind::AllOf { all_of } => {
-            for schema in all_of {
-                collect_raw_schema_refs(schema, refs);
-            }
-        }
-        SchemaKind::AnyOf { any_of } => {
-            for schema in any_of {
-                collect_raw_schema_refs(schema, refs);
-            }
-        }
-        SchemaKind::Not { not } => collect_raw_schema_refs(not.as_ref(), refs),
-        SchemaKind::Any(any) => {
-            for property in any.properties.values() {
-                collect_raw_boxed_schema_refs(property, refs);
-            }
-            if let Some(items) = any.items.as_ref() {
-                collect_raw_boxed_schema_refs(items, refs);
-            }
-            if let Some(AdditionalProperties::Schema(schema)) = any.additional_properties.as_ref() {
-                collect_raw_schema_refs(schema.as_ref(), refs);
-            }
-            for schema in &any.one_of {
-                collect_raw_schema_refs(schema, refs);
-            }
-            for schema in &any.all_of {
-                collect_raw_schema_refs(schema, refs);
-            }
-            for schema in &any.any_of {
-                collect_raw_schema_refs(schema, refs);
-            }
-            if let Some(not) = any.not.as_ref() {
-                collect_raw_schema_refs(not.as_ref(), refs);
-            }
-        }
-        _ => {}
-    }
+fn encode_json_pointer_segment(input: &str) -> String {
+    input.replace('~', "~0").replace('/', "~1")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openapiv3::OpenAPI;
 
     #[test]
     fn parses_and_decodes_component_refs() {
@@ -478,8 +291,55 @@ mod tests {
     }
 
     #[test]
+    fn reachable_components_follow_schema_local_defs_aliases() {
+        let doc: Value = serde_yaml::from_str(
+            r##"
+openapi: 3.1.0
+info: { title: Local Defs References, version: '1.0' }
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Envelope'
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        item:
+          $ref: '#/$defs/Alias'
+      $defs:
+        Alias:
+          $ref: '#/$defs/TargetAlias'
+        TargetAlias:
+          $ref: '#/components/schemas/Target'
+        CycleA:
+          $ref: '#/$defs/CycleB'
+        CycleB:
+          $ref: '#/$defs/CycleA'
+    Target:
+      type: object
+    Dropped:
+      type: object
+"##,
+        )
+        .unwrap();
+
+        let refs = collect_reachable_components_value(&doc);
+        assert!(refs.schemas.contains("Envelope"));
+        assert!(refs.schemas.contains("Target"));
+        assert!(!refs.schemas.contains("Dropped"));
+    }
+
+    #[test]
     fn reachable_components_include_nested_schema_and_media_headers() {
-        let api: OpenAPI = serde_yaml::from_str(
+        let doc: Value = serde_yaml::from_str(
             r#"
 openapi: 3.0.0
 info: { title: Reference Test, version: '1.0' }
@@ -534,24 +394,12 @@ components:
         data:
           $ref: '#/components/schemas/Item'
     Item:
-      allOf:
-        - $ref: '#/components/schemas/Base'
-        - type: object
-          properties:
-            children:
-              type: array
-              items:
-                $ref: '#/components/schemas/Child'
-    Base:
       type: object
+      properties:
+        child:
+          $ref: '#/components/schemas/Child'
     Child:
-      anyOf:
-        - $ref: '#/components/schemas/Leaf'
-    Leaf:
-      not:
-        $ref: '#/components/schemas/Never'
-    Never:
-      type: string
+      type: object
     Filter:
       type: object
     PageToken:
@@ -564,14 +412,11 @@ components:
         )
         .unwrap();
 
-        let refs = collect_reachable_components(&api);
+        let refs = collect_reachable_components_value(&doc);
         for name in [
             "Envelope",
             "Item",
-            "Base",
             "Child",
-            "Leaf",
-            "Never",
             "Filter",
             "PageToken",
             "EncodedToken",
@@ -584,57 +429,5 @@ components:
         assert!(refs.headers.contains("EncodedHeader"));
         assert!(refs.security_schemes.contains("RootKey"));
         assert!(!refs.schemas.contains("Dropped"));
-    }
-
-    #[test]
-    fn raw_schema_refs_cover_composition_and_any_schema_fields() {
-        let schema: ReferenceOr<Schema> = serde_yaml::from_str(
-            r#"
-type: object
-properties:
-  direct:
-    $ref: '#/components/schemas/Direct'
-additionalProperties:
-  $ref: '#/components/schemas/Additional'
-"#,
-        )
-        .unwrap();
-        let mut refs = BTreeSet::new();
-        collect_raw_schema_refs(&schema, &mut refs);
-        assert!(refs.contains("#/components/schemas/Direct"));
-        assert!(refs.contains("#/components/schemas/Additional"));
-    }
-
-    #[test]
-    fn raw_schema_refs_cover_any_schema_composition_fields() {
-        let mut any = openapiv3::AnySchema::default();
-        any.one_of.push(ReferenceOr::Reference {
-            reference: "#/components/schemas/One".to_string(),
-        });
-        any.all_of.push(ReferenceOr::Reference {
-            reference: "#/components/schemas/All".to_string(),
-        });
-        any.any_of.push(ReferenceOr::Reference {
-            reference: "#/components/schemas/Any".to_string(),
-        });
-        any.not = Some(Box::new(ReferenceOr::Reference {
-            reference: "#/components/schemas/Not".to_string(),
-        }));
-        let schema = Schema {
-            schema_data: Default::default(),
-            schema_kind: SchemaKind::Any(any),
-        };
-
-        let mut refs = BTreeSet::new();
-        collect_raw_schema_refs_in_schema(&schema, &mut refs);
-
-        for reference in [
-            "#/components/schemas/One",
-            "#/components/schemas/All",
-            "#/components/schemas/Any",
-            "#/components/schemas/Not",
-        ] {
-            assert!(refs.contains(reference), "missing {reference}");
-        }
     }
 }

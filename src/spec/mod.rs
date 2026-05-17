@@ -1,8 +1,13 @@
-//! OpenAPI spec inspection: parse a strict OpenAPI 3.0 spec and derive the
-//! facts pp needs to render native direct-HTTP CLI/MCP workspaces.
+//! OpenAPI spec inspection: parse strict OpenAPI 3.0 specs and the supported
+//! OpenAPI 3.1 subset, then derive the facts pp needs to render native direct-HTTP CLI/MCP workspaces.
 
 mod auth;
+mod model;
 pub(crate) use auth::{AuthPlan, AuthSelectionPolicy};
+pub(crate) use model::{
+    schema_projection, OperationRef, PpParameter, PpParameterLocation, PpParameterRef,
+    PpRequestBodyRef, PpSpec, ProjectedSchema, SchemaPrimitive, SchemaShape,
+};
 pub(crate) mod preparation_rules;
 pub(crate) mod references;
 pub mod report;
@@ -12,7 +17,6 @@ pub(crate) mod traversal;
 
 use anyhow::{anyhow, Context, Result};
 use heck::ToKebabCase;
-use openapiv3::OpenAPI;
 use regex::Regex;
 use report::ReportEntry;
 use serde::Serialize;
@@ -43,7 +47,7 @@ pub struct SpecFacts {
 }
 
 pub(crate) struct LoadedSpec {
-    pub api: OpenAPI,
+    pub spec: PpSpec,
     pub facts: SpecFacts,
     pub auth_plan: AuthPlan,
     pub reports: Vec<ReportEntry>,
@@ -52,7 +56,7 @@ pub(crate) struct LoadedSpec {
 }
 
 pub(crate) struct LoadedOperationListingSpec {
-    pub api: OpenAPI,
+    pub spec: PpSpec,
     pub reports: Vec<ReportEntry>,
 }
 
@@ -70,11 +74,11 @@ pub(crate) fn load(path: &Path) -> Result<LoadedSpec> {
 
 pub(crate) fn load_with_options(path: &Path, options: &LoadOptions) -> Result<LoadedSpec> {
     let prepared = prepare_openapi(path, options)?;
-    let (facts, auth_plan) = inspect_openapi(&prepared.api, &options.auth_policy)?;
+    let (facts, auth_plan) = inspect_spec(&prepared.spec, &options.auth_policy)?;
     let preparation_warnings = report::formatted_warnings(&prepared.reports);
 
     Ok(LoadedSpec {
-        api: prepared.api,
+        spec: prepared.spec,
         facts,
         auth_plan,
         reports: prepared.reports,
@@ -90,19 +94,19 @@ pub(crate) fn load_for_operation_listing(
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let mut reports = Vec::new();
-    let mut api = parse_prepared(&raw)
+    let mut spec = parse_prepared(&raw)
         .with_context(|| format!("failed to parse spec: {}", path.display()))?;
 
     if !options.slice.is_noop() {
-        let slice_report = slice::slice_openapi(&mut api, &options.slice)?;
+        let slice_report = slice::slice_spec(&mut spec, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
 
-    Ok(LoadedOperationListingSpec { api, reports })
+    Ok(LoadedOperationListingSpec { spec, reports })
 }
 
 struct PreparedOpenApi {
-    api: OpenAPI,
+    spec: PpSpec,
     reports: Vec<ReportEntry>,
     transform_plan: transform::TransformPlan,
 }
@@ -112,18 +116,18 @@ fn prepare_openapi(path: &Path, options: &LoadOptions) -> Result<PreparedOpenApi
         .with_context(|| format!("failed to read spec: {}", path.display()))?;
     let mut reports = Vec::new();
     let audits = Vec::new();
-    let mut api = parse_prepared(&raw)
+    let mut spec = parse_prepared(&raw)
         .with_context(|| format!("failed to parse spec: {}", path.display()))?;
 
     if !options.slice.is_noop() {
-        let slice_report = slice::slice_openapi(&mut api, &options.slice)?;
+        let slice_report = slice::slice_spec(&mut spec, &options.slice)?;
         reports.extend(slice_report.report_entries());
     }
 
     let transform_plan = transform::TransformPlan::from_reports_with_audits(&reports, audits);
 
     Ok(PreparedOpenApi {
-        api,
+        spec,
         reports,
         transform_plan,
     })
@@ -141,18 +145,15 @@ pub(crate) fn inspect_with_options(path: &Path, options: &LoadOptions) -> Result
     Ok(load_with_options(path, options)?.facts)
 }
 
-fn inspect_openapi(
-    spec: &OpenAPI,
-    auth_policy: &AuthSelectionPolicy,
-) -> Result<(SpecFacts, AuthPlan)> {
-    let title = spec.info.title.clone();
+fn inspect_spec(spec: &PpSpec, auth_policy: &AuthSelectionPolicy) -> Result<(SpecFacts, AuthPlan)> {
+    let title = spec.title().to_string();
     let bin_name = bin_name_from_title(&title);
 
-    let (base_url, base_url_is_relative) = match spec.servers.first() {
+    let (base_url, base_url_is_relative) = match spec.first_server_url() {
         None => (None, false),
-        Some(s) => {
-            let is_relative = !(s.url.starts_with("http://") || s.url.starts_with("https://"));
-            (Some(s.url.clone()), is_relative)
+        Some(url) => {
+            let is_relative = !(url.starts_with("http://") || url.starts_with("https://"));
+            (Some(url.to_string()), is_relative)
         }
     };
 
@@ -192,23 +193,61 @@ fn bin_name_from_title(title: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn parse(raw: &str, _path: &Path) -> Result<(OpenAPI, Vec<ReportEntry>)> {
+fn parse(raw: &str, _path: &Path) -> Result<(PpSpec, Vec<ReportEntry>)> {
     Ok((parse_prepared(raw)?, Vec::new()))
 }
 
-fn parse_prepared(raw: &str) -> Result<OpenAPI> {
+fn parse_prepared(raw: &str) -> Result<PpSpec> {
     // Try JSON first when the content looks like JSON for clearer parser errors.
     // Otherwise use YAML, which also accepts JSON-like syntax.
     let trimmed = raw.trim_start();
-    if trimmed.starts_with('{') {
-        serde_json::from_str(raw).map_err(|e| anyhow!("JSON parse error: {e}"))
+    let doc: serde_json::Value = if trimmed.starts_with('{') {
+        serde_json::from_str(raw).map_err(|e| anyhow!("JSON parse error: {e}"))?
     } else {
-        serde_yaml::from_str(raw).map_err(|e| anyhow!("YAML parse error: {e}"))
-    }
+        serde_yaml::from_str(raw).map_err(|e| anyhow!("YAML parse error: {e}"))?
+    };
+    validate_openapi_document(&doc, raw)?;
+    Ok(PpSpec::new(doc))
 }
 
-fn count_operations(spec: &OpenAPI) -> usize {
-    traversal::operations(spec).len()
+fn validate_openapi_document(doc: &serde_json::Value, raw: &str) -> Result<()> {
+    let version = doc
+        .get("openapi")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("OpenAPI document is missing string field 'openapi'"))?;
+    if version.starts_with("3.0.") {
+        // Keep the existing strict 3.0 parser contract: 3.0 input must still satisfy
+        // the openapiv3 crate rather than being accepted only by pp's subset reader.
+        let _: openapiv3::OpenAPI = if raw.trim_start().starts_with('{') {
+            serde_json::from_str(raw).map_err(|e| anyhow!("OpenAPI 3.0 parse error: {e}"))?
+        } else {
+            serde_yaml::from_str(raw).map_err(|e| anyhow!("OpenAPI 3.0 parse error: {e}"))?
+        };
+    } else if !version.starts_with("3.1.") {
+        anyhow::bail!(
+            "unsupported OpenAPI version '{version}'; pp supports 3.0.x and the safe 3.1.x subset"
+        );
+    }
+    if doc
+        .pointer("/info/title")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        anyhow::bail!("OpenAPI document is missing string field info.title");
+    }
+    if !doc.get("paths").map(|v| v.is_object()).unwrap_or(false) {
+        anyhow::bail!("OpenAPI document is missing object field 'paths'");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn parse_spec_for_tests(raw: &str) -> Result<PpSpec> {
+    parse_prepared(raw)
+}
+
+fn count_operations(spec: &PpSpec) -> usize {
+    spec.operation_count()
 }
 
 #[cfg(test)]
@@ -233,19 +272,10 @@ paths:
 
     #[test]
     fn petstore_inspects_cleanly() {
-        let facts: SpecFacts = serde_yaml::from_str::<OpenAPI>(PETSTORE_MINIMAL)
-            .map(|spec| {
-                // exercise the same derivations inspect() uses
-                SpecFacts {
-                    title: spec.info.title.clone(),
-                    bin_name: bin_name_from_title(&spec.info.title),
-                    base_url: spec.servers.first().map(|s| s.url.clone()),
-                    base_url_is_relative: false,
-                    operation_count: count_operations(&spec),
-                    auth_kind: auth::derive_auth_kind(&spec).unwrap(),
-                }
-            })
-            .unwrap();
+        let spec = parse_spec_for_tests(PETSTORE_MINIMAL).unwrap();
+        let facts = inspect_spec(&spec, &AuthSelectionPolicy::default())
+            .unwrap()
+            .0;
         assert_eq!(facts.bin_name, "swagger-petstore");
         assert_eq!(facts.operation_count, 1);
         assert_eq!(facts.auth_kind, AuthKind::None);
