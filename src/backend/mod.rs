@@ -25,7 +25,10 @@ pub(crate) struct SourceTransformDiagnostic {
     pub changed: bool,
     pub replacement_count: usize,
     pub purpose: SourceTransformPurpose,
+    pub required: SourceTransformRequiredness,
+    pub status: SourceTransformStatus,
     pub precondition: &'static str,
+    pub postcondition: &'static str,
     pub upstream_assumption: &'static str,
     pub upstream_version: &'static str,
 }
@@ -34,6 +37,38 @@ pub(crate) struct SourceTransformDiagnostic {
 pub(crate) enum SourceTransformPurpose {
     ClapParserCompatibility,
     ErrorDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceTransformRequiredness {
+    Required,
+    Conditional,
+}
+
+impl SourceTransformRequiredness {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Conditional => "conditional",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceTransformStatus {
+    Applied,
+    VerifiedNotNeeded,
+    NotApplicable,
+}
+
+impl SourceTransformStatus {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::VerifiedNotNeeded => "verified_not_needed",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +231,10 @@ mod tests {
             changed: true,
             replacement_count: 1,
             purpose: SourceTransformPurpose::ErrorDiagnostics,
+            required: SourceTransformRequiredness::Required,
+            status: SourceTransformStatus::Applied,
             precondition: "generated source contains fallback arm",
+            postcondition: "fallback arm includes response body text",
             upstream_assumption: "upstream error hides body details",
             upstream_version: "example upstream version",
         });
@@ -208,8 +246,17 @@ mod tests {
             SourceTransformPurpose::ErrorDiagnostics
         );
         assert_eq!(
+            source_transform.required,
+            SourceTransformRequiredness::Required
+        );
+        assert_eq!(source_transform.status, SourceTransformStatus::Applied);
+        assert_eq!(
             source_transform.precondition,
             "generated source contains fallback arm"
+        );
+        assert_eq!(
+            source_transform.postcondition,
+            "fallback arm includes response body text"
         );
         assert_eq!(
             source_transform.upstream_assumption,

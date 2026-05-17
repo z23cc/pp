@@ -2,8 +2,9 @@
 
 use crate::backend::{
     ApiCrateOutput, BackendDiagnostic, SourceTransformDiagnostic, SourceTransformPurpose,
+    SourceTransformRequiredness, SourceTransformStatus,
 };
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use openapiv3::OpenAPI;
 use progenitor::{GenerationSettings, Generator, InterfaceStyle};
 use quote::{format_ident, quote};
@@ -20,7 +21,9 @@ const PROGENITOR_SOURCE_VERSION_ASSUMPTION: &str = "progenitor 0.14 generated Ru
 struct SourceTransformMetadata {
     name: &'static str,
     purpose: SourceTransformPurpose,
+    required: SourceTransformRequiredness,
     precondition: &'static str,
+    postcondition: &'static str,
     upstream_assumption: &'static str,
     upstream_version: &'static str,
 }
@@ -28,7 +31,9 @@ struct SourceTransformMetadata {
 const STRING_VEC_VALUE_PARSER_METADATA: SourceTransformMetadata = SourceTransformMetadata {
     name: TRANSFORM_STRING_VEC_VALUE_PARSER,
     purpose: SourceTransformPurpose::ClapParserCompatibility,
+    required: SourceTransformRequiredness::Conditional,
     precondition: "generated CLI contains clap value_parser! calls for Vec<String>",
+    postcondition: "generated source contains no Vec<String> clap value_parser! shape requiring pp compatibility",
     upstream_assumption:
         "the generated parser shape does not accept comma-separated CLI values for string arrays",
     upstream_version: PROGENITOR_SOURCE_VERSION_ASSUMPTION,
@@ -37,7 +42,10 @@ const STRING_VEC_VALUE_PARSER_METADATA: SourceTransformMetadata = SourceTransfor
 const UNEXPECTED_RESPONSE_BODY_METADATA: SourceTransformMetadata = SourceTransformMetadata {
     name: TRANSFORM_UNEXPECTED_RESPONSE_BODY,
     purpose: SourceTransformPurpose::ErrorDiagnostics,
+    required: SourceTransformRequiredness::Required,
     precondition: "generated client contains a fallback UnexpectedResponse arm",
+    postcondition:
+        "fallback UnexpectedResponse path captures status, url, headers, and response body text",
     upstream_assumption:
         "the fallback error preserves response status but omits readable body context",
     upstream_version: PROGENITOR_SOURCE_VERSION_ASSUMPTION,
@@ -46,7 +54,10 @@ const UNEXPECTED_RESPONSE_BODY_METADATA: SourceTransformMetadata = SourceTransfo
 const COMPLEX_CLAP_VALUE_PARSERS_METADATA: SourceTransformMetadata = SourceTransformMetadata {
     name: TRANSFORM_COMPLEX_CLAP_VALUE_PARSERS,
     purpose: SourceTransformPurpose::ClapParserCompatibility,
+    required: SourceTransformRequiredness::Conditional,
     precondition: "generated CLI contains clap value_parser! calls for generated schema types",
+    postcondition:
+        "generated source contains no clap value_parser! calls for generated schema types",
     upstream_assumption:
         "generated schema types require serde_json parsing rather than clap's default typed parser",
     upstream_version: PROGENITOR_SOURCE_VERSION_ASSUMPTION,
@@ -97,7 +108,7 @@ pub fn generate(api: &OpenAPI, out_dir: &Path, crate_name: &str) -> Result<ApiCr
     };
     let syntax = syn::parse2(file_tokens)?;
     let formatted = prettyplease::unparse(&syntax);
-    let transformed = apply_generated_source_transforms(&formatted);
+    let transformed = apply_generated_source_transforms(&formatted)?;
 
     fs::create_dir_all(out_dir.join("src"))
         .with_context(|| format!("failed to create API src dir: {}", out_dir.display()))?;
@@ -115,40 +126,95 @@ struct GeneratedSourceTransformOutput {
     diagnostics: Vec<BackendDiagnostic>,
 }
 
-fn apply_generated_source_transforms(source: &str) -> GeneratedSourceTransformOutput {
+fn apply_generated_source_transforms(source: &str) -> Result<GeneratedSourceTransformOutput> {
     let mut source = source.to_string();
     let mut diagnostics = Vec::new();
 
-    let (next, replacement_count) = patch_string_vec_value_parser_with_count(&source);
-    diagnostics.push(source_transform_diagnostic(
+    let (next, diagnostic) = apply_source_transform(
         STRING_VEC_VALUE_PARSER_METADATA,
         &source,
-        &next,
-        replacement_count,
-    ));
+        patch_string_vec_value_parser_with_count,
+        string_vec_value_parser_postcondition_met,
+    )?;
+    diagnostics.push(diagnostic);
     source = next;
 
-    let (next, replacement_count) = patch_unexpected_response_body_with_count(&source);
-    diagnostics.push(source_transform_diagnostic(
+    let (next, diagnostic) = apply_source_transform_with_required_drift_detector(
         UNEXPECTED_RESPONSE_BODY_METADATA,
         &source,
-        &next,
-        replacement_count,
-    ));
+        patch_unexpected_response_body_with_count,
+        unexpected_response_body_postcondition_met,
+        unexpected_response_body_residual_present,
+    )?;
+    diagnostics.push(diagnostic);
     source = next;
 
-    let (next, replacement_count) = patch_complex_clap_value_parsers_with_count(&source);
-    diagnostics.push(source_transform_diagnostic(
+    let (next, diagnostic) = apply_source_transform(
         COMPLEX_CLAP_VALUE_PARSERS_METADATA,
         &source,
-        &next,
-        replacement_count,
-    ));
+        patch_complex_clap_value_parsers_with_count,
+        complex_clap_value_parsers_postcondition_met,
+    )?;
+    diagnostics.push(diagnostic);
 
-    GeneratedSourceTransformOutput {
+    Ok(GeneratedSourceTransformOutput {
         source: next,
         diagnostics,
+    })
+}
+
+fn apply_source_transform(
+    metadata: SourceTransformMetadata,
+    before: &str,
+    patch: fn(&str) -> (String, usize),
+    postcondition_met: fn(&str) -> bool,
+) -> Result<(String, BackendDiagnostic)> {
+    apply_source_transform_with_required_drift_detector(
+        metadata,
+        before,
+        patch,
+        postcondition_met,
+        |_| true,
+    )
+}
+
+fn apply_source_transform_with_required_drift_detector(
+    metadata: SourceTransformMetadata,
+    before: &str,
+    patch: fn(&str) -> (String, usize),
+    postcondition_met: fn(&str) -> bool,
+    required_drift_present: fn(&str) -> bool,
+) -> Result<(String, BackendDiagnostic)> {
+    let (after, replacement_count) = patch(before);
+    let status = if replacement_count > 0 {
+        SourceTransformStatus::Applied
+    } else {
+        match metadata.required {
+            SourceTransformRequiredness::Required if required_drift_present(before) => {
+                return Err(anyhow!(
+                    "required generated source transform '{}' did not match its precondition: {}; upstream drift from {} must be handled explicitly",
+                    metadata.name,
+                    metadata.precondition,
+                    metadata.upstream_version
+                ));
+            }
+            SourceTransformRequiredness::Required => SourceTransformStatus::NotApplicable,
+            SourceTransformRequiredness::Conditional => SourceTransformStatus::VerifiedNotNeeded,
+        }
+    };
+
+    if !postcondition_met(&after) {
+        return Err(anyhow!(
+            "generated source transform '{}' failed postcondition: {}",
+            metadata.name,
+            metadata.postcondition
+        ));
     }
+
+    Ok((
+        after.clone(),
+        source_transform_diagnostic(metadata, before, &after, replacement_count, status),
+    ))
 }
 
 fn source_transform_diagnostic(
@@ -156,13 +222,17 @@ fn source_transform_diagnostic(
     before: &str,
     after: &str,
     replacement_count: usize,
+    status: SourceTransformStatus,
 ) -> BackendDiagnostic {
     BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
         name: metadata.name,
         changed: before != after,
         replacement_count,
         purpose: metadata.purpose,
+        required: metadata.required,
+        status,
         precondition: metadata.precondition,
+        postcondition: metadata.postcondition,
         upstream_assumption: metadata.upstream_assumption,
         upstream_version: metadata.upstream_version,
     })
@@ -188,6 +258,14 @@ fn patch_string_vec_value_parser_with_count(source: &str) -> (String, usize) {
     (patched, replacement_count)
 }
 
+fn string_vec_value_parser_postcondition_met(source: &str) -> bool {
+    let residual_re = Regex::new(
+        r"::clap::value_parser!\(\s*::std::vec::Vec\s*<\s*::std::string::String\s*>\s*\)",
+    )
+    .expect("valid string vec value parser regex");
+    !residual_re.is_match(source)
+}
+
 #[cfg(test)]
 fn patch_unexpected_response_body(source: &str) -> String {
     patch_unexpected_response_body_with_count(source).0
@@ -197,6 +275,24 @@ fn patch_unexpected_response_body_with_count(source: &str) -> (String, usize) {
     let replacement_count = source.matches(UNEXPECTED_RESPONSE_NEEDLE).count();
     let patched = source.replace(UNEXPECTED_RESPONSE_NEEDLE, UNEXPECTED_RESPONSE_REPLACEMENT);
     (patched, replacement_count)
+}
+
+fn unexpected_response_body_residual_present(source: &str) -> bool {
+    let residual_re = Regex::new(r"Error\s*::\s*UnexpectedResponse\s*\(")
+        .expect("valid unexpected response residual regex");
+    residual_re.is_match(source)
+}
+
+fn unexpected_response_body_postcondition_met(source: &str) -> bool {
+    if unexpected_response_body_residual_present(source) {
+        return false;
+    }
+    if !source.contains(
+        "Unexpected Response: status={status}, url={url}, headers={headers:?}, body={body}",
+    ) {
+        return true;
+    }
+    source.contains("Error::Custom") && source.contains(".text()")
 }
 
 #[cfg(test)]
@@ -237,6 +333,16 @@ fn complex_vec_value_parser(typ: &str) -> String {
     )
 }
 
+fn complex_clap_value_parsers_postcondition_met(source: &str) -> bool {
+    let vec_re = Regex::new(
+        r"::clap::value_parser!\(\s*::std::vec::Vec\s*<\s*types::([A-Za-z][A-Za-z0-9_]*)\s*>\s*\)",
+    )
+    .expect("valid vec value parser regex");
+    let single_re = Regex::new(r"::clap::value_parser!\(\s*types::([A-Za-z][A-Za-z0-9_]*)\s*\)")
+        .expect("valid single value parser regex");
+    !vec_re.is_match(source) && !single_re.is_match(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +381,7 @@ mod tests {
             COMPLEX_CLAP_VALUE_PARSERS_METADATA,
         ] {
             assert!(!metadata.precondition.is_empty());
+            assert!(!metadata.postcondition.is_empty());
             assert!(!metadata.upstream_assumption.is_empty());
             assert_eq!(
                 metadata.upstream_version,
@@ -287,13 +394,17 @@ mod tests {
         metadata: SourceTransformMetadata,
         changed: bool,
         replacement_count: usize,
+        status: SourceTransformStatus,
     ) -> BackendDiagnostic {
         BackendDiagnostic::SourceTransform(SourceTransformDiagnostic {
             name: metadata.name,
             changed,
             replacement_count,
             purpose: metadata.purpose,
+            required: metadata.required,
+            status,
             precondition: metadata.precondition,
+            postcondition: metadata.postcondition,
             upstream_assumption: metadata.upstream_assumption,
             upstream_version: metadata.upstream_version,
         })
@@ -314,6 +425,22 @@ mod tests {
 
         assert!(!patched.contains(STRING_VEC_VALUE_PARSER_PRETTY));
         assert!(patched.contains("s.split(',')"));
+    }
+
+    #[test]
+    fn conditional_string_vec_transform_fails_when_residual_shape_remains() {
+        let unsupported_shape = "::clap::value_parser!(::std::vec::Vec<::std::string::String >)";
+        let error = apply_source_transform(
+            STRING_VEC_VALUE_PARSER_METADATA,
+            unsupported_shape,
+            patch_string_vec_value_parser_with_count,
+            string_vec_value_parser_postcondition_met,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("string_vec_value_parser' failed postcondition"));
     }
 
     #[test]
@@ -352,7 +479,7 @@ mod tests {
         let source = format!(
             "{STRING_VEC_VALUE_PARSER_INLINE}\n{UNEXPECTED_RESPONSE_NEEDLE}\n::clap::value_parser!(types::Widget)"
         );
-        let transformed = apply_generated_source_transforms(&source);
+        let transformed = apply_generated_source_transforms(&source).expect("transforms apply");
         let patched = &transformed.source;
 
         assert!(patched.contains("s.split(',')"));
@@ -361,26 +488,95 @@ mod tests {
         assert_eq!(
             transformed.diagnostics,
             vec![
-                expected_source_transform_diagnostic(STRING_VEC_VALUE_PARSER_METADATA, true, 1),
-                expected_source_transform_diagnostic(UNEXPECTED_RESPONSE_BODY_METADATA, true, 1),
-                expected_source_transform_diagnostic(COMPLEX_CLAP_VALUE_PARSERS_METADATA, true, 1),
+                expected_source_transform_diagnostic(
+                    STRING_VEC_VALUE_PARSER_METADATA,
+                    true,
+                    1,
+                    SourceTransformStatus::Applied,
+                ),
+                expected_source_transform_diagnostic(
+                    UNEXPECTED_RESPONSE_BODY_METADATA,
+                    true,
+                    1,
+                    SourceTransformStatus::Applied,
+                ),
+                expected_source_transform_diagnostic(
+                    COMPLEX_CLAP_VALUE_PARSERS_METADATA,
+                    true,
+                    1,
+                    SourceTransformStatus::Applied,
+                ),
             ]
         );
     }
 
     #[test]
-    fn generated_source_transforms_report_skipped_counts() {
-        let source = "pub fn untouched() {}";
-        let transformed = apply_generated_source_transforms(source);
+    fn generated_source_transforms_report_conditional_checks_as_verified_not_needed() {
+        let source = UNEXPECTED_RESPONSE_NEEDLE;
+        let transformed =
+            apply_generated_source_transforms(source).expect("required transform applies");
 
-        assert_eq!(transformed.source, source);
+        assert!(transformed.source.contains("body={body}"));
         assert_eq!(
             transformed.diagnostics,
             vec![
-                expected_source_transform_diagnostic(STRING_VEC_VALUE_PARSER_METADATA, false, 0),
-                expected_source_transform_diagnostic(UNEXPECTED_RESPONSE_BODY_METADATA, false, 0),
-                expected_source_transform_diagnostic(COMPLEX_CLAP_VALUE_PARSERS_METADATA, false, 0),
+                expected_source_transform_diagnostic(
+                    STRING_VEC_VALUE_PARSER_METADATA,
+                    false,
+                    0,
+                    SourceTransformStatus::VerifiedNotNeeded,
+                ),
+                expected_source_transform_diagnostic(
+                    UNEXPECTED_RESPONSE_BODY_METADATA,
+                    true,
+                    1,
+                    SourceTransformStatus::Applied,
+                ),
+                expected_source_transform_diagnostic(
+                    COMPLEX_CLAP_VALUE_PARSERS_METADATA,
+                    false,
+                    0,
+                    SourceTransformStatus::VerifiedNotNeeded,
+                ),
             ]
         );
+    }
+
+    #[test]
+    fn generated_source_transforms_report_required_transform_as_not_applicable_without_fallback() {
+        let transformed = apply_generated_source_transforms("pub fn untouched() {}").unwrap();
+
+        assert_eq!(
+            transformed.diagnostics[1],
+            expected_source_transform_diagnostic(
+                UNEXPECTED_RESPONSE_BODY_METADATA,
+                false,
+                0,
+                SourceTransformStatus::NotApplicable,
+            )
+        );
+    }
+
+    #[test]
+    fn generated_source_transforms_fail_fast_when_required_shape_drifts() {
+        let error =
+            apply_generated_source_transforms("_ => Err(Error::UnexpectedResponse(response))")
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("required generated source transform 'unexpected_response_body'"));
+        assert!(error.to_string().contains("upstream drift"));
+    }
+
+    #[test]
+    fn unexpected_response_transform_fails_when_partial_drift_remains() {
+        let source =
+            format!("{UNEXPECTED_RESPONSE_NEEDLE}\n_ => Err(Error::UnexpectedResponse(response))");
+        let error = apply_generated_source_transforms(&source).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unexpected_response_body' failed postcondition"));
     }
 }

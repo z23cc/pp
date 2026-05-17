@@ -46,8 +46,16 @@ static TOOLS: &[ToolDef] = &[
 ];
 
 pub async fn serve(context: Context) -> anyhow::Result<()> {
+    validate_mcp_invocation_bridge().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let service = ApiMcpServer { context }.serve(stdio()).await?;
     service.waiting().await?;
+    Ok(())
+}
+
+fn validate_mcp_invocation_bridge() -> Result<(), McpError> {
+    for tool in TOOLS {
+        crate::invoke::validate_invocation_adapter_contract_for_tool(tool.name, tool.args)?;
+    }
     Ok(())
 }
 

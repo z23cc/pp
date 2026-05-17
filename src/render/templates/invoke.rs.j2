@@ -12,6 +12,19 @@ pub enum InvocationAdapterKind {
     ProgenitorCliBridge,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectTypedInvocationStatus {
+    Unsupported,
+}
+
+impl DirectTypedInvocationStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => {{ mcp_runtime.invocation_adapter.direct_typed_invocation_literal }},
+        }
+    }
+}
+
 impl InvocationAdapterKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -24,19 +37,25 @@ impl InvocationAdapterKind {
 pub struct InvocationAdapterContract {
     pub kind: InvocationAdapterKind,
     pub reason: &'static str,
+    pub direct_typed_invocation: DirectTypedInvocationStatus,
     pub preserves_cli_dispatch: bool,
     pub uses_temp_json_body_files: bool,
+    pub requires_generated_cli_command: bool,
 }
 
 pub const INVOCATION_ADAPTER_CONTRACT: InvocationAdapterContract = InvocationAdapterContract {
     kind: {{ mcp_runtime.invocation_adapter.kind_rust_variant }},
     reason: {{ mcp_runtime.invocation_adapter.reason_literal }},
+    direct_typed_invocation: {{ mcp_runtime.invocation_adapter.direct_typed_invocation_rust_variant }},
     preserves_cli_dispatch: true,
     uses_temp_json_body_files: true,
+    requires_generated_cli_command: {{ mcp_runtime.invocation_adapter.requires_generated_cli_command }},
 };
 pub const INVOCATION_ADAPTER_KIND: InvocationAdapterKind = INVOCATION_ADAPTER_CONTRACT.kind;
 pub const INVOCATION_ADAPTER_KIND_NAME: &str = INVOCATION_ADAPTER_KIND.as_str();
 pub const INVOCATION_ADAPTER_REASON: &str = INVOCATION_ADAPTER_CONTRACT.reason;
+pub const DIRECT_TYPED_INVOCATION_STATUS: DirectTypedInvocationStatus = INVOCATION_ADAPTER_CONTRACT.direct_typed_invocation;
+pub const DIRECT_TYPED_INVOCATION_STATUS_NAME: &str = DIRECT_TYPED_INVOCATION_STATUS.as_str();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgBinding {
@@ -72,8 +91,84 @@ pub async fn invoke_operation(
     context: Context,
     invocation: OperationInvocation,
 ) -> Result<OperationInvocationResult, McpError> {
-    let _contract = ProgenitorCliBridgeInvoker::CONTRACT;
+    validate_invocation_adapter_contract_for_tool(invocation.name, invocation.args)?;
     ProgenitorCliBridgeInvoker::invoke(context, invocation).await
+}
+
+pub fn validate_invocation_adapter_contract_for_tool(
+    tool_name: &str,
+    args: &[ArgDef],
+) -> Result<(), McpError> {
+    let contract = ProgenitorCliBridgeInvoker::CONTRACT;
+    if contract.kind != InvocationAdapterKind::ProgenitorCliBridge {
+        return Err(McpError::internal_error(
+            format!("unsupported MCP invocation adapter: {}", contract.kind.as_str()),
+            None,
+        ));
+    }
+    if contract.direct_typed_invocation != DirectTypedInvocationStatus::Unsupported {
+        return Err(McpError::internal_error(
+            format!(
+                "direct typed MCP invocation is not supported by this runtime contract: {}",
+                contract.direct_typed_invocation.as_str()
+            ),
+            None,
+        ));
+    }
+    if contract.requires_generated_cli_command {
+        let command = crate::cli_builder::command_for_operation(tool_name).ok_or_else(|| {
+            McpError::internal_error(
+                format!(
+                    "MCP tool '{tool_name}' is missing a generated CLI command required by invocation adapter '{}'",
+                    contract.kind.as_str()
+                ),
+                None,
+            )
+        })?;
+        validate_cli_arg_bindings(tool_name, args, &command)?;
+    }
+    Ok(())
+}
+
+fn validate_cli_arg_bindings(
+    tool_name: &str,
+    args: &[ArgDef],
+    command: &clap::Command,
+) -> Result<(), McpError> {
+    let mut requires_json_body = false;
+    for arg in args {
+        match arg.binding {
+            ArgBinding::CliFlag { cli_name } => {
+                if !command_has_long_flag(command, cli_name) {
+                    return Err(McpError::internal_error(
+                        format!(
+                            "MCP tool '{tool_name}' argument '{}' expects generated CLI flag '--{cli_name}', but the flag is missing from the invocation adapter command",
+                            arg.json_name
+                        ),
+                        None,
+                    ));
+                }
+            }
+            ArgBinding::FlattenedJsonBodyField | ArgBinding::WholeJsonBody => {
+                requires_json_body = true;
+            }
+        }
+    }
+    if requires_json_body && !command_has_long_flag(command, "json-body") {
+        return Err(McpError::internal_error(
+            format!(
+                "MCP tool '{tool_name}' expects generated CLI flag '--json-body' for JSON body binding, but the flag is missing from the invocation adapter command"
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn command_has_long_flag(command: &clap::Command, long: &str) -> bool {
+    command
+        .get_arguments()
+        .any(|arg| arg.get_long() == Some(long))
 }
 
 /// Runtime adapter for Progenitor-generated CLI surfaces.
@@ -108,7 +203,7 @@ impl ProgenitorCliBridgeInvoker {
             &invocation.arguments,
         )?;
         let command = crate::cli_builder::command_for_operation(invocation.name)
-            .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {}", invocation.name), None))?;
+            .ok_or_else(|| McpError::internal_error(format!("MCP tool '{}' is missing a generated CLI command required by invocation adapter '{}'", invocation.name, INVOCATION_ADAPTER_KIND_NAME), None))?;
         let matches = command
             .try_get_matches_from(bridge.argv())
             .map_err(|error| McpError::invalid_params(error.to_string(), None))?;

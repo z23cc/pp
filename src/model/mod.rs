@@ -16,8 +16,8 @@ use serde::Serialize;
 pub use arguments::{McpArg, McpArgBinding};
 #[allow(unused_imports)]
 pub use response::{
-    McpInvocationAdapterContract, McpInvocationAdapterKind, McpResponseShaping,
-    McpResponseShapingArg,
+    McpDirectTypedInvocationStatus, McpInvocationAdapterContract, McpInvocationAdapterKind,
+    McpResponseShaping, McpResponseShapingArg,
 };
 
 pub(crate) use identity::mcp_tools;
@@ -115,10 +115,15 @@ paths:
             model.mcp_invocation_adapter.kind.as_str(),
             "progenitor_cli_bridge"
         );
+        assert_eq!(
+            model.mcp_invocation_adapter.direct_typed_invocation,
+            McpDirectTypedInvocationStatus::Unsupported
+        );
+        assert!(model.mcp_invocation_adapter.requires_generated_cli_command);
         assert!(model
             .mcp_invocation_adapter
             .reason
-            .contains("stable typed operation invocation metadata"));
+            .contains("direct typed operation invocation is not supported"));
     }
 
     #[test]

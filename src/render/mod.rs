@@ -60,6 +60,10 @@ pub(crate) struct RenderMcpInvocationAdapterContract {
     pub kind_rust_variant: String,
     pub reason: String,
     pub reason_literal: String,
+    pub direct_typed_invocation: String,
+    pub direct_typed_invocation_literal: String,
+    pub direct_typed_invocation_rust_variant: String,
+    pub requires_generated_cli_command: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,13 +198,22 @@ fn render_invocation_adapter(
     adapter: McpInvocationAdapterContract,
 ) -> RenderMcpInvocationAdapterContract {
     let kind = adapter.kind.as_str().to_string();
+    let direct_typed_invocation = adapter.direct_typed_invocation.as_str().to_string();
     RenderMcpInvocationAdapterContract {
         kind_literal: serde_json::to_string(&kind).expect("invocation adapter kind serializes"),
         kind_rust_variant: adapter.kind.rust_variant().to_string(),
         reason_literal: serde_json::to_string(&adapter.reason)
             .expect("invocation adapter reason serializes"),
+        direct_typed_invocation_literal: serde_json::to_string(&direct_typed_invocation)
+            .expect("direct typed invocation status serializes"),
+        direct_typed_invocation_rust_variant: adapter
+            .direct_typed_invocation
+            .rust_variant()
+            .to_string(),
+        requires_generated_cli_command: adapter.requires_generated_cli_command,
         kind,
         reason: adapter.reason,
+        direct_typed_invocation,
     }
 }
 
@@ -362,6 +375,7 @@ paths:
         assert!(!rendered.contains("fn classify_tool_error"));
         assert!(rendered.contains("\"env\": \"PETSTORE_TOKEN\""));
         assert!(rendered.contains("invoke_operation("));
+        assert!(rendered.contains("validate_mcp_invocation_bridge()"));
         assert!(!rendered.contains("write_json_body"));
     }
 
@@ -459,6 +473,7 @@ paths: {}
         assert!(rendered.contains("pub async fn invoke_operation"));
         assert!(rendered.contains("struct ProgenitorCliBridgeInvoker"));
         assert!(rendered.contains("pub enum InvocationAdapterKind"));
+        assert!(rendered.contains("pub enum DirectTypedInvocationStatus"));
         assert!(rendered.contains("pub struct InvocationAdapterContract"));
         assert!(rendered.contains("trait OperationInvoker"));
         assert!(rendered.contains(
@@ -467,6 +482,9 @@ paths: {}
         assert!(rendered.contains(
             "pub const INVOCATION_ADAPTER_KIND_NAME: &str = INVOCATION_ADAPTER_KIND.as_str();"
         ));
+        assert!(rendered.contains("pub const DIRECT_TYPED_INVOCATION_STATUS_NAME: &str = DIRECT_TYPED_INVOCATION_STATUS.as_str();"));
+        assert!(rendered.contains("validate_invocation_adapter_contract_for_tool"));
+        assert!(rendered.contains("requires_generated_cli_command: true"));
         assert!(rendered.contains("Adapter contract:"));
         assert!(rendered.contains("generated CLI argv/Clap dispatch semantics"));
         assert!(!rendered.contains("backend debt"));
@@ -479,10 +497,23 @@ paths: {}
             manifest.mcp_runtime.invocation_adapter.kind_rust_variant,
             "InvocationAdapterKind::ProgenitorCliBridge"
         );
+        assert_eq!(
+            manifest
+                .mcp_runtime
+                .invocation_adapter
+                .direct_typed_invocation,
+            "unsupported"
+        );
+        assert!(
+            manifest
+                .mcp_runtime
+                .invocation_adapter
+                .requires_generated_cli_command
+        );
         assert!(manifest
             .mcp_runtime
             .invocation_adapter_reason
-            .contains("stable typed operation invocation metadata"));
+            .contains("direct typed operation invocation is not supported"));
         assert!(rendered.contains(".create_new(true)"));
         assert!(rendered.contains("static MCP_BODY_FILE_COUNTER: AtomicU64"));
         assert!(rendered.contains("MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)"));

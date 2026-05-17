@@ -10,12 +10,34 @@ const MCP_COMPACT_ARG_NAME: &str = "_pp_compact";
 pub struct McpInvocationAdapterContract {
     pub kind: McpInvocationAdapterKind,
     pub reason: String,
+    pub direct_typed_invocation: McpDirectTypedInvocationStatus,
+    pub requires_generated_cli_command: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpInvocationAdapterKind {
     ProgenitorCliBridge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDirectTypedInvocationStatus {
+    Unsupported,
+}
+
+impl McpDirectTypedInvocationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn rust_variant(self) -> &'static str {
+        match self {
+            Self::Unsupported => "DirectTypedInvocationStatus::Unsupported",
+        }
+    }
 }
 
 impl McpInvocationAdapterKind {
@@ -36,7 +58,9 @@ impl McpInvocationAdapterContract {
     pub fn progenitor_cli_bridge() -> Self {
         Self {
             kind: McpInvocationAdapterKind::ProgenitorCliBridge,
-            reason: "MCP tool calls use the Progenitor CLI bridge adapter because the current generated surface does not expose stable typed operation invocation metadata".to_string(),
+            reason: "MCP tool calls use the Progenitor CLI bridge adapter because direct typed operation invocation is not supported by the current generated surface".to_string(),
+            direct_typed_invocation: McpDirectTypedInvocationStatus::Unsupported,
+            requires_generated_cli_command: true,
         }
     }
 }

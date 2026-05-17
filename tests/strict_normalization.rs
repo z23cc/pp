@@ -457,6 +457,8 @@ fn generate_writes_transform_plan_with_approval_metadata() {
             && audit["action_kind"] == "runtime_bridge"
             && audit["backend_requirement_id"] == "progenitor.cli_bridge.mcp_invocation"
             && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
+            && audit["after_json"]["direct_typed_invocation"] == "unsupported"
+            && audit["after_json"]["requires_generated_cli_command"] == true
     }));
 }
 

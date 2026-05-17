@@ -6,6 +6,7 @@
 
 use crate::backend::{
     ApiBackend, ApiCrateRequest, BackendDiagnostic, ProgenitorBackend, SourceTransformPurpose,
+    SourceTransformStatus,
 };
 use crate::model::ApiModel;
 use crate::render::WrapperManifest;
@@ -191,31 +192,41 @@ fn backend_diagnostic_audits(
         .iter()
         .map(|diagnostic| match diagnostic {
             BackendDiagnostic::SourceTransform(source_transform) => {
-                let action = if source_transform.changed {
-                    format!(
+                let action = match source_transform.status {
+                    SourceTransformStatus::Applied => format!(
                         "apply generated source transform '{}' ({} replacements)",
                         source_transform.name, source_transform.replacement_count
-                    )
-                } else {
-                    format!(
-                        "check generated source transform '{}' (not applied)",
+                    ),
+                    SourceTransformStatus::VerifiedNotNeeded => format!(
+                        "verify generated source transform '{}' is not needed",
                         source_transform.name
-                    )
+                    ),
+                    SourceTransformStatus::NotApplicable => format!(
+                        "verify generated source transform '{}' is not applicable",
+                        source_transform.name
+                    ),
                 };
-                let (before, after) = if source_transform.changed {
-                    (
+                let (before, after) = match source_transform.status {
+                    SourceTransformStatus::Applied => (
                         format!("{} matched", source_transform.precondition),
                         format!(
-                            "{} replacements applied for {}",
+                            "{} replacements applied for {}; postcondition: {}",
                             source_transform.replacement_count,
-                            source_transform_purpose_label(source_transform.purpose)
+                            source_transform_purpose_label(source_transform.purpose),
+                            source_transform.postcondition
                         ),
-                    )
-                } else {
-                    (
+                    ),
+                    SourceTransformStatus::VerifiedNotNeeded => (
                         format!("{} not present", source_transform.precondition),
-                        "generated source unchanged".to_string(),
-                    )
+                        format!(
+                            "generated source unchanged; postcondition already held: {}",
+                            source_transform.postcondition
+                        ),
+                    ),
+                    SourceTransformStatus::NotApplicable => (
+                        format!("{} not present", source_transform.precondition),
+                        "generated source has no applicable response fallback path".to_string(),
+                    ),
                 };
                 TransformAuditEntry::new(
                     "backend_source_transform",
@@ -232,18 +243,25 @@ fn backend_diagnostic_audits(
                     source_transform.name
                 ))
                 .with_backend_requirement(format!(
-                    "{}; upstream assumption: {}; source shape: {}",
+                    "requiredness: {}; {}; postcondition: {}; upstream assumption: {}; source shape: {}",
+                    source_transform.required.as_str(),
                     source_transform.precondition,
+                    source_transform.postcondition,
                     source_transform.upstream_assumption,
                     source_transform.upstream_version
                 ))
                 .with_before_after(before.clone(), after.clone())
                 .with_before_after_json(
                     json!({
+                        "required": source_transform.required.as_str(),
                         "precondition": source_transform.precondition,
-                        "matched": source_transform.changed,
+                        "postcondition": source_transform.postcondition,
+                        "matched": source_transform.replacement_count > 0,
                     }),
                     json!({
+                        "status": source_transform.status.as_str(),
+                        "required": source_transform.required.as_str(),
+                        "postcondition": source_transform.postcondition,
                         "changed": source_transform.changed,
                         "replacement_count": source_transform.replacement_count,
                         "outcome": after,
@@ -264,7 +282,7 @@ fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEn
     .with_action_kind(TransformActionKind::RuntimeBridge)
     .with_backend_requirement_id("progenitor.cli_bridge.mcp_invocation")
     .with_backend_requirement(
-        "MCP runtime uses generated Progenitor CLI argv/Clap dispatch because the current generated surface does not expose stable typed operation invocation metadata",
+        "MCP runtime uses generated Progenitor CLI argv/Clap dispatch because direct typed operation invocation is unsupported by the current generated surface",
     )
     .with_before_after(
         "no explicit runtime-generation bridge audit",
@@ -275,6 +293,8 @@ fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEn
         json!({
             "invocation_adapter_kind": &manifest.mcp_runtime.invocation_adapter_kind,
             "invocation_adapter_reason": &manifest.mcp_runtime.invocation_adapter_reason,
+            "direct_typed_invocation": &manifest.mcp_runtime.invocation_adapter.direct_typed_invocation,
+            "requires_generated_cli_command": manifest.mcp_runtime.invocation_adapter.requires_generated_cli_command,
             "preserves_runtime_behavior": true,
         }),
     )]
@@ -337,6 +357,7 @@ mod tests {
     use super::*;
     use crate::backend::{
         ApiCrateOutput, BackendCapabilities, SourceTransformDiagnostic, SourceTransformPurpose,
+        SourceTransformRequiredness, SourceTransformStatus,
     };
     use crate::spec::normalization_rules::typed;
 
@@ -470,7 +491,7 @@ paths:
                     .backend_requirement
                     .as_deref()
                     .is_some_and(|requirement| {
-                        requirement.contains("stable typed operation invocation metadata")
+                        requirement.contains("direct typed operation invocation is unsupported")
                     })
         }));
         let transform_plan_json: serde_json::Value = serde_json::from_slice(
@@ -504,8 +525,10 @@ paths:
                     && audit["backend_requirement"]
                         .as_str()
                         .unwrap()
-                        .contains("stable typed operation invocation metadata")
+                        .contains("direct typed operation invocation is unsupported")
                     && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
+                    && audit["after_json"]["direct_typed_invocation"] == "unsupported"
+                    && audit["after_json"]["requires_generated_cli_command"] == true
             }));
     }
 
@@ -659,7 +682,10 @@ paths:
             changed: true,
             replacement_count: 2,
             purpose: SourceTransformPurpose::ClapParserCompatibility,
+            required: SourceTransformRequiredness::Conditional,
+            status: SourceTransformStatus::Applied,
             precondition: "fake precondition",
+            postcondition: "fake postcondition",
             upstream_assumption: "fake upstream assumption",
             upstream_version: "fake upstream version",
         })
