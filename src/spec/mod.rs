@@ -1,5 +1,5 @@
-//! OpenAPI spec inspection: parse a 3.0 spec and derive the facts pp needs
-//! to drive progenitor + wrapper templates.
+//! OpenAPI spec inspection: parse a strict OpenAPI 3.0 spec and derive the
+//! facts pp needs to render native direct-HTTP CLI/MCP workspaces.
 
 mod auth;
 pub(crate) use auth::{AuthPlan, AuthSelectionPolicy};
@@ -31,7 +31,7 @@ pub enum AuthKind {
     Unsupported { reason: String },
 }
 
-/// Everything pp extracts from a spec before invoking progenitor + templates.
+/// Everything pp extracts from a spec before rendering native templates.
 #[derive(Debug, Clone, Serialize)]
 pub struct SpecFacts {
     pub title: String,

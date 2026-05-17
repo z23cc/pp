@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::response::reject_reserved_arg;
-use super::schema::{schema_projection, ProjectedSchema, SchemaShape};
+use super::schema::{schema_projection, ProjectedSchema, SchemaPrimitive, SchemaShape};
 
 pub(super) const DIRECT_UNSUPPORTED_PREFIX: &str = "MCP direct HTTP invocation does not support";
 
@@ -19,49 +19,105 @@ pub(super) struct McpArgumentContext<'a> {
     pub operation_id: &'a str,
 }
 
+pub type McpArg = GeneratedArg;
+pub type McpArgBinding = GeneratedArgBinding;
+
 #[derive(Debug, Clone, Serialize)]
-pub struct McpArg {
+pub struct GeneratedArg {
     pub json_name: String,
-    pub binding: McpArgBinding,
+    pub binding: GeneratedArgBinding,
+    pub required: bool,
+    pub value_kind: ArgValueKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum McpArgBinding {
+pub enum GeneratedArgBinding {
     PathParam { wire_name: String },
     QueryParam { wire_name: String },
     FlattenedBodyField,
     WholeJsonBody,
 }
 
-impl McpArg {
-    pub(super) fn path_param(json_name: String, wire_name: String) -> Self {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArgValueKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    PrimitiveArray { item: PrimitiveKind },
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+
+impl GeneratedArg {
+    pub(super) fn path_param(
+        json_name: String,
+        wire_name: String,
+        required: bool,
+        value_kind: ArgValueKind,
+    ) -> Self {
         Self {
             json_name,
-            binding: McpArgBinding::PathParam { wire_name },
+            binding: GeneratedArgBinding::PathParam { wire_name },
+            required,
+            value_kind,
         }
     }
 
-    pub(super) fn query_param(json_name: String, wire_name: String) -> Self {
+    pub(super) fn query_param(
+        json_name: String,
+        wire_name: String,
+        required: bool,
+        value_kind: ArgValueKind,
+    ) -> Self {
         Self {
             json_name,
-            binding: McpArgBinding::QueryParam { wire_name },
+            binding: GeneratedArgBinding::QueryParam { wire_name },
+            required,
+            value_kind,
         }
     }
 
-    pub(super) fn flattened_body_field(json_name: String) -> Self {
+    pub(super) fn flattened_body_field(
+        json_name: String,
+        required: bool,
+        value_kind: ArgValueKind,
+    ) -> Self {
         Self {
             json_name,
-            binding: McpArgBinding::FlattenedBodyField,
+            binding: GeneratedArgBinding::FlattenedBodyField,
+            required,
+            value_kind,
         }
     }
 
-    pub(super) fn whole_json_body(json_name: String) -> Self {
+    pub(super) fn whole_json_body(json_name: String, required: bool) -> Self {
         Self {
             json_name,
-            binding: McpArgBinding::WholeJsonBody,
+            binding: GeneratedArgBinding::WholeJsonBody,
+            required,
+            value_kind: ArgValueKind::Json,
         }
     }
+}
+
+fn reject_reserved_cli_arg(name: &str, tool_name: &str, operation_id: &str) -> Result<()> {
+    if matches!(name, "json" | "help") {
+        anyhow::bail!(
+            "MCP/CLI argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{name}' is reserved by the generated CLI"
+        );
+    }
+    Ok(())
 }
 
 fn reject_duplicate_arg(
@@ -132,6 +188,7 @@ pub(super) fn add_parameter(
         }
     };
     reject_reserved_arg(&data.name, tool_name, operation_id)?;
+    reject_reserved_cli_arg(&data.name, tool_name, operation_id)?;
     reject_duplicate_arg(
         properties,
         &data.name,
@@ -157,13 +214,25 @@ pub(super) fn add_parameter(
         capabilities,
     )?;
     properties.insert(data.name.clone(), schema.json);
-    if is_path || data.required {
+    let arg_required = is_path || data.required;
+    if arg_required {
         required.push(data.name.clone());
     }
+    let value_kind = value_kind_for_shape(&schema.shape);
     if is_path {
-        args.push(McpArg::path_param(data.name.clone(), data.name.clone()));
+        args.push(McpArg::path_param(
+            data.name.clone(),
+            data.name.clone(),
+            arg_required,
+            value_kind,
+        ));
     } else {
-        args.push(McpArg::query_param(data.name.clone(), data.name.clone()));
+        args.push(McpArg::query_param(
+            data.name.clone(),
+            data.name.clone(),
+            arg_required,
+            value_kind,
+        ));
     }
     Ok(())
 }
@@ -346,8 +415,13 @@ pub(super) fn add_body(
 
         for (name, property_schema) in body_properties {
             reject_reserved_arg(name, tool_name, operation_id)?;
+            reject_reserved_cli_arg(name, tool_name, operation_id)?;
             properties.insert(name.clone(), property_schema.json.clone());
-            args.push(McpArg::flattened_body_field(name.clone()));
+            args.push(McpArg::flattened_body_field(
+                name.clone(),
+                body.required && body_required.contains(name),
+                value_kind_for_shape(&property_schema.shape),
+            ));
         }
         if body.required {
             required.extend(body_required.iter().cloned());
@@ -375,6 +449,7 @@ fn add_synthetic_body_arg(
     operation_id: &str,
 ) -> Result<()> {
     reject_reserved_arg("body", tool_name, operation_id)?;
+    reject_reserved_cli_arg("body", tool_name, operation_id)?;
     reject_duplicate_arg(
         properties,
         "body",
@@ -386,6 +461,41 @@ fn add_synthetic_body_arg(
     if body_required {
         required.push("body".to_string());
     }
-    args.push(McpArg::whole_json_body("body".to_string()));
+    args.push(McpArg::whole_json_body("body".to_string(), body_required));
     Ok(())
+}
+
+fn value_kind_for_shape(shape: &SchemaShape) -> ArgValueKind {
+    match shape {
+        SchemaShape::Primitive(primitive) => ArgValueKind::from(*primitive),
+        SchemaShape::Array { items } => items
+            .as_deref()
+            .and_then(PrimitiveKind::from_shape)
+            .map(|item| ArgValueKind::PrimitiveArray { item })
+            .unwrap_or(ArgValueKind::Json),
+        SchemaShape::Object { .. } | SchemaShape::Unknown => ArgValueKind::Json,
+    }
+}
+
+impl From<SchemaPrimitive> for ArgValueKind {
+    fn from(value: SchemaPrimitive) -> Self {
+        match value {
+            SchemaPrimitive::String => Self::String,
+            SchemaPrimitive::Number => Self::Number,
+            SchemaPrimitive::Integer => Self::Integer,
+            SchemaPrimitive::Boolean => Self::Boolean,
+        }
+    }
+}
+
+impl PrimitiveKind {
+    fn from_shape(shape: &SchemaShape) -> Option<Self> {
+        match shape {
+            SchemaShape::Primitive(SchemaPrimitive::String) => Some(Self::String),
+            SchemaShape::Primitive(SchemaPrimitive::Number) => Some(Self::Number),
+            SchemaShape::Primitive(SchemaPrimitive::Integer) => Some(Self::Integer),
+            SchemaShape::Primitive(SchemaPrimitive::Boolean) => Some(Self::Boolean),
+            _ => None,
+        }
+    }
 }

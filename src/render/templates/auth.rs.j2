@@ -13,8 +13,8 @@ impl Context {
         let key = std::env::var("{{ api_key_env_var }}")?;
         Ok(Some(("{{ auth_kind.header_name }}".to_string(), key)))
 {% elif auth_kind.kind == "query_api_key" %}
-        // Query API key auto-injection is intentionally deferred for v0.3;
-        // progenitor 0.14's generated CLI path still exposes this as a command flag.
+        // Query API key auth is detected only from required query parameters;
+        // those parameters are exposed as explicit generated command/tool inputs.
         Ok(None)
 {% elif auth_kind.kind == "http_basic" %}
         let Ok(user) = std::env::var("{{ basic_user_env_var }}") else {

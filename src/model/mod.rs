@@ -14,7 +14,7 @@ use anyhow::Result;
 use openapiv3::OpenAPI;
 use serde::Serialize;
 
-pub use arguments::{McpArg, McpArgBinding};
+pub use arguments::{ArgValueKind, GeneratedArg, McpArg, McpArgBinding, PrimitiveKind};
 #[allow(unused_imports)]
 pub use response::{
     McpDirectTypedInvocationStatus, McpInvocationAdapterContract, McpInvocationAdapterKind,
@@ -26,20 +26,23 @@ use response::mcp_response_shaping;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModel {
+    /// Canonical generated operation table used by MCP today and by the native CLI renderer later.
     pub mcp_tools: Vec<McpTool>,
     pub unsupported_mcp_operations: Vec<McpUnsupportedOperation>,
     pub mcp_response_shaping: McpResponseShaping,
     pub mcp_invocation_adapter: McpInvocationAdapterContract,
 }
 
+pub type McpTool = GeneratedOperation;
+
 #[derive(Debug, Clone, Serialize)]
-pub struct McpTool {
+pub struct GeneratedOperation {
     pub name: String,
     pub description: String,
     pub input_schema: String,
     pub method: String,
     pub path_template: String,
-    pub args: Vec<McpArg>,
+    pub args: Vec<GeneratedArg>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,14 +60,14 @@ fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> 
 
 #[cfg(test)]
 fn mcp_model_for_tests(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<identity::McpModel> {
-    let capabilities = BackendCapabilities::progenitor();
+    let capabilities = BackendCapabilities::native_http();
     mcp_model(api, auth_env_var, &capabilities.direct_invocation)
 }
 
 impl ApiModel {
     #[allow(dead_code)]
     pub fn from_openapi(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Self> {
-        let capabilities = BackendCapabilities::progenitor();
+        let capabilities = BackendCapabilities::native_http();
         Self::from_openapi_with_direct_invocation(
             api,
             auth_env_var,
@@ -210,6 +213,25 @@ paths:
         assert!(!serde_json::to_string(&schema).unwrap().contains("$ref"));
         assert!(has_flattened_body_field(add_pet, "name"));
         assert!(has_flattened_body_field(add_pet, "photoUrls"));
+        let name_arg = add_pet
+            .args
+            .iter()
+            .find(|arg| arg.json_name == "name")
+            .expect("name arg");
+        assert!(name_arg.required);
+        assert_eq!(name_arg.value_kind, ArgValueKind::String);
+        let photo_urls_arg = add_pet
+            .args
+            .iter()
+            .find(|arg| arg.json_name == "photoUrls")
+            .expect("photoUrls arg");
+        assert!(photo_urls_arg.required);
+        assert_eq!(
+            photo_urls_arg.value_kind,
+            ArgValueKind::PrimitiveArray {
+                item: PrimitiveKind::String
+            }
+        );
     }
 
     #[test]
@@ -314,6 +336,13 @@ paths:
             .unwrap()
             .contains(&json!("id")));
         assert!(has_path_param(tool, "id", "id"));
+        let id_arg = tool
+            .args
+            .iter()
+            .find(|arg| arg.json_name == "id")
+            .expect("id arg");
+        assert!(id_arg.required);
+        assert_eq!(id_arg.value_kind, ArgValueKind::String);
     }
 
     #[test]
@@ -560,11 +589,7 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let mut capabilities = BackendCapabilities::progenitor();
-        capabilities
-            .direct_invocation
-            .parameters
-            .supports_query_arrays = true;
+        let capabilities = BackendCapabilities::native_http();
         let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
 
         assert!(model.tools.is_empty());
@@ -597,15 +622,38 @@ paths:
           description: ok
 "#;
         let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let capabilities = BackendCapabilities::progenitor();
+        let mut query_arrays_disabled = BackendCapabilities::native_http();
+        query_arrays_disabled
+            .direct_invocation
+            .parameters
+            .supports_query_arrays = false;
 
-        let model = mcp_model(&api, None, &capabilities.direct_invocation).unwrap();
+        let disabled_model =
+            mcp_model(&api, None, &query_arrays_disabled.direct_invocation).unwrap();
 
-        assert!(model.tools.is_empty());
-        assert_eq!(model.unsupported_operations.len(), 1);
-        assert!(model.unsupported_operations[0]
+        assert!(disabled_model.tools.is_empty());
+        assert_eq!(disabled_model.unsupported_operations.len(), 1);
+        assert!(disabled_model.unsupported_operations[0]
             .reason
             .contains("array parameter 'tags'"));
+
+        let native_capabilities = BackendCapabilities::native_http();
+        let native_model = mcp_model(&api, None, &native_capabilities.direct_invocation).unwrap();
+
+        assert_eq!(native_model.tools.len(), 1);
+        assert!(native_model.unsupported_operations.is_empty());
+        let arg = native_model.tools[0]
+            .args
+            .iter()
+            .find(|arg| arg.json_name == "tags")
+            .expect("tags arg");
+        assert!(!arg.required);
+        assert_eq!(
+            arg.value_kind,
+            ArgValueKind::PrimitiveArray {
+                item: PrimitiveKind::String
+            }
+        );
     }
 
     #[test]
@@ -711,6 +759,55 @@ paths:
         assert!(error.contains("replaceItems"));
         assert!(error.contains("body"));
         assert!(error.contains("synthetic request body argument"));
+    }
+
+    #[test]
+    fn mcp_reserved_operation_name_is_generation_error() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Reserved Operation API
+  version: "1.0.0"
+paths:
+  /events:
+    get:
+      operationId: mcp
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let error = mcp_tools(&api, None).unwrap_err().to_string();
+
+        assert!(error.contains("reserved generated CLI command"));
+        assert!(error.contains("mcp"));
+    }
+
+    #[test]
+    fn mcp_reserved_cli_arg_name_is_generation_error() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Reserved CLI Arg API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: json
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let error = mcp_tools(&api, None).unwrap_err().to_string();
+
+        assert!(error.contains("reserved by the generated CLI"));
+        assert!(error.contains("json"));
     }
 
     #[test]

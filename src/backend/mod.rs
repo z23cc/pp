@@ -1,12 +1,7 @@
-//! Backend adapters for API crate generation.
+//! Backend capability profile for generated native HTTP workspaces.
 //!
-//! The pipeline talks to this module instead of invoking a concrete codegen
-//! driver directly. The initial backend is progenitor-only; the seam exists so
-//! future generation modes stay isolated from spec inspection and rendering.
-
-use anyhow::Result;
-use openapiv3::OpenAPI;
-use std::path::Path;
+//! The generation pipeline uses this module to describe the strict direct-HTTP
+//! subset supported by generated CLI and MCP runtimes.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackendCapabilities {
@@ -16,7 +11,15 @@ pub(crate) struct BackendCapabilities {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackendCapabilityProfile {
-    Progenitor,
+    NativeHttp,
+}
+
+impl BackendCapabilityProfile {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeHttp => "native_http",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,22 +59,22 @@ pub(crate) struct DirectInvocationAuthRequirements {
 }
 
 impl BackendCapabilities {
-    pub(crate) const fn progenitor() -> Self {
+    pub(crate) const fn native_http() -> Self {
         Self {
-            profile: BackendCapabilityProfile::Progenitor,
+            profile: BackendCapabilityProfile::NativeHttp,
             direct_invocation: DirectInvocationRequirements {
-                requirement_id: "mcp.direct_http.invocation",
+                requirement_id: "native_http.direct_http.invocation",
                 invocation_requirement:
-                    "MCP runtime uses direct HTTP invocation from generated operation method/path metadata",
+                    "native HTTP runtime uses generated operation method/path metadata for direct HTTP invocation",
                 supported_operation_requirement:
-                    "MCP direct HTTP invocation currently supports primitive path/query parameters and JSON request bodies; query arrays are excluded until the backend emits buildable generated CLI code for them",
+                    "native HTTP direct invocation supports primitive path/query parameters, exploded primitive query arrays, and JSON request bodies",
                 parameters: DirectInvocationParameterRequirements {
                     supported_locations: &[
                         DirectInvocationParameterLocation::Path,
                         DirectInvocationParameterLocation::Query,
                     ],
                     primitive_schema_types: &["string", "integer", "number", "boolean"],
-                    supports_query_arrays: false,
+                    supports_query_arrays: true,
                     supports_non_exploded_query_arrays: false,
                     requires_form_query_style: true,
                     requires_simple_path_style: true,
@@ -87,32 +90,16 @@ impl BackendCapabilities {
     }
 }
 
-pub(crate) struct ApiCrateRequest<'a> {
-    pub api: &'a OpenAPI,
-    pub out_dir: &'a Path,
-    pub crate_name: &'a str,
-}
-
 pub(crate) trait ApiBackend {
-    fn name(&self) -> &'static str;
     fn capabilities(&self) -> BackendCapabilities;
-    fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<()>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ProgenitorBackend;
+pub(crate) struct NativeHttpBackend;
 
-impl ApiBackend for ProgenitorBackend {
-    fn name(&self) -> &'static str {
-        "progenitor"
-    }
-
+impl ApiBackend for NativeHttpBackend {
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::progenitor()
-    }
-
-    fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<()> {
-        crate::progenitor_driver::generate(request.api, request.out_dir, request.crate_name)
+        BackendCapabilities::native_http()
     }
 }
 
@@ -121,19 +108,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progenitor_backend_has_stable_diagnostic_name() {
-        assert_eq!(ProgenitorBackend.name(), "progenitor");
-    }
+    fn native_http_backend_advertises_direct_http_subset() {
+        let capabilities = NativeHttpBackend.capabilities();
 
-    #[test]
-    fn progenitor_backend_advertises_current_codegen_limits() {
-        let capabilities = ProgenitorBackend.capabilities();
-
-        assert_eq!(capabilities.profile, BackendCapabilityProfile::Progenitor);
+        assert_eq!(capabilities.profile, BackendCapabilityProfile::NativeHttp);
+        assert_eq!(capabilities.profile.as_str(), "native_http");
         assert_eq!(
             capabilities.direct_invocation.requirement_id,
-            "mcp.direct_http.invocation"
+            "native_http.direct_http.invocation"
         );
+        assert!(capabilities
+            .direct_invocation
+            .invocation_requirement
+            .contains("native HTTP runtime"));
         assert_eq!(
             capabilities
                 .direct_invocation
@@ -152,7 +139,7 @@ mod tests {
             &["string", "integer", "number", "boolean"]
         );
         assert!(
-            !capabilities
+            capabilities
                 .direct_invocation
                 .parameters
                 .supports_query_arrays

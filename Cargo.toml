@@ -2,12 +2,12 @@
 name = "pp-cli"
 version = "0.1.0"
 edition = "2021"
-description = "OpenAPI → installable Rust CLI generator (progenitor backend + wrapper templates)"
+description = "OpenAPI → installable Rust CLI/MCP generator with native direct HTTP runtime"
 repository = "https://github.com/z23cc/pp"
 homepage = "https://github.com/z23cc/pp"
 license = "MIT"
 readme = "README.md"
-keywords = ["openapi", "cli", "codegen", "rust", "progenitor"]
+keywords = ["openapi", "cli", "codegen", "rust", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.75"
 
@@ -26,19 +26,6 @@ heck = "0.5"
 indexmap = "2"
 regex = "1"
 minijinja = "2"
-progenitor = "0.14"
-prettyplease = "0.2"
-quote = "1"
-syn = "2"
-
 [dev-dependencies]
 mockito = "1"
 tempfile = "3"
-
-# Temporary upstream patch for oxidecomputer/typify#1011/#1012 plus
-# nullable composition inner-name fix. Remove once progenitor depends on a
-# released typify with these fixes and the GitHub-scale regression still passes.
-[patch.crates-io]
-typify = { git = "https://github.com/z23cc/typify", rev = "1e4213a8e76f2bcc54ba1f70c04816aa388b5f08" }
-typify-impl = { git = "https://github.com/z23cc/typify", rev = "1e4213a8e76f2bcc54ba1f70c04816aa388b5f08" }
-typify-macro = { git = "https://github.com/z23cc/typify", rev = "1e4213a8e76f2bcc54ba1f70c04816aa388b5f08" }

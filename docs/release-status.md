@@ -9,31 +9,18 @@
 - Current release target: `0.1.0`
 - Publication status: not published yet
 
-## Temporary typify patch
+## Generation backend
 
-`Cargo.toml` currently patches the transitive typify crates to a fork:
+The default generator is native direct HTTP. Generated human CLI commands and MCP tools share the same operation table and runtime request path. The emitted workspace contains a single generated crate and does not depend on an external OpenAPI client generator.
 
-- `typify`
-- `typify-impl`
-- `typify-macro`
-- repository: `https://github.com/z23cc/typify`
-- pinned rev: `1e4213a8e76f2bcc54ba1f70c04816aa388b5f08`
-
-Reason: temporary upstream patch for `oxidecomputer/typify#1011` / `#1012` plus the nullable-composition inner-name fix needed by GitHub-scale generation.
-
-Removal condition:
-
-1. `progenitor` depends on a released typify version containing the fixes.
-2. The `[patch.crates-io]` entries can be removed from `Cargo.toml`.
-3. Fast verification passes.
-4. Deep verification, including the GitHub-scale regression described in `docs/plans/typify-patch-and-slicing-2026-05-16.md`, still passes.
+The supported input contract is a strict OpenAPI 3.0 subset: explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, JSON request bodies, and the documented auth schemes. Unsupported shapes fail during modeling or generated build validation; `pp` does not repair or mutate specs to broaden support.
 
 ## Release checklist
 
 Before publishing `0.1.0`:
 
 1. Run fast verification from `docs/verification.md`.
-2. Run the standard generated-workspace smoke profile, including the generated sliced petstore smoke.
+2. Run the standard generated-workspace smoke profile, including query-array runtime coverage and the generated sliced petstore smoke.
 3. Run the deep fixture dogfood profile.
 4. Re-run at least one large-spec or documented slice check when the fixture is available.
 5. Confirm `CHANGELOG.md` has the intended `0.1.0` entry.

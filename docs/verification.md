@@ -18,7 +18,7 @@ Purpose:
 - Unit and integration tests that do not build generated release workspaces.
 - Inspect/slicing/pipeline/model/backend behavior.
 - Auth-selection coverage for fail-ambiguous defaults, removed auth-policy flag handling, and explicit `--auth-scheme` behavior.
-- Transform-plan audit JSON coverage, including structured audit fields and the generated direct HTTP MCP invocation audit.
+- Transform-plan audit JSON coverage, including structured audit fields and the generated native direct HTTP invocation audit.
 
 ## Standard
 
@@ -37,16 +37,17 @@ cargo test --test mcp_usability -- --ignored
 Purpose:
 
 - Prove representative clean generated workspaces compile with `cargo build --release`.
-- Keep petstore and sliced petstore checks as expected backend-rejection coverage for unsupported strict specs.
+- Keep full Petstore as strict native-subset rejection coverage and sliced Petstore as representative generated native workspace build coverage.
 - Exercise bearer, API key, and basic auth header behavior against local `mockito` servers.
+- Exercise repeated query-array serialization as repeated query parameters.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
-- Rebuild generated runtimes that expose MCP through generated direct HTTP invocation metadata.
+- Rebuild generated runtimes that expose CLI and MCP through generated native direct HTTP invocation metadata.
 
 These are the first ignored tests promoted to scheduled/manual CI because they cover generated artifact correctness without external network dependencies.
 
 ## Deep
 
-Run manually before release candidates or after large generator/backend changes, especially changes to transform audits, auth selection, or generated MCP invocation.
+Run manually before release candidates or after large generator/runtime changes, especially changes to transform audits, auth selection, or generated CLI/MCP invocation.
 
 ```bash
 cargo test --test dogfood -- --ignored
@@ -57,7 +58,7 @@ Optional large-spec manual checks should use strict, parser-ready OpenAPI 3.0 fi
 Purpose:
 
 - Exercise multiple fixture CLIs and MCP tool exposure.
-- Recheck large-spec assumptions and the temporary typify patch before release.
+- Recheck large-spec assumptions and strict-subset slicing before release.
 
 ## `pp validate`
 

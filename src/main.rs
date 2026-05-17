@@ -2,7 +2,6 @@ mod backend;
 mod cli;
 mod model;
 mod pipeline;
-mod progenitor_driver;
 mod render;
 mod spec;
 

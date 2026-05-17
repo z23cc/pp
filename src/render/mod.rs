@@ -1,8 +1,8 @@
-//! Render the wrapper crate around progenitor's generated API crate.
+//! Render the generated native HTTP CLI/MCP wrapper crate.
 
 use crate::model::{
-    ApiModel, McpArgBinding, McpInvocationAdapterContract, McpResponseShaping,
-    McpTool as ModelMcpTool,
+    ApiModel, ArgValueKind, McpArgBinding, McpInvocationAdapterContract, McpResponseShaping,
+    McpTool as ModelMcpTool, PrimitiveKind,
 };
 use crate::spec::AuthKind;
 use anyhow::{Context, Result};
@@ -13,7 +13,6 @@ use std::fs;
 use std::path::Path;
 
 const CARGO_TEMPLATE: &str = include_str!("templates/Cargo.toml.j2");
-const API_CARGO_TEMPLATE: &str = include_str!("templates/api_cargo.toml.j2");
 const MAIN_TEMPLATE: &str = include_str!("templates/main.rs.j2");
 const CLI_BUILDER_TEMPLATE: &str = include_str!("templates/cli_builder.rs.j2");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/context.rs.j2");
@@ -31,8 +30,6 @@ pub(crate) struct WrapperManifest {
     pub base_url: String,
     pub base_url_is_relative: bool,
     pub auth_kind: AuthKind,
-    pub progenitor_lib_name: String,
-    pub progenitor_crate_name: String,
     pub token_env_var: String,
     pub api_key_env_var: String,
     pub basic_user_env_var: String,
@@ -98,6 +95,8 @@ pub(crate) struct RenderMcpArg {
     pub json_name: String,
     pub json_name_literal: String,
     pub binding_expr: String,
+    pub required_literal: &'static str,
+    pub value_kind_expr: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,16 +112,14 @@ pub(crate) struct RenderMcpResponseShapingArg {
 }
 
 impl WrapperManifest {
-    /// Build template data from inspected facts and the selected progenitor crate name.
+    /// Build template data from inspected facts and native direct-HTTP metadata.
     pub(crate) fn new(
         bin_name: String,
         base_url: String,
         base_url_is_relative: bool,
         auth_kind: AuthKind,
-        progenitor_lib_name: String,
     ) -> Self {
         let env_prefix = bin_name.to_shouty_snake_case();
-        let progenitor_crate_name = progenitor_lib_name.replace('-', "_");
         let auth_env_var = auth_env_var(&auth_kind, &env_prefix);
         let temp_body_file_prefix = format!("{bin_name}-mcp");
         let invocation_adapter =
@@ -132,8 +129,6 @@ impl WrapperManifest {
             base_url,
             base_url_is_relative,
             auth_kind: auth_kind.clone(),
-            progenitor_lib_name,
-            progenitor_crate_name,
             token_env_var: format!("{env_prefix}_TOKEN"),
             api_key_env_var: format!("{env_prefix}_API_KEY"),
             basic_user_env_var: format!("{env_prefix}_USER"),
@@ -222,10 +217,36 @@ fn render_mcp_arg(arg: crate::model::McpArg) -> RenderMcpArg {
         }
         McpArgBinding::WholeJsonBody => "crate::invoke::ArgBinding::WholeJsonBody".to_string(),
     };
+    let value_kind_expr = render_arg_value_kind(&arg.value_kind);
     RenderMcpArg {
         json_name_literal: serde_json::to_string(&arg.json_name).expect("arg name serializes"),
         json_name: arg.json_name,
         binding_expr,
+        required_literal: if arg.required { "true" } else { "false" },
+        value_kind_expr,
+    }
+}
+
+fn render_arg_value_kind(value_kind: &ArgValueKind) -> String {
+    match value_kind {
+        ArgValueKind::String => "CliValueKind::String".to_string(),
+        ArgValueKind::Integer => "CliValueKind::Integer".to_string(),
+        ArgValueKind::Number => "CliValueKind::Number".to_string(),
+        ArgValueKind::Boolean => "CliValueKind::Boolean".to_string(),
+        ArgValueKind::Json => "CliValueKind::Json".to_string(),
+        ArgValueKind::PrimitiveArray { item } => format!(
+            "CliValueKind::PrimitiveArray {{ item: {} }}",
+            render_primitive_kind(*item)
+        ),
+    }
+}
+
+fn render_primitive_kind(kind: PrimitiveKind) -> &'static str {
+    match kind {
+        PrimitiveKind::String => "CliPrimitiveKind::String",
+        PrimitiveKind::Integer => "CliPrimitiveKind::Integer",
+        PrimitiveKind::Number => "CliPrimitiveKind::Number",
+        PrimitiveKind::Boolean => "CliPrimitiveKind::Boolean",
     }
 }
 
@@ -283,12 +304,6 @@ pub(crate) fn render(manifest: &WrapperManifest, out_dir: &Path) -> Result<()> {
         CARGO_TEMPLATE,
         manifest,
         &out_dir.join("Cargo.toml"),
-    )?;
-    write_template(
-        "api/Cargo.toml",
-        API_CARGO_TEMPLATE,
-        manifest,
-        &out_dir.join("api/Cargo.toml"),
     )?;
     write_template(
         "main.rs",
@@ -397,7 +412,6 @@ paths:
             "https://example.test".to_string(),
             false,
             AuthKind::Bearer,
-            "petstore-api".to_string(),
         );
         let api_model = ApiModel::from_openapi(&api, manifest.auth_env_var.as_deref()).unwrap();
         let manifest = manifest.with_api_model(api_model);
@@ -423,13 +437,106 @@ paths:
     }
 
     #[test]
+    fn cli_builder_template_uses_native_operation_dispatch() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: CLI API
+  version: "1.0.0"
+paths:
+  /items/{id}:
+    post:
+      operationId: createItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: tag
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                active:
+                  type: boolean
+      responses:
+        '200':
+          description: ok
+  /bulk:
+    post:
+      operationId: replaceItems
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: openapiv3::OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let manifest = WrapperManifest::new(
+            "cli-api".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+        );
+        let api_model = ApiModel::from_openapi(&api, None).unwrap();
+        let manifest = manifest.with_api_model(api_model);
+
+        let rendered = render_template("cli_builder.rs", CLI_BUILDER_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("static OPERATIONS: &[CliOperationDef]"));
+        assert!(rendered.contains("invoke_operation("));
+        assert!(rendered.contains("CliValueKind::Integer"));
+        assert!(
+            rendered.contains("CliValueKind::PrimitiveArray { item: CliPrimitiveKind::String }")
+        );
+        assert!(rendered.contains("CliValueKind::Boolean"));
+        assert!(rendered.contains("CliValueKind::Json"));
+        assert!(rendered
+            .contains("json_name: \"body\", required: true, value_kind: CliValueKind::Json"));
+        assert!(rendered.contains("clap::ArgAction::Append"));
+        assert!(rendered.contains("crate::print::emit_cli_success"));
+    }
+
+    #[test]
+    fn print_template_uses_native_output_helpers() {
+        let manifest = WrapperManifest::new(
+            "petstore".to_string(),
+            "https://example.test".to_string(),
+            false,
+            AuthKind::None,
+        );
+
+        let rendered = render_template("print.rs", PRINT_TEMPLATE, &manifest).unwrap();
+
+        assert!(rendered.contains("pub fn emit_cli_success"));
+        assert!(rendered.contains("pub fn emit_cli_error"));
+    }
+
+    #[test]
     fn direct_http_template_owns_generic_http_helpers() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
             "https://example.test".to_string(),
             false,
             AuthKind::None,
-            "petstore-api".to_string(),
         );
 
         let rendered = render_template("direct_http.rs", DIRECT_HTTP_TEMPLATE, &manifest).unwrap();
@@ -453,7 +560,6 @@ paths:
             "https://example.test".to_string(),
             false,
             AuthKind::None,
-            "petstore-api".to_string(),
         );
 
         let rendered = render_template("runtime.rs", RUNTIME_TEMPLATE, &manifest).unwrap();
@@ -487,7 +593,6 @@ paths:
             "https://example.test".to_string(),
             false,
             AuthKind::None,
-            "noargs-api".to_string(),
         );
         let api_model = ApiModel::from_openapi(&api, None).unwrap();
         let manifest = manifest.with_api_model(api_model);
@@ -514,7 +619,6 @@ paths: {}
             "https://example.test".to_string(),
             false,
             AuthKind::None,
-            "empty-api".to_string(),
         );
         let api_model = ApiModel::from_openapi(&api, None).unwrap();
         let manifest = manifest.with_api_model(api_model);
@@ -532,7 +636,6 @@ paths: {}
             "https://example.test".to_string(),
             false,
             AuthKind::None,
-            "petstore-api".to_string(),
         );
 
         let rendered = render_template("invoke.rs", INVOKE_TEMPLATE, &manifest).unwrap();
@@ -580,20 +683,18 @@ paths: {}
     }
 
     #[test]
-    fn cargo_template_contains_workspace_and_api_dependency() {
+    fn cargo_template_is_native_workspace_without_api_dependency() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
             "https://example.test".to_string(),
             false,
             AuthKind::None,
-            "petstore-api".to_string(),
         );
 
         let rendered = render_template("Cargo.toml", CARGO_TEMPLATE, &manifest).unwrap();
 
-        assert!(rendered.contains("[workspace]"));
-        assert!(rendered.contains("members = [\"api\", \".\"]"));
+        assert!(!rendered.contains("members = [\"api\", \".\"]"));
         assert!(rendered.contains("name = \"petstore\""));
-        assert!(rendered.contains("petstore-api = { path = \"api\" }"));
+        assert!(!rendered.contains("petstore-api = { path = \"api\" }"));
     }
 }

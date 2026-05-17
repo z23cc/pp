@@ -1,5 +1,5 @@
 # Source: https://github.com/PokeAPI/pokeapi/blob/master/openapi.yml
-# Trim date: 2026-05-13. Trimmed to one OpenAPI 3.1 endpoint to exercise pp's 3.1 downgrade path.
+# Trim date: 2026-05-13. Trimmed OpenAPI 3.1 fixture kept for external parser-boundary experiments.
 openapi: 3.1.0
 info:
   title: PokeAPI

@@ -190,8 +190,8 @@ fn assert_operation_count(args: &[&str], expected: u64) {
 }
 
 #[test]
-#[ignore = "expensive smoke test: runs sliced petstore generation until the backend rejects unsupported media shapes; run with `cargo test --test slicing -- --ignored`"]
-fn petstore_store_slice_reaches_backend_rejection() {
+#[ignore = "expensive smoke test: generates and builds a sliced Petstore native workspace; run with `cargo test --test slicing -- --ignored`"]
+fn petstore_store_slice_builds_native_workspace() {
     let temp = tempfile::tempdir().expect("tempdir");
     let spec = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/petstore.yaml");
     let out_dir = temp.path().join("out");
@@ -203,19 +203,14 @@ fn petstore_store_slice_reaches_backend_rejection() {
         .arg(&out_dir)
         .arg("--include-tag")
         .arg("store")
+        .arg("--base-url")
+        .arg("https://petstore.example.test/api/v3")
         .arg("--build")
         .output()
         .expect("failed to run sliced pp generate");
 
-    assert!(
-        !output.status.success(),
-        "sliced petstore unexpectedly built"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("more media types than expected") || stderr.contains("not yet implemented"),
-        "stderr:\n{stderr}"
-    );
+    common::assert_success(output, "sliced pp generate --build");
+    assert!(!out_dir.join("api").exists());
 }
 
 fn run_inspect(args: &[&str]) -> Output {

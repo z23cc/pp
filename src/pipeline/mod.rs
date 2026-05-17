@@ -1,10 +1,10 @@
 //! Internal generation pipeline orchestration.
 //!
 //! This module is intentionally crate-internal. It provides a seam between CLI
-//! argument handling and the current spec/progenitor/render implementation
+//! argument handling, strict OpenAPI inspection, and native wrapper rendering
 //! without committing to a public library API.
 
-use crate::backend::{ApiBackend, ApiCrateRequest, ProgenitorBackend};
+use crate::backend::{ApiBackend, NativeHttpBackend};
 use crate::model::ApiModel;
 use crate::render::WrapperManifest;
 use crate::spec::{
@@ -58,10 +58,9 @@ pub(crate) enum GenerateProgress {
         auth_kind: AuthKind,
         target_bin_name: String,
     },
-    QueryApiKeyAutoInjectionLimited {
+    QueryApiKeyUsesExplicitParameter {
         param_name: String,
     },
-    GeneratingApiCrate,
     RenderingWrapperCrate,
     WorkspaceWritten {
         output_path: PathBuf,
@@ -79,7 +78,7 @@ pub(crate) fn generate_with_progress(
     request: GenerateRequest,
     progress: impl FnMut(GenerateProgress),
 ) -> Result<GenerateResult> {
-    let backend = ProgenitorBackend;
+    let backend = NativeHttpBackend;
     generate_with_backend_and_progress(request, &backend, progress)
 }
 
@@ -105,8 +104,6 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
     write_transform_plan(&request.output_path, &transform_plan)?;
     let facts = loaded.facts;
     let target_bin_name = request.bin_name.unwrap_or_else(|| facts.bin_name.clone());
-    let api_name = format!("{target_bin_name}-api");
-
     progress(GenerateProgress::SpecOk {
         operation_count: facts.operation_count,
         auth_kind: facts.auth_kind.clone(),
@@ -123,7 +120,6 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         base_url,
         base_url_is_relative,
         facts.auth_kind.clone(),
-        api_name.clone(),
     );
     let api_model = ApiModel::from_openapi_with_direct_invocation(
         &loaded.api,
@@ -131,24 +127,15 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
         &backend_capabilities.direct_invocation,
     )?;
     let manifest = manifest.with_api_model(api_model);
+    transform_plan.add_audits(runtime_generation_audits(&manifest, &backend_capabilities));
+    write_transform_plan(&request.output_path, &transform_plan)?;
+    ensure_no_unsupported_operations(&manifest)?;
 
     if let AuthKind::QueryApiKey { param_name } = &manifest.auth_kind {
-        progress(GenerateProgress::QueryApiKeyAutoInjectionLimited {
+        progress(GenerateProgress::QueryApiKeyUsesExplicitParameter {
             param_name: param_name.clone(),
         });
     }
-
-    progress(GenerateProgress::GeneratingApiCrate);
-    let api_out_dir = request.output_path.join("api");
-    backend
-        .generate_api_crate(ApiCrateRequest {
-            api: &loaded.api,
-            out_dir: &api_out_dir,
-            crate_name: &api_name,
-        })
-        .with_context(|| format!("{} backend failed to generate API crate", backend.name()))?;
-    transform_plan.add_audits(runtime_generation_audits(&manifest, &backend_capabilities));
-    write_transform_plan(&request.output_path, &transform_plan)?;
 
     progress(GenerateProgress::RenderingWrapperCrate);
     crate::render::render(&manifest, &request.output_path)?;
@@ -177,6 +164,32 @@ pub(crate) fn generate_with_backend_and_progress<B: ApiBackend>(
     })
 }
 
+fn ensure_no_unsupported_operations(manifest: &WrapperManifest) -> Result<()> {
+    if manifest.unsupported_mcp_operations.is_empty() {
+        return Ok(());
+    }
+
+    let details = manifest
+        .unsupported_mcp_operations
+        .iter()
+        .map(|operation| {
+            let operation_id = operation
+                .operation_id
+                .as_deref()
+                .map(|id| format!(" operationId '{id}'"))
+                .unwrap_or_default();
+            format!(
+                "{} {}{}: {}",
+                operation.method, operation.path, operation_id, operation.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(anyhow!(
+        "unsupported native direct HTTP operation shape(s): {details}. Exclude unsupported operations with --exclude-operation or narrow generation with slice filters."
+    ))
+}
+
 fn runtime_generation_audits(
     manifest: &WrapperManifest,
     capabilities: &crate::backend::BackendCapabilities,
@@ -201,6 +214,7 @@ fn runtime_generation_audits(
             "invocation_adapter_reason": &manifest.mcp_runtime.invocation_adapter_reason,
             "direct_typed_invocation": &manifest.mcp_runtime.invocation_adapter.direct_typed_invocation,
             "requires_generated_cli_command": manifest.mcp_runtime.invocation_adapter.requires_generated_cli_command,
+            "backend_profile": capabilities.profile.as_str(),
             "direct_tool_count": manifest.mcp_tools.len(),
             "unsupported_tool_count": manifest.unsupported_mcp_operations.len(),
             "preserves_runtime_behavior": true,
@@ -252,18 +266,28 @@ fn write_transform_plan(output_path: &Path, transform_plan: &TransformPlan) -> R
 fn effective_base_url(
     explicit: Option<&str>,
     spec_base_url: Option<&str>,
-    spec_base_url_is_relative: bool,
+    _spec_base_url_is_relative: bool,
 ) -> Result<(String, bool)> {
     if let Some(base_url) = explicit {
-        let is_relative = !(base_url.starts_with("http://") || base_url.starts_with("https://"));
-        return Ok((base_url.to_string(), is_relative));
+        reject_non_absolute_runtime_base_url(base_url, "--base-url")?;
+        return Ok((base_url.to_string(), false));
     }
     let Some(base_url) = spec_base_url else {
         return Err(anyhow!(
             "spec has no servers[0].url; pass --base-url explicitly because pp requires an explicit runtime base URL"
         ));
     };
-    Ok((base_url.to_string(), spec_base_url_is_relative))
+    reject_non_absolute_runtime_base_url(base_url, "servers[0].url")?;
+    Ok((base_url.to_string(), false))
+}
+
+fn reject_non_absolute_runtime_base_url(base_url: &str, source: &str) -> Result<()> {
+    if base_url.starts_with("http://") || base_url.starts_with("https://") {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{source} must be an absolute http(s) URL for native direct HTTP generation: {base_url}"
+    ))
 }
 
 pub(crate) fn validate_workspace_build(workspace: &Path) -> Result<ValidationResult> {
@@ -355,6 +379,22 @@ paths:
           description: ok
 "#;
 
+    const RELATIVE_SERVER_SPEC: &str = r#"
+openapi: 3.0.0
+info:
+  title: Relative Server Fixture
+  version: "1.0.0"
+servers:
+  - url: /api/v1
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+"#;
+
     const MISSING_OPERATION_ID_SPEC: &str = r#"
 openapi: 3.0.0
 info:
@@ -418,18 +458,19 @@ paths:
         assert_eq!(result.output_path, output_path);
         assert!(result.validation.is_none());
         assert!(result.output_path.join("Cargo.toml").exists());
-        assert!(result.output_path.join("api/src/lib.rs").exists());
+        assert!(!result.output_path.join("api").exists());
         let transform_plan_path = result.output_path.join("pp-transform-plan.json");
         assert!(transform_plan_path.exists());
         assert!(result.transform_plan.audits.iter().any(|audit| {
             audit.source_stage == "runtime_generation"
                 && audit.code == "runtime.mcp_invocation.direct_http"
                 && audit.action_kind == Some(TransformActionKind::RuntimeDirectInvocation)
-                && audit.backend_requirement_id.as_deref() == Some("mcp.direct_http.invocation")
+                && audit.backend_requirement_id.as_deref()
+                    == Some("native_http.direct_http.invocation")
                 && audit
                     .backend_requirement
                     .as_deref()
-                    .is_some_and(|requirement| requirement.contains("direct HTTP invocation"))
+                    .is_some_and(|requirement| requirement.contains("native HTTP runtime"))
         }));
         let transform_plan_json: serde_json::Value = serde_json::from_slice(
             &std::fs::read(transform_plan_path).expect("read transform plan"),
@@ -443,15 +484,67 @@ paths:
                 audit["source_stage"] == "runtime_generation"
                     && audit["code"] == "runtime.mcp_invocation.direct_http"
                     && audit["action_kind"] == "runtime_direct_invocation"
-                    && audit["backend_requirement_id"] == "mcp.direct_http.invocation"
+                    && audit["backend_requirement_id"] == "native_http.direct_http.invocation"
                     && audit["backend_requirement"]
                         .as_str()
                         .unwrap()
-                        .contains("direct HTTP invocation")
+                        .contains("native HTTP runtime")
+                    && audit["after_json"]["backend_profile"] == "native_http"
                     && audit["after_json"]["invocation_adapter_kind"] == "direct_http"
                     && audit["after_json"]["direct_typed_invocation"] == "supported"
                     && audit["after_json"]["requires_generated_cli_command"] == false
             }));
+    }
+
+    #[test]
+    fn generate_rejects_relative_spec_server_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = temp.path().join("spec.yaml");
+        std::fs::write(&spec_path, RELATIVE_SERVER_SPEC).expect("write spec");
+        let output_path = temp.path().join("out");
+        let backend = FakeBackend::default();
+
+        let error = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path,
+                bin_name: Some("fixture-cli".to_string()),
+                base_url: None,
+                validate: false,
+                load_options: LoadOptions::default(),
+            },
+            &backend,
+            |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("servers[0].url must be an absolute http(s) URL"));
+    }
+
+    #[test]
+    fn generate_rejects_relative_explicit_base_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = write_minimal_spec(temp.path());
+        let output_path = temp.path().join("out");
+        let backend = FakeBackend::default();
+
+        let error = generate_with_backend_and_progress(
+            GenerateRequest {
+                spec_path,
+                output_path,
+                bin_name: Some("fixture-cli".to_string()),
+                base_url: Some("/api/v1".to_string()),
+                validate: false,
+                load_options: LoadOptions::default(),
+            },
+            &backend,
+            |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--base-url must be an absolute http(s) URL"));
     }
 
     #[test]
@@ -513,7 +606,7 @@ paths:
     }
 
     #[test]
-    fn generate_uses_backend_capabilities_for_direct_invocation_modeling() {
+    fn native_generation_uses_backend_capabilities_for_query_array_modeling() {
         let temp = tempfile::tempdir().expect("tempdir");
         let spec_path = temp.path().join("spec.yaml");
         std::fs::write(&spec_path, QUERY_ARRAY_SPEC).expect("write spec");
@@ -532,30 +625,33 @@ paths:
             &backend,
             |_| {},
         )
-        .expect("backend direct invocation capability marks operation unsupported");
+        .expect("native direct invocation capability allows primitive query arrays");
 
+        assert!(result.transform_plan.audits.iter().all(|audit| {
+            !(audit.source_stage == "runtime_generation"
+                && audit.code == "runtime.mcp_invocation.unsupported_operation"
+                && audit.target == "GET /items")
+        }));
         assert!(result.transform_plan.audits.iter().any(|audit| {
             audit.source_stage == "runtime_generation"
-                && audit.code == "runtime.mcp_invocation.unsupported_operation"
-                && audit.target == "GET /items"
+                && audit.code == "runtime.mcp_invocation.direct_http"
                 && audit
                     .after_json
                     .as_ref()
-                    .and_then(|after| after.get("reason"))
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|reason| reason.contains("array parameter 'tags'"))
+                    .and_then(|after| after.get("direct_tool_count"))
+                    == Some(&json!(1))
         }));
     }
 
     #[test]
-    fn generation_does_not_rewrite_deep_object_query_params_during_spec_preparation() {
+    fn generation_rejects_unsupported_deep_object_query_params_without_rewriting_spec() {
         let temp = tempfile::tempdir().expect("tempdir");
         let spec_path = temp.path().join("spec.yaml");
         std::fs::write(&spec_path, DEEP_OBJECT_SPEC).expect("write spec");
         let output_path = temp.path().join("out");
         let backend = FakeBackend::default();
 
-        let result = generate_with_backend_and_progress(
+        let error = generate_with_backend_and_progress(
             GenerateRequest {
                 spec_path,
                 output_path,
@@ -567,11 +663,12 @@ paths:
             &backend,
             |_| {},
         )
-        .expect("spec preparation preserves deepObject query parameters");
+        .unwrap_err()
+        .to_string();
 
-        assert!(result.reports.iter().all(|report| !report
-            .code
-            .starts_with("spec.prepare.deep_object_query_params_rewritten")));
+        assert!(error.contains("unsupported native direct HTTP operation shape"));
+        assert!(error.contains("object parameter 'filter'"));
+        assert!(!error.contains("spec.prepare.deep_object_query_params_rewritten"));
     }
 
     #[test]
@@ -607,7 +704,6 @@ paths:
                     assert_eq!(target_bin_name, "fixture-cli");
                     events.push("spec_ok");
                 }
-                GenerateProgress::GeneratingApiCrate => events.push("generate_api"),
                 GenerateProgress::RenderingWrapperCrate => events.push("render_wrapper"),
                 GenerateProgress::WorkspaceWritten { output_path: path } => {
                     assert_eq!(path, output_path);
@@ -620,13 +716,7 @@ paths:
 
         assert_eq!(
             events,
-            [
-                "inspect",
-                "spec_ok",
-                "generate_api",
-                "render_wrapper",
-                "workspace_written"
-            ]
+            ["inspect", "spec_ok", "render_wrapper", "workspace_written"]
         );
     }
 
@@ -643,38 +733,14 @@ paths:
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
-                capabilities: BackendCapabilities::progenitor(),
+                capabilities: BackendCapabilities::native_http(),
             }
         }
     }
 
     impl ApiBackend for FakeBackend {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-
         fn capabilities(&self) -> BackendCapabilities {
             self.capabilities.clone()
-        }
-
-        fn generate_api_crate(&self, request: ApiCrateRequest<'_>) -> Result<()> {
-            assert_eq!(request.crate_name, "fixture-cli-api");
-            assert_eq!(request.api.paths.paths.len(), 1);
-
-            std::fs::create_dir_all(request.out_dir.join("src"))?;
-            std::fs::write(
-                request.out_dir.join("Cargo.toml"),
-                format!(
-                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-                    request.crate_name
-                ),
-            )?;
-            std::fs::write(
-                request.out_dir.join("src/lib.rs"),
-                "pub fn fake_backend_marker() {}\n",
-            )?;
-
-            Ok(())
         }
     }
 }

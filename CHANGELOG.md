@@ -28,11 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Wrapper rendering consumes precomputed model data instead of walking raw OpenAPI.
-- Progenitor-generated source is emitted directly from formatted generator output.
-- Large-spec support currently relies on a temporary typify fork patch documented in `docs/release-status.md`.
+- Generated workspaces use the native direct HTTP runtime for both human CLI commands and MCP tools.
+- Strict generation rejects unsupported selected operation shapes instead of rewriting or omitting them.
 
 ### Fixed
 
-- Hardened MCP temporary JSON body filenames against repeated-call reuse in one server process.
 - Added generation-time checks for MCP tool names, reserved `_pp_` arguments, and generated CLI flag collisions.
 

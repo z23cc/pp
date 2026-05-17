@@ -134,13 +134,10 @@ fn print_generate_progress(event: crate::pipeline::GenerateProgress) {
                 operation_count, auth_kind
             );
         }
-        crate::pipeline::GenerateProgress::QueryApiKeyAutoInjectionLimited { param_name } => {
+        crate::pipeline::GenerateProgress::QueryApiKeyUsesExplicitParameter { param_name } => {
             eprintln!(
-                "pp: query API key '{param_name}' auto-injection is limited — users may still need --{param_name} on the command line"
+                "pp: query API key heuristic selected '{param_name}'; pass --{param_name} on generated CLI commands"
             );
-        }
-        crate::pipeline::GenerateProgress::GeneratingApiCrate => {
-            eprintln!("pp: generating API crate via progenitor...");
         }
         crate::pipeline::GenerateProgress::RenderingWrapperCrate => {
             eprintln!("pp: rendering wrapper crate...");

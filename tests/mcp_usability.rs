@@ -91,18 +91,27 @@ paths:
 
 #[test]
 #[ignore = "expensive smoke test: generates and builds a wrapper CLI; run with `cargo test --test mcp_usability -- --ignored`"]
-fn query_array_spec_reaches_backend_rejection_without_source_rewrites() {
+fn query_array_spec_generates_builds_and_sends_repeated_query_params() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("GET", "/items?tags=a&tags=b")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true}"#)
+        .create();
+
     let temp = tempfile::tempdir().expect("tempdir");
     let spec = common::write_spec(
         temp.path(),
         "query-array.yaml",
-        r#"
+        &format!(
+            r#"
 openapi: 3.0.0
 info:
   title: Query Array API
   version: "1.0.0"
 servers:
-  - url: https://example.test
+  - url: {}
 paths:
   /items:
     get:
@@ -118,24 +127,35 @@ paths:
       responses:
         '200':
           description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
 "#,
+            server.url()
+        ),
     );
     let out_dir = temp.path().join("out");
-    let output = common::pp_generate_command(&spec, &out_dir)
-        .arg("--build")
-        .output()
-        .expect("failed to run pp generate");
+    common::assert_success(
+        common::run_pp_generate(&spec, &out_dir),
+        "pp generate --build query array",
+    );
 
-    assert!(
-        !output.status.success(),
-        "query array spec unexpectedly built"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("backend failed to generate API crate")
-            || stderr.contains("cargo build --release failed"),
-        "stderr:\n{stderr}"
-    );
+    let mut command = Command::new(common::generated_bin(&out_dir, "query-array-api"));
+    let output = common::disable_proxy(&mut command)
+        .arg("list_items")
+        .arg("--tags")
+        .arg("a")
+        .arg("--tags")
+        .arg("b")
+        .arg("--json")
+        .output()
+        .expect("failed to run generated query-array command");
+    common::assert_success(output, "generated list_items with repeated query params");
+    mock.assert();
 }
 
 #[test]

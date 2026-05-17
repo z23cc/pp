@@ -75,6 +75,7 @@ fn build_operation(
         );
     };
     let name = operation_name(&raw_name);
+    reject_reserved_operation_name(&name, &raw_name)?;
     let derived_description = format!("{method} {path}");
     let mut description = operation
         .summary
@@ -138,6 +139,15 @@ fn build_operation(
         path_template: path.to_string(),
         args,
     })
+}
+
+fn reject_reserved_operation_name(name: &str, operation_id: &str) -> Result<()> {
+    if matches!(name, "mcp" | "help") {
+        anyhow::bail!(
+            "operationId '{operation_id}' produces reserved generated CLI command '{name}'"
+        );
+    }
+    Ok(())
 }
 
 fn operation_name(operation_id: &str) -> String {
