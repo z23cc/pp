@@ -13,7 +13,7 @@
 
 The default generator is native direct HTTP. Generated human CLI commands and MCP tools share the same operation table and runtime request path. The emitted workspace contains a single generated crate and does not depend on an external OpenAPI client generator.
 
-The supported input contract is a strict OpenAPI 3.0 subset plus a narrow OpenAPI 3.1 safe subset: explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, JSON request bodies, `components/schemas` plus `$defs` references, nullable unions of the form `type: [T, null]`, and the documented auth schemes. Unsupported shapes fail during modeling or generated build validation; `pp` does not repair, mutate, fall back, or silently omit specs/features to broaden support. The OpenAPI 3.1 support is not broad JSON Schema 2020-12 compliance.
+The supported input contract is a strict OpenAPI 3.0 subset plus the narrow OpenAPI 3.1 safe subset documented in [`docs/support-matrix.md`](support-matrix.md): explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, JSON request bodies, `components/schemas` plus `$defs` references, nullable unions of the form `type: [T, null]`, and the documented auth schemes. Unsupported shapes fail during modeling or generated build validation; `pp` does not repair, mutate, fall back, or silently omit specs/features to broaden support. The OpenAPI 3.1 support is not broad JSON Schema 2020-12 compliance.
 
 ## Release checklist
 

@@ -19,6 +19,7 @@ Purpose:
 - Inspect/slicing/pipeline/model/backend behavior.
 - Auth-selection coverage for fail-ambiguous defaults, removed auth-policy flag handling, and explicit `--auth-scheme` behavior.
 - Transform-plan audit JSON coverage, including structured audit fields and the generated native direct HTTP invocation audit.
+- Support matrix and diagnostic-code contract tests for `src/support.rs`, schema diagnostics, and model unsupported-operation codes.
 
 ## Standard
 

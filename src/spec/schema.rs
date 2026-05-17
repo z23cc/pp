@@ -34,10 +34,6 @@ impl ProjectedSchema {
     pub(crate) fn unsupported_diagnostic(&self) -> Option<&UnsupportedSchemaDiagnostic> {
         self.unsupported.as_ref()
     }
-
-    pub(crate) fn unsupported_reason(&self) -> Option<String> {
-        self.unsupported_diagnostic().map(ToString::to_string)
-    }
 }
 
 #[derive(Debug, Clone)]

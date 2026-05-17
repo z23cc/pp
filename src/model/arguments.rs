@@ -1,5 +1,6 @@
 use crate::backend::DirectInvocationRequirements;
 use crate::spec::{PpParameterRef, PpRequestBodyRef, PpSpec};
+use crate::support::diagnostics::direct_http as direct_codes;
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -15,8 +16,8 @@ use super::value_kind::ArgValueKind;
 #[cfg(test)]
 pub(super) use super::diagnostics::DIRECT_UNSUPPORTED_PREFIX;
 
-fn unsupported_error(detail: impl Into<String>) -> anyhow::Error {
-    DirectInvocationUnsupported::new(detail).into()
+fn unsupported_error(code: &'static str, detail: impl Into<String>) -> anyhow::Error {
+    DirectInvocationUnsupported::new(code, detail).into()
 }
 
 pub(super) struct McpArgumentContext<'a> {
@@ -185,10 +186,13 @@ pub(super) fn add_body(
         &ctx.direct_http_plan_context(),
         |field_names| {
             if field_names.iter().any(|name| properties.contains_key(name)) {
-                return Err(unsupported_error(format!(
-                    "flattened JSON request body field collision for tool '{}' (operationId '{}')",
-                    ctx.tool_name, ctx.operation_id
-                )));
+                return Err(unsupported_error(
+                    direct_codes::REQUEST_BODY_FIELD_COLLISION,
+                    format!(
+                        "flattened JSON request body field collision for tool '{}' (operationId '{}')",
+                        ctx.tool_name, ctx.operation_id
+                    ),
+                ));
             }
             Ok(())
         },

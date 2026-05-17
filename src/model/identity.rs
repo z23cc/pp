@@ -37,6 +37,7 @@ pub(crate) fn mcp_model(
                     method: operation.method_uppercase.to_string(),
                     path: operation.path.to_string(),
                     reason: unsupported.to_string(),
+                    diagnostic_code: unsupported.code().to_string(),
                 }),
                 Err(error) => return Err(error),
             },

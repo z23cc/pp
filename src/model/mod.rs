@@ -54,6 +54,9 @@ pub struct McpUnsupportedOperation {
     pub method: String,
     pub path: String,
     pub reason: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
+    pub diagnostic_code: String,
 }
 
 #[cfg(test)]
@@ -593,9 +596,17 @@ paths:
 
         assert!(model.tools.is_empty());
         assert_eq!(model.unsupported_operations.len(), 1);
-        assert!(model.unsupported_operations[0]
+        let unsupported = &model.unsupported_operations[0];
+        assert!(unsupported
             .reason
             .contains("non-exploded query array parameter 'tags'"));
+        assert_eq!(
+            unsupported.diagnostic_code,
+            crate::support::diagnostics::direct_http::QUERY_ARRAY_NON_EXPLODED
+        );
+        let serialized = serde_json::to_value(unsupported).unwrap();
+        assert!(serialized.get("reason").is_some());
+        assert!(serialized.get("diagnostic_code").is_none());
     }
 
     #[test]
@@ -692,6 +703,10 @@ paths:
         assert!(model.unsupported_operations[0]
             .reason
             .contains("flattened JSON request body field collision"));
+        assert_eq!(
+            model.unsupported_operations[0].diagnostic_code,
+            crate::support::diagnostics::direct_http::REQUEST_BODY_FIELD_COLLISION
+        );
     }
 
     #[test]
@@ -968,12 +983,15 @@ paths:
         let model = mcp_model_for_tests(&api, None).unwrap();
         assert!(model.tools.is_empty());
         assert_eq!(model.unsupported_operations.len(), 1);
-        assert!(model.unsupported_operations[0]
+        let unsupported = &model.unsupported_operations[0];
+        assert!(unsupported
             .reason
             .contains("unsupported JSON Schema feature 'oneOf'"));
-        assert!(model.unsupported_operations[0]
-            .reason
-            .contains("parameter 'filter'"));
+        assert!(unsupported.reason.contains("parameter 'filter'"));
+        assert_eq!(
+            unsupported.diagnostic_code,
+            crate::support::diagnostics::direct_http::PARAMETER_SCHEMA_UNSUPPORTED
+        );
     }
 
     #[test]

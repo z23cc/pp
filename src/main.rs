@@ -4,6 +4,7 @@ mod model;
 mod pipeline;
 mod render;
 mod spec;
+mod support;
 
 use anyhow::Result;
 use clap::Parser;

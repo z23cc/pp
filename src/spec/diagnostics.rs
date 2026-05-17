@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::support::diagnostics::schema as schema_codes;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnsupportedSchemaDiagnostic {
     feature: SchemaFeature,
@@ -12,6 +14,10 @@ impl UnsupportedSchemaDiagnostic {
             feature,
             pointer: pointer.into(),
         }
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.feature.code()
     }
 }
 
@@ -40,6 +46,23 @@ pub(crate) enum SchemaFeature {
     UnsupportedTypeUnion,
     InvalidType,
     MissingSupportedType,
+}
+
+impl SchemaFeature {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::BooleanOrNonObjectSchema => schema_codes::BOOLEAN_OR_NON_OBJECT_SCHEMA,
+            Self::RefSiblings => schema_codes::REF_SIBLINGS,
+            Self::SchemaKeyword(_) => schema_codes::KEYWORD_UNSUPPORTED,
+            Self::UnsupportedJsonSchemaType(_) => schema_codes::TYPE_UNSUPPORTED,
+            Self::UnresolvedReference(_) => schema_codes::UNRESOLVED_REFERENCE,
+            Self::TupleArrayItems => schema_codes::TUPLE_ARRAY_ITEMS,
+            Self::InvalidTypeArray => schema_codes::INVALID_TYPE_ARRAY,
+            Self::UnsupportedTypeUnion => schema_codes::UNSUPPORTED_TYPE_UNION,
+            Self::InvalidType => schema_codes::INVALID_TYPE,
+            Self::MissingSupportedType => schema_codes::MISSING_SUPPORTED_TYPE,
+        }
+    }
 }
 
 impl fmt::Display for SchemaFeature {
@@ -87,6 +110,19 @@ mod tests {
         assert_eq!(
             diagnostic.to_string(),
             "invalid JSON Schema type array at /components/schemas/Bad/type at /components/schemas/Bad/type"
+        );
+        assert_eq!(diagnostic.code(), schema_codes::INVALID_TYPE_ARRAY);
+    }
+
+    #[test]
+    fn schema_features_expose_stable_codes() {
+        assert_eq!(
+            SchemaFeature::SchemaKeyword("oneOf".to_string()).code(),
+            schema_codes::KEYWORD_UNSUPPORTED
+        );
+        assert_eq!(
+            SchemaFeature::UnsupportedTypeUnion.code(),
+            schema_codes::UNSUPPORTED_TYPE_UNION
         );
     }
 }

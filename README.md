@@ -130,13 +130,9 @@ Generated workspaces write `pp-transform-plan.json` with machine-readable audit 
 for runtime-generation seams. Audit entries may include structured fields such as
 `action_kind`, `backend_requirement_id`, `before_json`, and `after_json`.
 
-Current strict subset behavior:
+Current strict subset behavior is documented in [`docs/support-matrix.md`](docs/support-matrix.md): typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output; supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies; OpenAPI 3.1 support remains a narrow safe subset rather than broad JSON Schema 2020-12 compatibility.
 
-- Typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output.
-- Supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies.
-- OpenAPI 3.0 and a narrow OpenAPI 3.1 safe subset are supported. The 3.1 subset includes primitive path/query parameters, exploded primitive query arrays, JSON request bodies, `components/schemas` plus `$defs` references, and nullable unions of the form `type: [T, null]`.
-- `pp` does not claim broad JSON Schema 2020-12 support. Unsupported 3.1 schema features fail with operation-specific diagnostics instead of raw 3.1-to-3.0 repair, source rewriting, fallback generation, or silent omission.
-- Operation slicing remains explicit and reports selected/dropped operations and pruned unreachable components.
+Operation slicing remains explicit and reports selected/dropped operations and pruned unreachable components.
 
 ## Auth
 

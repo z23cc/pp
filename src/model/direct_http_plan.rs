@@ -3,14 +3,23 @@ use crate::spec::{
     schema_projection, PpParameter, PpParameterLocation, PpParameterRef, PpRequestBodyRef, PpSpec,
     ProjectedSchema, SchemaPrimitive, SchemaShape,
 };
+use crate::support::diagnostics::direct_http as direct_codes;
 use anyhow::Result;
 use serde_json::Value;
 
 use super::diagnostics::DirectInvocationUnsupported;
 use super::value_kind::{ArgValueKind, PrimitiveKind};
 
-fn unsupported_error(detail: impl Into<String>) -> anyhow::Error {
-    DirectInvocationUnsupported::new(detail).into()
+fn unsupported_error(code: &'static str, detail: impl Into<String>) -> anyhow::Error {
+    DirectInvocationUnsupported::new(code, detail).into()
+}
+
+fn unsupported_schema_error(
+    code: &'static str,
+    detail: impl Into<String>,
+    source_code: &'static str,
+) -> anyhow::Error {
+    DirectInvocationUnsupported::with_source_code(code, detail, source_code).into()
 }
 
 pub(super) struct DirectHttpPlanContext<'a> {
@@ -67,17 +76,20 @@ pub(super) fn plan_parameter(
     let tool_name = ctx.tool_name;
     let operation_id = ctx.operation_id;
     let Some(parameter) = parameter.item() else {
-        return Err(unsupported_error(format!(
+        return Err(unsupported_error(
+            direct_codes::UNRESOLVED_PARAMETER_REF,
+            format!(
             "unresolved parameter references for tool '{tool_name}' (operationId '{operation_id}')"
-        )));
+        ),
+        ));
     };
     let name = parameter.name().ok_or_else(|| {
-        unsupported_error(format!(
+        unsupported_error(direct_codes::PARAMETER_NAME_MISSING, format!(
             "parameter without non-empty string name for tool '{tool_name}' (operationId '{operation_id}')"
         ))
     })?;
     let location = parameter.location().ok_or_else(|| {
-        unsupported_error(format!(
+        unsupported_error(direct_codes::PARAMETER_LOCATION_MISSING, format!(
             "parameter '{name}' without supported 'in' location for tool '{tool_name}' (operationId '{operation_id}')"
         ))
     })?;
@@ -105,21 +117,27 @@ pub(super) fn plan_parameter(
             PlannedParameterBinding::Path
         }
         PpParameterLocation::Header => {
-            return Err(unsupported_error(format!(
+            return Err(unsupported_error(
+                direct_codes::PARAMETER_LOCATION_UNSUPPORTED,
+                format!(
                 "header parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
-            )));
+            ),
+            ));
         }
         PpParameterLocation::Cookie => {
-            return Err(unsupported_error(format!(
+            return Err(unsupported_error(
+                direct_codes::PARAMETER_LOCATION_UNSUPPORTED,
+                format!(
                 "cookie parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
-            )));
+            ),
+            ));
         }
     };
     validate_arg_name(name)?;
     let is_path = matches!(binding, PlannedParameterBinding::Path);
     let schema = parameter_schema(parameter, name, spec, tool_name, operation_id)?;
     if schema.nullable && (is_path || parameter.required()) {
-        return Err(unsupported_error(format!(
+        return Err(unsupported_error(direct_codes::PARAMETER_REQUIRED_NULLABLE, format!(
             "required nullable parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
         )));
     }
@@ -165,25 +183,31 @@ pub(super) fn plan_request_body(
         return Ok(PlannedRequestBody::None);
     };
     let Some(body) = request_body.item() else {
-        return Err(unsupported_error(format!(
+        return Err(unsupported_error(direct_codes::UNRESOLVED_REQUEST_BODY_REF, format!(
             "unresolved requestBody references for tool '{tool_name}' (operationId '{operation_id}')"
         )));
     };
     let json_content_type = capabilities.request_bodies.json_content_type;
     if !body.has_content_type(json_content_type) {
         if body.content_is_empty() {
-            return Err(unsupported_error(format!(
+            return Err(unsupported_error(direct_codes::REQUEST_BODY_JSON_MISSING, format!(
                 "requestBody without JSON content for tool '{tool_name}' (operationId '{operation_id}')"
             )));
         }
-        return Err(unsupported_error(format!(
-            "non-JSON request bodies for tool '{tool_name}' (operationId '{operation_id}')"
-        )));
+        return Err(unsupported_error(
+            direct_codes::REQUEST_BODY_NON_JSON,
+            format!(
+                "non-JSON request bodies for tool '{tool_name}' (operationId '{operation_id}')"
+            ),
+        ));
     }
     let Some(schema) = body.schema_for_content_type(json_content_type) else {
-        return Err(unsupported_error(format!(
+        return Err(unsupported_error(
+            direct_codes::REQUEST_BODY_SCHEMA_MISSING,
+            format!(
             "schemaless JSON request body for tool '{tool_name}' (operationId '{operation_id}')"
-        )));
+        ),
+        ));
     };
     let body_schema = schema_projection(schema, spec);
     if let SchemaShape::Object {
@@ -194,10 +218,15 @@ pub(super) fn plan_request_body(
     {
         let mut fields = Vec::with_capacity(body_properties.len());
         for (name, property_schema) in body_properties {
-            if let Some(reason) = property_schema.unsupported_reason() {
-                return Err(unsupported_error(format!(
-                    "unsupported JSON request body field '{name}' for tool '{tool_name}' (operationId '{operation_id}'): {reason}"
-                )));
+            if let Some(diagnostic) = property_schema.unsupported_diagnostic() {
+                let reason = diagnostic.to_string();
+                return Err(unsupported_schema_error(
+                    direct_codes::REQUEST_BODY_FIELD_SCHEMA_UNSUPPORTED,
+                    format!(
+                        "unsupported JSON request body field '{name}' for tool '{tool_name}' (operationId '{operation_id}'): {reason}"
+                    ),
+                    diagnostic.code(),
+                ));
             }
             fields.push(PlannedBodyField {
                 json_name: name.clone(),
@@ -222,10 +251,15 @@ pub(super) fn plan_request_body(
             });
         }
     }
-    if let Some(reason) = body_schema.unsupported_reason() {
-        return Err(unsupported_error(format!(
-            "unsupported JSON request body schema for tool '{tool_name}' (operationId '{operation_id}'): {reason}"
-        )));
+    if let Some(diagnostic) = body_schema.unsupported_diagnostic() {
+        let reason = diagnostic.to_string();
+        return Err(unsupported_schema_error(
+            direct_codes::REQUEST_BODY_SCHEMA_UNSUPPORTED,
+            format!(
+                "unsupported JSON request body schema for tool '{tool_name}' (operationId '{operation_id}'): {reason}"
+            ),
+            diagnostic.code(),
+        ));
     }
     Ok(PlannedRequestBody::WholeJson {
         schema_json: body_schema.json,
@@ -244,13 +278,16 @@ fn parameter_schema(
         return Ok(schema_projection(schema, spec));
     }
     if parameter.has_content_format() {
-        return Err(unsupported_error(format!(
+        return Err(unsupported_error(direct_codes::PARAMETER_CONTENT_ENCODING, format!(
             "content-encoded parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
         )));
     }
-    Err(unsupported_error(format!(
+    Err(unsupported_error(
+        direct_codes::PARAMETER_SCHEMA_MISSING,
+        format!(
         "parameter '{name}' without schema for tool '{tool_name}' (operationId '{operation_id}')"
-    )))
+    ),
+    ))
 }
 
 fn reject_unsupported_parameter_location(
@@ -268,9 +305,10 @@ fn reject_unsupported_parameter_location(
     {
         return Ok(());
     }
-    Err(unsupported_error(format!(
-        "{label} parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
-    )))
+    Err(unsupported_error(
+        direct_codes::PARAMETER_LOCATION_UNSUPPORTED,
+        format!("{label} parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"),
+    ))
 }
 
 fn reject_unsupported_direct_parameter_schema(
@@ -281,13 +319,18 @@ fn reject_unsupported_direct_parameter_schema(
     is_path: bool,
     capabilities: &DirectInvocationRequirements,
 ) -> Result<()> {
-    if let Some(reason) = schema.unsupported_reason() {
-        return Err(unsupported_error(format!(
-            "unsupported parameter schema for '{name}' on tool '{tool_name}' (operationId '{operation_id}'): {reason}"
-        )));
+    if let Some(diagnostic) = schema.unsupported_diagnostic() {
+        let reason = diagnostic.to_string();
+        return Err(unsupported_schema_error(
+            direct_codes::PARAMETER_SCHEMA_UNSUPPORTED,
+            format!(
+                "unsupported parameter schema for '{name}' on tool '{tool_name}' (operationId '{operation_id}'): {reason}"
+            ),
+            diagnostic.code(),
+        ));
     }
     let Some(schema_type) = schema.shape.json_type() else {
-        return Err(unsupported_error(format!(
+        return Err(unsupported_error(direct_codes::PARAMETER_PRIMITIVE_TYPE_MISSING, format!(
             "parameter '{name}' without primitive schema type for tool '{tool_name}' (operationId '{operation_id}')"
         )));
     };
@@ -304,7 +347,7 @@ fn reject_unsupported_direct_parameter_schema(
             item_nullable,
         } if !is_path && capabilities.parameters.supports_query_arrays => {
             if *item_nullable {
-                return Err(unsupported_error(format!(
+                return Err(unsupported_error(direct_codes::QUERY_ARRAY_ITEM_NULLABLE, format!(
                     "nullable array items for parameter '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
                 )));
             }
@@ -314,17 +357,23 @@ fn reject_unsupported_direct_parameter_schema(
                         .parameters
                         .primitive_schema_types
                         .contains(&item_type) => Ok(()),
-                _ => Err(unsupported_error(format!(
+                _ => Err(unsupported_error(direct_codes::PARAMETER_ARRAY_NON_PRIMITIVE, format!(
                     "non-primitive array parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
                 ))),
             }
         }
-        SchemaShape::Array { .. } if is_path => Err(unsupported_error(format!(
+        SchemaShape::Array { .. } if is_path => Err(unsupported_error(
+            direct_codes::PATH_ARRAY_UNSUPPORTED,
+            format!(
             "array path parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
-        ))),
-        _ => Err(unsupported_error(format!(
+        ),
+        )),
+        _ => Err(unsupported_error(
+            direct_codes::PARAMETER_TYPE_UNSUPPORTED,
+            format!(
             "{schema_type} parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
-        ))),
+        ),
+        )),
     }
 }
 
@@ -341,7 +390,7 @@ fn reject_unsupported_direct_parameter_serialization(
         PpParameterLocation::Query => {
             if capabilities.parameters.requires_form_query_style && !parameter.query_style_is_form()
             {
-                return Err(unsupported_error(format!(
+                return Err(unsupported_error(direct_codes::QUERY_STYLE_NON_FORM, format!(
                     "non-form query parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
                 )));
             }
@@ -349,7 +398,7 @@ fn reject_unsupported_direct_parameter_serialization(
                 && !capabilities.parameters.supports_non_exploded_query_arrays
                 && parameter.query_explode_is_false()
             {
-                return Err(unsupported_error(format!(
+                return Err(unsupported_error(direct_codes::QUERY_ARRAY_NON_EXPLODED, format!(
                     "non-exploded query array parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
                 )));
             }
@@ -359,7 +408,7 @@ fn reject_unsupported_direct_parameter_serialization(
             if capabilities.parameters.requires_simple_path_style
                 && (!parameter.path_style_is_simple() || parameter.path_explode_is_true())
             {
-                return Err(unsupported_error(format!(
+                return Err(unsupported_error(direct_codes::PATH_STYLE_NON_SIMPLE, format!(
                     "non-simple path parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
                 )));
             }

@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Verification profiles are documented in `docs/verification.md`.
 - Manual/scheduled generated-workspace smoke workflow for standard and deep profiles.
 - OpenAPI 3.1 safe-subset generated-workspace smoke coverage.
+- Internal support matrix and diagnostic-code contract for strict OpenAPI subset diagnostics.
 
 ## [0.1.0] - TBD
 
