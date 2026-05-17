@@ -1,0 +1,36 @@
+# Source: https://airtable.com/developers/web/api/list-records
+# Trim date: 2026-05-17. Trimmed to supported path and query parameters.
+openapi: 3.0.3
+info:
+  title: Airtable Records API
+  version: '1.0'
+servers:
+  - url: https://api.airtable.com/v0
+security:
+  - bearerAuth: []
+paths:
+  /{baseId}/{tableIdOrName}:
+    get:
+      operationId: records_list
+      parameters:
+        - name: baseId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: tableIdOrName
+          in: path
+          required: true
+          schema: { type: string }
+        - name: maxRecords
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: view
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: Records }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

@@ -210,6 +210,82 @@
     "fixture_kind": "curated_public_api_shape"
   },
   {
+    "id": "asana_tasks_pass",
+    "path": "tests/fixtures/corpus/asana_tasks.yaml",
+    "source": "https://developers.asana.com/reference/gettasks",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "query-params",
+      "integer-param"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "airtable_records_pass",
+    "path": "tests/fixtures/corpus/airtable_records.yaml",
+    "source": "https://airtable.com/developers/web/api/list-records",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "path-params",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "dropbox_files_list_folder_pass",
+    "path": "tests/fixtures/corpus/dropbox_files_list_folder.yaml",
+    "source": "https://www.dropbox.com/developers/documentation/http/documentation#files-list_folder",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "json-request-body",
+      "boolean-param"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "spotify_search_pass",
+    "path": "tests/fixtures/corpus/spotify_search.yaml",
+    "source": "https://developer.spotify.com/documentation/web-api/reference/search",
+    "expected_check": "pass",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "query-array",
+      "query-params"
+    ],
+    "expected_diagnostics": [],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
+    "id": "hubspot_contacts_fail_cookie_param",
+    "path": "tests/fixtures/corpus/hubspot_contacts_cookie_fail.yaml",
+    "source": "https://developers.hubspot.com/docs/api/crm/contacts",
+    "expected_check": "fail",
+    "coverage_tags": [
+      "openapi30",
+      "bearer",
+      "unsupported-cookie-param"
+    ],
+    "expected_diagnostics": [
+      "direct_http.parameter_location_unsupported"
+    ],
+    "generate_build": false,
+    "fixture_kind": "curated_public_api_shape"
+  },
+  {
     "id": "notion_pages_fail_header_param",
     "path": "tests/fixtures/corpus/notion_pages_fail_header_param.yaml",
     "source": "https://developers.notion.com/reference/post-page",

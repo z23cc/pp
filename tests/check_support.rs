@@ -130,14 +130,34 @@ fn check_json_reports_unsupported_operations_with_diagnostic_codes() {
         value["unsupported_operations"][0]["diagnostic_code"],
         "direct_http.parameter_type_unsupported"
     );
-    assert!(value["diagnostics"]
+    let diagnostic = value["diagnostics"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|diagnostic| {
+        .find(|diagnostic| {
             diagnostic["code"] == "direct_http.parameter_type_unsupported"
                 && diagnostic["source"] == "direct_http"
-        }));
+        })
+        .expect("direct_http diagnostic");
+    assert_eq!(diagnostic["title"], "Parameter type is unsupported");
+    assert!(diagnostic["remediation"]
+        .as_str()
+        .unwrap()
+        .contains("supported primitive"));
+    assert!(diagnostic["strict_behavior"]
+        .as_str()
+        .unwrap()
+        .contains("does not generate fallback"));
+    assert!(diagnostic["support_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| { feature.as_str() == Some("parameters.path_query_primitives") }));
+    assert!(value["unsupported_operations"][0]["support_features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature.as_str() == Some("parameters.path_query_primitives")));
 }
 
 #[test]
@@ -171,13 +191,41 @@ fn check_json_public_diagnostic_codes_resolve_in_support_inventory() {
             "{expected_code} check unexpectedly succeeded"
         );
         let value: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+        let diagnostic = value["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == expected_code)
+            .unwrap_or_else(|| panic!("missing {expected_code} in check diagnostics: {value}"));
         assert!(
-            value["diagnostics"]
+            diagnostic["title"]
+                .as_str()
+                .is_some_and(|title| !title.is_empty()),
+            "missing title for {expected_code}: {diagnostic}"
+        );
+        assert!(
+            diagnostic["remediation"]
+                .as_str()
+                .is_some_and(|remediation| !remediation.is_empty()),
+            "missing remediation for {expected_code}: {diagnostic}"
+        );
+        assert!(
+            diagnostic["severity_hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("error:")),
+            "missing severity hint for {expected_code}: {diagnostic}"
+        );
+        assert!(
+            diagnostic["strict_behavior"]
+                .as_str()
+                .is_some_and(|behavior| !behavior.is_empty()),
+            "missing strict behavior for {expected_code}: {diagnostic}"
+        );
+        assert!(
+            diagnostic["support_features"]
                 .as_array()
-                .unwrap()
-                .iter()
-                .any(|diagnostic| { diagnostic["code"] == expected_code }),
-            "missing {expected_code} in check diagnostics: {value}"
+                .is_some_and(|features| !features.is_empty()),
+            "missing support features for {expected_code}: {diagnostic}"
         );
 
         let diagnostic_output = Command::new(common::pp_bin())
@@ -198,7 +246,25 @@ fn explain_human_and_json_use_support_inventory() {
         .arg("direct_http.request_body_json_missing")
         .output()
         .expect("failed to run pp explain");
-    common::assert_success(human_output, "pp explain");
+    assert!(
+        human_output.status.success(),
+        "pp explain failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&human_output.stdout),
+        String::from_utf8_lossy(&human_output.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human_output.stdout);
+    assert!(
+        human_stdout.contains("Severity:"),
+        "stdout:\n{human_stdout}"
+    );
+    assert!(
+        human_stdout.contains("Strict behavior:"),
+        "stdout:\n{human_stdout}"
+    );
+    assert!(
+        human_stdout.contains("does not generate fallback"),
+        "stdout:\n{human_stdout}"
+    );
 
     let json_output = Command::new(common::pp_bin())
         .arg("explain")
@@ -219,6 +285,11 @@ fn explain_human_and_json_use_support_inventory() {
         "direct_http.request_body_json_missing"
     );
     assert!(value["meaning"].as_str().unwrap().contains("request body"));
+    assert!(value["severity_hint"].as_str().unwrap().contains("error:"));
+    assert!(value["strict_behavior"]
+        .as_str()
+        .unwrap()
+        .contains("does not generate fallback"));
     assert!(value["features"].as_array().unwrap().iter().any(|feature| {
         feature["id"] == "request_bodies.json" && feature["status"] == "supported"
     }));
@@ -317,7 +388,21 @@ fn check_human_failure_prints_diagnostics_and_explain_hint() {
         "stdout:\n{stdout}"
     );
     assert!(
+        stdout.contains("title: Parameter type is unsupported"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("related support features: parameters.path_query_primitives"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("strict behavior:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("remediation:"), "stdout:\n{stdout}");
+    assert!(
         stdout.contains("Unsupported operations:"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("direct_http.parameter_type_unsupported (1 operation)"),
         "stdout:\n{stdout}"
     );
     assert!(
@@ -359,6 +444,33 @@ fn support_json_and_queries_are_backed_by_matrix_inventory() {
     assert!(value["features"].as_array().unwrap().iter().any(|feature| {
         feature["id"] == "request_bodies.json" && feature["status"] == "supported"
     }));
+
+    let schema_diagnostic_output = Command::new(common::pp_bin())
+        .arg("support")
+        .arg("--diagnostic")
+        .arg("schema.keyword_unsupported")
+        .arg("--json")
+        .output()
+        .expect("failed to run pp support --diagnostic schema");
+    assert!(
+        schema_diagnostic_output.status.success(),
+        "pp support --diagnostic schema --json failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&schema_diagnostic_output.stdout),
+        String::from_utf8_lossy(&schema_diagnostic_output.stderr)
+    );
+    let schema_value: Value =
+        serde_json::from_slice(&schema_diagnostic_output.stdout).expect("support schema JSON");
+    assert_eq!(
+        schema_value["diagnostic_code"],
+        "schema.keyword_unsupported"
+    );
+    assert!(schema_value["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| {
+            feature["id"] == "json_schema.broad_2020_12" && feature["status"] == "unsupported"
+        }));
 }
 
 #[test]

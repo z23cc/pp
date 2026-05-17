@@ -1,0 +1,30 @@
+# Source: https://www.dropbox.com/developers/documentation/http/documentation#files-list_folder
+# Trim date: 2026-05-17. Trimmed to supported bearer auth and JSON body fields.
+openapi: 3.0.3
+info:
+  title: Dropbox Files API
+  version: '2.0'
+servers:
+  - url: https://api.dropboxapi.com/2
+security:
+  - bearerAuth: []
+paths:
+  /files/list_folder:
+    post:
+      operationId: files_list_folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string }
+                recursive: { type: boolean }
+                limit: { type: integer }
+      responses:
+        '200': { description: Folder entries }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

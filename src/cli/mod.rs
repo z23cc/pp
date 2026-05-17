@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -272,6 +272,12 @@ fn print_explain(diagnostic_code: String, json: bool) -> Result<()> {
     println!("Meaning:");
     println!("  {}", explanation.meaning);
     println!();
+    println!("Severity:");
+    println!("  {}", explanation.severity_hint);
+    println!();
+    println!("Strict behavior:");
+    println!("  {}", explanation.strict_behavior);
+    println!();
     println!("Remediation:");
     println!("  {}", explanation.remediation);
     if !explanation.features.is_empty() {
@@ -323,20 +329,60 @@ fn print_check_human(result: &crate::pipeline::CheckResult) {
                 "  [{}] {} {}: {}",
                 diagnostic.severity, diagnostic.code, diagnostic.source, diagnostic.message
             );
+            if let Some(title) = &diagnostic.title {
+                println!("    title: {title}");
+            }
+            if !diagnostic.support_features.is_empty() {
+                println!(
+                    "    related support features: {}",
+                    diagnostic.support_features.join(", ")
+                );
+            }
+            if let Some(strict_behavior) = &diagnostic.strict_behavior {
+                println!("    strict behavior: {strict_behavior}");
+            }
+            if let Some(remediation) = &diagnostic.remediation {
+                println!("    remediation: {remediation}");
+            }
         }
     }
 
     if !result.unsupported_operations.is_empty() {
         println!();
         println!("Unsupported operations:");
+        let mut operations_by_code: BTreeMap<
+            &str,
+            Vec<&crate::pipeline::CheckUnsupportedOperation>,
+        > = BTreeMap::new();
         for operation in &result.unsupported_operations {
-            let operation_id = operation.operation_id.as_deref().unwrap_or("none");
-            println!(
-                "  {} {} (operationId: {})",
-                operation.method, operation.path, operation_id
-            );
-            println!("    code: {}", operation.diagnostic_code);
-            println!("    reason: {}", operation.reason);
+            operations_by_code
+                .entry(operation.diagnostic_code.as_str())
+                .or_default()
+                .push(operation);
+        }
+        for (code, operations) in operations_by_code {
+            let suffix = if operations.len() == 1 {
+                "operation"
+            } else {
+                "operations"
+            };
+            println!("  {code} ({} {suffix})", operations.len());
+            if let Some(first) = operations.first() {
+                if !first.support_features.is_empty() {
+                    println!(
+                        "    related support features: {}",
+                        first.support_features.join(", ")
+                    );
+                }
+            }
+            for operation in operations {
+                let operation_id = operation.operation_id.as_deref().unwrap_or("none");
+                println!(
+                    "    {} {} (operationId: {})",
+                    operation.method, operation.path, operation_id
+                );
+                println!("      reason: {}", operation.reason);
+            }
         }
     }
 

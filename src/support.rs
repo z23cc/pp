@@ -42,6 +42,8 @@ pub(crate) struct DiagnosticExplanation {
     pub title: &'static str,
     pub meaning: &'static str,
     pub remediation: &'static str,
+    pub severity_hint: &'static str,
+    pub strict_behavior: &'static str,
     pub features: Vec<SupportFeature>,
 }
 
@@ -94,8 +96,42 @@ pub(crate) fn explain_diagnostic(code: &str) -> Option<DiagnosticExplanation> {
         title: metadata.title,
         meaning: metadata.meaning,
         remediation: metadata.remediation,
+        severity_hint: severity_hint_for(metadata.diagnostic_code),
+        strict_behavior: strict_behavior_for(metadata.diagnostic_code),
         features: feature_payload.features,
     })
+}
+
+fn severity_hint_for(code: &str) -> &'static str {
+    if code.starts_with("spec.") {
+        "error: pp cannot load the selected OpenAPI input until this is resolved."
+    } else if code.starts_with("runtime.") {
+        "error: pp cannot generate a runnable native CLI without an explicit supported runtime value."
+    } else if code.starts_with("model.") {
+        "error: pp cannot build its native generation model while this condition is present."
+    } else if code.starts_with("schema.") {
+        "error: pp cannot model the affected schema in its strict supported subset."
+    } else if code.starts_with("direct_http.") {
+        "error: pp cannot generate the selected native direct HTTP operation set until this operation shape is fixed or explicitly excluded."
+    } else {
+        "error: pp check/generate fails until this diagnostic is resolved."
+    }
+}
+
+fn strict_behavior_for(code: &str) -> &'static str {
+    if code.starts_with("spec.") {
+        "pp stops at load/preparation time; it does not repair malformed specs, fetch missing remote data, or guess invalid selections."
+    } else if code.starts_with("runtime.") {
+        "pp requires an explicit absolute http(s) runtime base URL; it does not invent or normalize one."
+    } else if code.starts_with("model.") {
+        "pp fails the selected operation set instead of falling back to wrapper generation or silently omitting required model data."
+    } else if code.starts_with("schema.") {
+        "pp reports unsupported schema shapes explicitly; it does not coerce, infer, or downgrade JSON Schema semantics."
+    } else if code.starts_with("direct_http.") {
+        "pp reports unsupported operation shapes explicitly and does not generate fallback runtime adapters for them."
+    } else {
+        "pp preserves strict no-repair/no-fallback behavior for this diagnostic."
+    }
 }
 
 pub(crate) mod diagnostics {
@@ -686,6 +722,8 @@ mod tests {
             assert!(!explanation.title.is_empty());
             assert!(!explanation.meaning.is_empty());
             assert!(!explanation.remediation.is_empty());
+            assert!(!explanation.severity_hint.is_empty());
+            assert!(!explanation.strict_behavior.is_empty());
             assert!(!explanation.features.is_empty());
         }
     }

@@ -126,15 +126,17 @@ IDs for unnamed operations, but generation fails until those operations are give
 `operationId` or excluded from the generated surface.
 
 `pp inspect --reports` exposes structured preparation reports for explicit slicing.
-`pp check <spec> --json` runs the same strict load/auth/base-URL/model checks without
-rendering files and emits `pp.check.v1` diagnostics, unsupported operations, and the
-support matrix ID.
+`pp check <spec>` runs the same strict load/auth/base-URL/model checks without
+rendering files. Human output groups diagnostics and unsupported operations with severity,
+strict-behavior notes, remediation, and related support features. `pp check <spec> --json`
+emits the compatible `pp.check.v1` contract with additive diagnostic/support metadata,
+unsupported operations, and the support matrix ID.
 
 Generated workspaces write `pp-transform-plan.json` with machine-readable audit entries
 for runtime-generation seams. Audit entries may include structured fields such as
 `action_kind`, `backend_requirement_id`, `before_json`, and `after_json`.
 
-Current strict subset behavior is documented in [`docs/support-matrix.md`](docs/support-matrix.md) and queryable with `pp support --json`: typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output; supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies; OpenAPI 3.1 support remains a narrow safe subset rather than broad JSON Schema 2020-12 compatibility.
+Current strict subset behavior is documented in [`docs/support-matrix.md`](docs/support-matrix.md) and queryable with `pp support --json`: typed OpenAPI shapes are not rewritten, dropped, pruned, or relaxed for generated output; supported operations need explicit `operationId`, primitive path/query parameters, exploded primitive query arrays, and JSON request bodies; OpenAPI 3.1 support remains a narrow safe subset rather than broad JSON Schema 2020-12 compatibility. OpenAPI 3.1 schema projection preserves supported primitive annotations only after the base schema type is already supported.
 
 Operation slicing remains explicit and reports selected/dropped operations and pruned unreachable components.
 
@@ -188,7 +190,7 @@ pp validate ./out/ping
 
 Generated-workspace smoke tests are ignored in normal PR runs and covered by a manual/scheduled workflow. See `docs/verification.md` for the fast, standard, and deep verification profiles.
 
-The standard smoke profile covers clean generated-workspace builds, full-Petstore strict native-subset rejection, sliced-Petstore native builds, an OpenAPI 3.1 safe-subset generated workspace, auth headers, repeated query-array parameters, MCP error shapes, `tools/list` pagination, MCP response shaping against local `mockito` servers, and a deterministic 20+ local curated public API-shape fixture corpus report at `target/pp-corpus-coverage.{json,md}`.
+The standard smoke profile covers clean generated-workspace builds, full-Petstore strict native-subset rejection, sliced-Petstore native builds, an OpenAPI 3.1 safe-subset generated workspace, auth headers, repeated query-array parameters, MCP error shapes, `tools/list` pagination, MCP response shaping against local `mockito` servers, and a deterministic 25-fixture local curated public API-shape corpus report at `target/pp-corpus-coverage.{json,md}` with diagnostic, fixture-kind, coverage-tag, and support-feature frequencies.
 
 ## Contributing
 

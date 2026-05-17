@@ -71,6 +71,11 @@ pub(crate) struct CheckDiagnostic {
     pub code: String,
     pub source: &'static str,
     pub message: String,
+    pub title: Option<String>,
+    pub remediation: Option<String>,
+    pub severity_hint: Option<String>,
+    pub strict_behavior: Option<String>,
+    pub support_features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +85,7 @@ pub(crate) struct CheckUnsupportedOperation {
     pub path: String,
     pub reason: String,
     pub diagnostic_code: String,
+    pub support_features: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,12 +137,12 @@ pub(crate) fn check_with_backend<B: ApiBackend>(request: CheckRequest, backend: 
     let loaded = match crate::spec::load_with_options(&request.spec_path, &request.load_options) {
         Ok(loaded) => loaded,
         Err(error) => {
-            result.diagnostics.push(CheckDiagnostic {
-                severity: "error",
-                code: crate::support::diagnostics::spec::LOAD_ERROR.to_string(),
-                source: "spec",
-                message: error.to_string(),
-            });
+            result.diagnostics.push(check_diagnostic(
+                "error",
+                crate::support::diagnostics::spec::LOAD_ERROR.to_string(),
+                "spec",
+                error.to_string(),
+            ));
             return result;
         }
     };
@@ -152,12 +158,12 @@ pub(crate) fn check_with_backend<B: ApiBackend>(request: CheckRequest, backend: 
     ) {
         Ok(base_url) => base_url,
         Err(error) => {
-            result.diagnostics.push(CheckDiagnostic {
-                severity: "error",
-                code: crate::support::diagnostics::runtime::BASE_URL.to_string(),
-                source: "runtime",
-                message: error.to_string(),
-            });
+            result.diagnostics.push(check_diagnostic(
+                "error",
+                crate::support::diagnostics::runtime::BASE_URL.to_string(),
+                "runtime",
+                error.to_string(),
+            ));
             ("https://example.invalid".to_string(), false)
         }
     };
@@ -176,12 +182,12 @@ pub(crate) fn check_with_backend<B: ApiBackend>(request: CheckRequest, backend: 
     ) {
         Ok(api_model) => api_model,
         Err(error) => {
-            result.diagnostics.push(CheckDiagnostic {
-                severity: "error",
-                code: crate::support::diagnostics::model::GENERATION_ERROR.to_string(),
-                source: "model",
-                message: error.to_string(),
-            });
+            result.diagnostics.push(check_diagnostic(
+                "error",
+                crate::support::diagnostics::model::GENERATION_ERROR.to_string(),
+                "model",
+                error.to_string(),
+            ));
             return result;
         }
     };
@@ -195,25 +201,71 @@ pub(crate) fn check_with_backend<B: ApiBackend>(request: CheckRequest, backend: 
             path: operation.path.clone(),
             reason: operation.reason.clone(),
             diagnostic_code: operation.diagnostic_code.clone(),
+            support_features: support_feature_ids(&operation.diagnostic_code),
         })
         .collect();
 
     result
         .diagnostics
-        .extend(
-            result
-                .unsupported_operations
-                .iter()
-                .map(|operation| CheckDiagnostic {
-                    severity: "error",
-                    code: operation.diagnostic_code.clone(),
-                    source: "direct_http",
-                    message: operation.reason.clone(),
-                }),
-        );
+        .extend(result.unsupported_operations.iter().map(|operation| {
+            check_diagnostic(
+                "error",
+                operation.diagnostic_code.clone(),
+                "direct_http",
+                operation.reason.clone(),
+            )
+        }));
 
     result.success = result.diagnostics.is_empty() && result.unsupported_operations.is_empty();
     result
+}
+
+fn check_diagnostic(
+    severity: &'static str,
+    code: String,
+    source: &'static str,
+    message: String,
+) -> CheckDiagnostic {
+    let explanation = crate::support::explain_diagnostic(&code);
+    CheckDiagnostic {
+        severity,
+        code,
+        source,
+        message,
+        title: explanation
+            .as_ref()
+            .map(|explanation| explanation.title.to_string()),
+        remediation: explanation
+            .as_ref()
+            .map(|explanation| explanation.remediation.to_string()),
+        severity_hint: explanation
+            .as_ref()
+            .map(|explanation| explanation.severity_hint.to_string()),
+        strict_behavior: explanation
+            .as_ref()
+            .map(|explanation| explanation.strict_behavior.to_string()),
+        support_features: explanation
+            .map(|explanation| {
+                explanation
+                    .features
+                    .into_iter()
+                    .map(|feature| feature.id.to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn support_feature_ids(code: &str) -> Vec<String> {
+    crate::support::features_for_diagnostic(code)
+        .map(|payload| {
+            payload
+                .features
+                .into_iter()
+                .map(|feature| feature.id.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn generate_with_progress(

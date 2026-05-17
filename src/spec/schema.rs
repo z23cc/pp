@@ -124,7 +124,11 @@ fn project_schema_value(
         {
             return unsupported(pointer, SchemaFeature::RefSiblings);
         }
-        return resolve_schema_reference(reference, scope_root, spec, stack, pointer);
+        let mut projected = resolve_schema_reference(reference, scope_root, spec, stack, pointer);
+        if matches!(projected.shape, SchemaShape::Primitive(_)) {
+            copy_primitive_annotations(object, &mut projected.json);
+        }
+        return projected;
     }
 
     for feature in unsupported_keywords() {
@@ -152,10 +156,10 @@ fn project_schema_value(
     };
 
     match schema_type.as_deref() {
-        Some("string") => primitive_projection(SchemaPrimitive::String, nullable),
-        Some("number") => primitive_projection(SchemaPrimitive::Number, nullable),
-        Some("integer") => primitive_projection(SchemaPrimitive::Integer, nullable),
-        Some("boolean") => primitive_projection(SchemaPrimitive::Boolean, nullable),
+        Some("string") => primitive_projection(object, SchemaPrimitive::String, nullable),
+        Some("number") => primitive_projection(object, SchemaPrimitive::Number, nullable),
+        Some("integer") => primitive_projection(object, SchemaPrimitive::Integer, nullable),
+        Some("boolean") => primitive_projection(object, SchemaPrimitive::Boolean, nullable),
         Some("array") => array_projection(object, pointer, scope_root, spec, stack, nullable),
         Some("object") => object_projection(object, pointer, scope_root, spec, stack, nullable),
         Some(other) => unsupported(
@@ -282,12 +286,29 @@ fn object_projection(
     }
 }
 
-fn primitive_projection(primitive: SchemaPrimitive, nullable: bool) -> ProjectedSchema {
+fn primitive_projection(
+    object: &Map<String, Value>,
+    primitive: SchemaPrimitive,
+    nullable: bool,
+) -> ProjectedSchema {
+    let mut json = schema_type_json(primitive.as_json_type(), nullable);
+    copy_primitive_annotations(object, &mut json);
     ProjectedSchema {
-        json: schema_type_json(primitive.as_json_type(), nullable),
+        json,
         shape: SchemaShape::Primitive(primitive),
         nullable,
         unsupported: None,
+    }
+}
+
+fn copy_primitive_annotations(source: &Map<String, Value>, target: &mut Value) {
+    let Some(target) = target.as_object_mut() else {
+        return;
+    };
+    for key in primitive_annotation_keywords() {
+        if let Some(value) = source.get(*key) {
+            target.insert((*key).to_string(), value.clone());
+        }
     }
 }
 
@@ -354,9 +375,20 @@ fn unsupported_keywords() -> &'static [&'static str] {
     ]
 }
 
+fn primitive_annotation_keywords() -> &'static [&'static str] {
+    &[
+        "title",
+        "description",
+        "format",
+        "default",
+        "examples",
+        "example",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+    ]
+}
+
 fn is_annotation_keyword(key: &str) -> bool {
-    matches!(
-        key,
-        "title" | "description" | "default" | "examples" | "deprecated" | "readOnly" | "writeOnly"
-    )
+    primitive_annotation_keywords().contains(&key)
 }

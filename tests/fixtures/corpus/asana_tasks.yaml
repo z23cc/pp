@@ -1,0 +1,32 @@
+# Source: https://developers.asana.com/reference/gettasks
+# Trim date: 2026-05-17. Trimmed to supported bearer auth and primitive query parameters.
+openapi: 3.0.3
+info:
+  title: Asana Tasks API
+  version: '1.0'
+servers:
+  - url: https://app.asana.com/api/1.0
+security:
+  - bearerAuth: []
+paths:
+  /tasks:
+    get:
+      operationId: tasks_list
+      parameters:
+        - name: project
+          in: query
+          required: false
+          schema: { type: string }
+        - name: completed_since
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: Tasks }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

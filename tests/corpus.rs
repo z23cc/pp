@@ -56,6 +56,10 @@ struct CorpusCoverageReport {
     totals: CorpusCoverageTotals,
     diagnostic_code_frequency: BTreeMap<String, usize>,
     coverage_tag_frequency: BTreeMap<String, usize>,
+    fixture_kind_frequency: BTreeMap<String, usize>,
+    support_feature_frequency: BTreeMap<String, usize>,
+    pass_generate_build_ids: Vec<String>,
+    fail_diagnostic_ids: Vec<String>,
     entries: Vec<CorpusEntryReport>,
 }
 
@@ -81,6 +85,7 @@ struct CorpusEntryReport {
     coverage_tags: Vec<String>,
     expected_diagnostics: Vec<String>,
     actual_diagnostics: Vec<String>,
+    actual_support_features: Vec<String>,
     generate_build: bool,
     status_matches_expectation: bool,
 }
@@ -89,8 +94,8 @@ struct CorpusEntryReport {
 fn corpus_manifest_paths_and_expectations_are_valid() {
     let entries = corpus_entries();
     assert!(
-        entries.len() >= 20,
-        "corpus manifest must include at least 20 local curated public API-shape fixtures"
+        entries.len() >= 25,
+        "corpus manifest must include at least 25 local curated public API-shape fixtures"
     );
     let root = repo_root()
         .canonicalize()
@@ -132,6 +137,14 @@ fn corpus_manifest_paths_and_expectations_are_valid() {
             assert!(
                 !entry.expected_diagnostics.is_empty(),
                 "check-fail fixture '{}' must declare expected diagnostics",
+                entry.id
+            );
+            let mut deduped_diagnostics = entry.expected_diagnostics.clone();
+            deduped_diagnostics.sort();
+            deduped_diagnostics.dedup();
+            assert_eq!(
+                entry.expected_diagnostics, deduped_diagnostics,
+                "check-fail fixture '{}' expected_diagnostics must be sorted and deduped because they are the exact expected diagnostic-code set",
                 entry.id
             );
         }
@@ -191,23 +204,11 @@ fn assert_no_remote_refs(entry: &CorpusEntry, path: &Path) {
 }
 
 fn assert_diagnostic_resolves(code: &str) {
-    let output = Command::new(common::pp_bin())
-        .arg("support")
-        .arg("--diagnostic")
-        .arg(code)
-        .arg("--json")
-        .output()
-        .expect("failed to run pp support --diagnostic");
+    let feature_ids = support_feature_ids_for_diagnostic(code);
     assert!(
-        output.status.success(),
-        "expected diagnostic '{code}' should resolve in support inventory\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        !feature_ids.is_empty(),
+        "expected diagnostic '{code}' should map to at least one support feature"
     );
-    let value: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|err| panic!("diagnostic '{code}' did not emit JSON: {err}"));
-    assert_eq!(value["diagnostic_code"], code);
-    assert_eq!(value["matrix_id"], "pp.strict-openapi-support.v1");
 }
 
 #[test]
@@ -245,6 +246,7 @@ fn corpus_check_json_matches_manifest_expectations() {
         assert_eq!(value["support_matrix_id"], "pp.strict-openapi-support.v1");
 
         let actual_diagnostics = diagnostic_codes(&value);
+        let actual_support_features = support_feature_ids(&actual_diagnostics);
         if expected_success {
             assert!(
                 actual_diagnostics.is_empty(),
@@ -257,13 +259,16 @@ fn corpus_check_json_matches_manifest_expectations() {
                 "fixture '{}' should expose explicit diagnostics: {value:#}",
                 entry.id
             );
-            for expected_code in &entry.expected_diagnostics {
-                assert!(
-                    actual_diagnostics.contains(expected_code),
-                    "fixture '{}' missing expected diagnostic {expected_code}; actual: {actual_diagnostics:?}",
-                    entry.id
-                );
-            }
+            assert_eq!(
+                actual_diagnostics, entry.expected_diagnostics,
+                "fixture '{}' diagnostic set mismatch; expected_diagnostics is exact and does not allow extra codes",
+                entry.id
+            );
+            assert!(
+                !actual_support_features.is_empty(),
+                "fixture '{}' should map failing diagnostics to support features",
+                entry.id
+            );
         }
 
         reports.push(CorpusEntryReport {
@@ -276,6 +281,7 @@ fn corpus_check_json_matches_manifest_expectations() {
             coverage_tags: entry.coverage_tags,
             expected_diagnostics: entry.expected_diagnostics,
             actual_diagnostics,
+            actual_support_features,
             generate_build: entry.generate_build,
             status_matches_expectation: output.status.success() == expected_success,
         });
@@ -328,9 +334,51 @@ fn diagnostic_codes(value: &Value) -> Vec<String> {
     codes
 }
 
+fn support_feature_ids(codes: &[String]) -> Vec<String> {
+    let mut feature_ids = BTreeSet::new();
+    for code in codes {
+        feature_ids.extend(support_feature_ids_for_diagnostic(code));
+    }
+    feature_ids.into_iter().collect()
+}
+
+fn support_feature_ids_for_diagnostic(code: &str) -> Vec<String> {
+    let output = Command::new(common::pp_bin())
+        .arg("support")
+        .arg("--diagnostic")
+        .arg(code)
+        .arg("--json")
+        .output()
+        .expect("failed to run pp support --diagnostic");
+    assert!(
+        output.status.success(),
+        "expected diagnostic '{code}' should resolve in support inventory\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|err| panic!("diagnostic '{code}' did not emit JSON: {err}"));
+    assert_eq!(value["diagnostic_code"], code);
+    assert_eq!(value["matrix_id"], "pp.strict-openapi-support.v1");
+    let mut feature_ids: Vec<_> = value["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|feature| feature["id"].as_str())
+        .map(str::to_owned)
+        .collect();
+    feature_ids.sort();
+    feature_ids.dedup();
+    feature_ids
+}
+
 fn build_coverage_report(entries: Vec<CorpusEntryReport>) -> CorpusCoverageReport {
     let mut diagnostic_code_frequency = BTreeMap::new();
     let mut coverage_tag_frequency = BTreeMap::new();
+    let mut fixture_kind_frequency = BTreeMap::new();
+    let mut support_feature_frequency = BTreeMap::new();
+    let mut pass_generate_build_ids = Vec::new();
+    let mut fail_diagnostic_ids = BTreeSet::new();
     let mut actual_pass = 0;
     let mut actual_fail = 0;
     let mut expected_pass = 0;
@@ -341,8 +389,12 @@ fn build_coverage_report(entries: Vec<CorpusEntryReport>) -> CorpusCoverageRepor
     for entry in &entries {
         if entry.actual_success {
             actual_pass += 1;
+            if entry.generate_build {
+                pass_generate_build_ids.push(entry.id.clone());
+            }
         } else {
             actual_fail += 1;
+            fail_diagnostic_ids.extend(entry.actual_diagnostics.iter().cloned());
         }
         match entry.expected_check {
             ExpectedCheck::Pass => expected_pass += 1,
@@ -360,6 +412,14 @@ fn build_coverage_report(entries: Vec<CorpusEntryReport>) -> CorpusCoverageRepor
         for tag in &entry.coverage_tags {
             *coverage_tag_frequency.entry(tag.clone()).or_insert(0) += 1;
         }
+        *fixture_kind_frequency
+            .entry(entry.fixture_kind.as_str().to_string())
+            .or_insert(0) += 1;
+        for feature_id in &entry.actual_support_features {
+            *support_feature_frequency
+                .entry(feature_id.clone())
+                .or_insert(0) += 1;
+        }
     }
 
     CorpusCoverageReport {
@@ -375,6 +435,10 @@ fn build_coverage_report(entries: Vec<CorpusEntryReport>) -> CorpusCoverageRepor
         },
         diagnostic_code_frequency,
         coverage_tag_frequency,
+        fixture_kind_frequency,
+        support_feature_frequency,
+        pass_generate_build_ids,
+        fail_diagnostic_ids: fail_diagnostic_ids.into_iter().collect(),
         entries,
     }
 }
@@ -422,11 +486,22 @@ fn coverage_markdown(report: &CorpusCoverageReport) -> String {
 
     out.push_str("## Diagnostic code frequency\n\n");
     push_frequency_table(&mut out, &report.diagnostic_code_frequency);
+    out.push_str("\n## Support feature frequency\n\n");
+    push_frequency_table(&mut out, &report.support_feature_frequency);
+    out.push_str("\n## Fixture kind frequency\n\n");
+    push_frequency_table(&mut out, &report.fixture_kind_frequency);
     out.push_str("\n## Coverage tag frequency\n\n");
     push_frequency_table(&mut out, &report.coverage_tag_frequency);
+    out.push_str("\n## Generate-build pass fixtures\n\n");
+    out.push_str(&format!(
+        "{}\n",
+        markdown_list(&report.pass_generate_build_ids)
+    ));
+    out.push_str("\n## Failing diagnostic IDs\n\n");
+    out.push_str(&format!("{}\n", markdown_list(&report.fail_diagnostic_ids)));
     out.push_str("\n## Entries\n\n");
-    out.push_str("| id | kind | expected | actual | diagnostics | tags |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| id | kind | expected | actual | diagnostics | support features | tags |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
     for entry in &report.entries {
         let expected = match entry.expected_check {
             ExpectedCheck::Pass => "pass",
@@ -434,12 +509,13 @@ fn coverage_markdown(report: &CorpusCoverageReport) -> String {
         };
         let actual = if entry.actual_success { "pass" } else { "fail" };
         out.push_str(&format!(
-            "| `{}` | `{}` | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} |\n",
             entry.id,
             entry.fixture_kind.as_str(),
             expected,
             actual,
             markdown_list(&entry.actual_diagnostics),
+            markdown_list(&entry.actual_support_features),
             markdown_list(&entry.coverage_tags)
         ));
     }

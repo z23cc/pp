@@ -157,6 +157,155 @@ fn mcp_request(bin: &std::path::Path, request: Value) -> Value {
 }
 
 #[test]
+fn generate_preserves_openapi30_primitive_schema_annotations() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi30-primitive-annotations.yaml",
+        r#"
+openapi: 3.0.3
+info: { title: OpenAPI 30 Primitive Annotation API, version: '1.0' }
+servers:
+  - url: https://api.example.test
+paths:
+  /items/{id}:
+    post:
+      operationId: annotateOpenApi30Item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: Stable item identifier
+            format: uuid
+        - name: includeArchived
+          in: query
+          schema:
+            type: boolean
+            title: Include archived items
+            default: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [score]
+              properties:
+                score:
+                  type: integer
+                  description: Whole-number score
+                  example: 7
+      responses:
+        '200': { description: ok }
+"#,
+    );
+    let out = temp.path().join("generated");
+
+    let output = pp_generate_command(&spec, &out)
+        .output()
+        .expect("run pp generate");
+    assert_success(output, "openapi 3.0 primitive annotation generate");
+
+    let mcp_rs = std::fs::read_to_string(out.join("src/mcp.rs")).unwrap();
+    for needle in [
+        r#"\"description\":\"Stable item identifier\""#,
+        r#"\"format\":\"uuid\""#,
+        r#"\"title\":\"Include archived items\""#,
+        r#"\"default\":false"#,
+        r#"\"description\":\"Whole-number score\""#,
+        r#"\"example\":7"#,
+    ] {
+        assert!(
+            mcp_rs.contains(needle),
+            "missing {needle} in generated MCP schema:\n{mcp_rs}"
+        );
+    }
+}
+
+#[test]
+fn generate_preserves_openapi31_primitive_schema_annotations() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "primitive-annotations.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: Primitive Annotation API, version: '1.0' }
+servers:
+  - url: https://api.example.test
+paths:
+  /items/{id}:
+    post:
+      operationId: annotateItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ItemId'
+            description: Stable item identifier
+            format: uuid
+        - name: q
+          in: query
+          schema:
+            type: [string, 'null']
+            title: Search term
+            description: Optional search text
+            default: latest
+            examples: [alpha, beta]
+            deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [score]
+              properties:
+                score:
+                  type: integer
+                  description: Whole-number score
+                  example: 7
+                  readOnly: false
+                  writeOnly: true
+      responses:
+        '200': { description: ok }
+components:
+  schemas:
+    ItemId:
+      type: string
+"#,
+    );
+    let out = temp.path().join("generated");
+
+    let output = pp_generate_command(&spec, &out)
+        .output()
+        .expect("run pp generate");
+    assert_success(output, "openapi 3.1 primitive annotation generate");
+
+    let mcp_rs = std::fs::read_to_string(out.join("src/mcp.rs")).unwrap();
+    for needle in [
+        r#"\"description\":\"Stable item identifier\""#,
+        r#"\"format\":\"uuid\""#,
+        r#"\"title\":\"Search term\""#,
+        r#"\"default\":\"latest\""#,
+        r#"\"examples\":[\"alpha\",\"beta\"]"#,
+        r#"\"deprecated\":true"#,
+        r#"\"description\":\"Whole-number score\""#,
+        r#"\"example\":7"#,
+        r#"\"readOnly\":false"#,
+        r#"\"writeOnly\":true"#,
+    ] {
+        assert!(
+            mcp_rs.contains(needle),
+            "missing {needle} in generated MCP schema:\n{mcp_rs}"
+        );
+    }
+}
+
+#[test]
 fn generate_rejects_nullable_query_array_items() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(

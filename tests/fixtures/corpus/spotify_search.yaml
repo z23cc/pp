@@ -1,0 +1,34 @@
+# Source: https://developer.spotify.com/documentation/web-api/reference/search
+# Trim date: 2026-05-17. Trimmed to supported bearer auth and primitive query parameters.
+openapi: 3.0.3
+info:
+  title: Spotify Search API
+  version: '1.0'
+servers:
+  - url: https://api.spotify.com/v1
+security:
+  - bearerAuth: []
+paths:
+  /search:
+    get:
+      operationId: search_catalog
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: type
+          in: query
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: Search results }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }

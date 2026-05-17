@@ -1,0 +1,28 @@
+# Source: https://developers.hubspot.com/docs/api/crm/contacts
+# Trim date: 2026-05-17. Trimmed to expose unsupported cookie parameter coverage.
+openapi: 3.0.3
+info:
+  title: HubSpot Contacts API
+  version: '3.0'
+servers:
+  - url: https://api.hubapi.com/crm/v3
+security:
+  - bearerAuth: []
+paths:
+  /objects/contacts:
+    get:
+      operationId: contacts_list
+      parameters:
+        - name: hs-session
+          in: cookie
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: Contacts }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
