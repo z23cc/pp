@@ -190,7 +190,7 @@ pub(crate) enum TransformActionKind {
     Replace,
     Relax,
     BackendSourceTransform,
-    RuntimeBridge,
+    RuntimeDirectInvocation,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

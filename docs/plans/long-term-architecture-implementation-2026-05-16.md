@@ -54,11 +54,11 @@ Design choices for this plan:
 - [x] Work item 12 — release metadata and dependency-status cleanup: README, CHANGELOG, Cargo metadata, and `docs/release-status.md` now describe the 0.1.0 candidate, verification checklist, and temporary typify patch removal condition.
 - [x] Work item 13 — explicit backend capabilities seam: `src/backend/mod.rs` now advertises Progenitor limits, and spec preparation receives backend capabilities through the pipeline while preserving Progenitor behavior.
 - [x] Packet 3 — first plan-before-apply transform exemplar: response variant pruning and request/response content-type pruning now produce narrow internal compatibility proposals before typed mutation; `LoadOptions.policy` approves those proposal reports before the approved actions are applied.
-- [x] Follow-up packet — machine-readable transform audits and runtime bridge audit: `TransformAuditEntry` now carries optional structured fields (`target_pointer`, `action_kind`, `backend_requirement_id`, `before_json`, `after_json`), typed/backend producers populate them where practical, and the generated MCP Progenitor CLI bridge is recorded as a `runtime_generation` audit.
+- [x] Follow-up packet — machine-readable transform audits and direct MCP invocation audit: `TransformAuditEntry` now carries optional structured fields (`target_pointer`, `action_kind`, `backend_requirement_id`, `before_json`, `after_json`), typed/backend producers populate them where practical, and generated direct HTTP MCP invocation is recorded as a `runtime_generation` audit.
 - [x] Follow-up packet — auth selection policy: `inspect` and `generate` accept `--auth-scheme <NAME>`; defaults fail on ambiguous selectable component schemes, and the old auth policy flag has been removed.
-- [x] Follow-up packet — debt-marker cleanup: the MCP Progenitor CLI bridge is documented and audited as an explicit runtime adapter contract, strict auth defaults have direct CLI parse coverage, and direct typed MCP invocation is classified as blocked until generated operation metadata exists.
+- [x] Follow-up packet — debt-marker cleanup: MCP no longer routes through generated CLI/Clap dispatch; strict auth defaults have direct CLI parse coverage, and MCP invocation is audited as generated direct HTTP metadata.
 
-Current state: the compiler seams from the original plan are now largely present internally: pipeline orchestration, structured reports, normalization rule groups, transform approval/audits, model-backed MCP tool construction, thin rendering, backend capability isolation, named backend source transforms, and verification profiles. Generated MCP calls route through an audited Progenitor CLI bridge adapter to preserve behavior; direct typed MCP operation invocation is blocked until generated output exposes stable operation metadata.
+Current state: the compiler seams from the original plan are now largely present internally: pipeline orchestration, structured reports, normalization rule groups, transform approval/audits, model-backed MCP tool construction, thin rendering, backend capability isolation, named backend source transforms, and verification profiles. Generated MCP calls now use direct HTTP invocation metadata instead of generated CLI/Clap dispatch; the human CLI remains backed by Progenitor.
 
 Latest focused verification: Packet 3 and follow-up implementation items ran formatting, all-features clippy, full tests, and relevant ignored MCP/runtime checks as recorded in the item plan. For the auth-selection review fix, `cargo fmt --check && cargo test spec::auth` passed with 19 auth unit tests passing, 0 failed, 0 ignored, and 95 filtered out.
 
@@ -181,7 +181,7 @@ Latest focused verification: Packet 3 and follow-up implementation items ran for
 - The model detects and reports collisions for the MCP naming/body-flattening risks identified in Background.
 - `_pp_` reserved namespace checks remain enforced and are covered for params and body fields.
 - Collision errors point to the affected operation/tool and argument where available.
-- The MCP temp JSON body filename no longer relies only on bin/tool/pid, or a separate issue/plan item is recorded if this is intentionally deferred.
+- MCP direct HTTP invocation no longer writes temporary JSON body files.
 - Tests cover representative collisions and the temp-file hardening decision.
 
 **Key files:** `src/model/mod.rs`, `src/render/mod.rs:269`, `src/render/mod.rs:430-473`, `src/render/templates/mcp.rs.j2:239-249`, `tests/mcp_usability.rs`.

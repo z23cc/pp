@@ -1,26 +1,21 @@
-use crate::context::{CapturedOutput, Context, OutputMode};
+use crate::context::Context;
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Value};
-use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
-static MCP_BODY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvocationAdapterKind {
-    ProgenitorCliBridge,
+    DirectHttp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectTypedInvocationStatus {
-    Unsupported,
+    Supported,
 }
 
 impl DirectTypedInvocationStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Unsupported => {{ mcp_runtime.invocation_adapter.direct_typed_invocation_literal }},
+            Self::Supported => {{ mcp_runtime.invocation_adapter.direct_typed_invocation_literal }},
         }
     }
 }
@@ -28,7 +23,7 @@ impl DirectTypedInvocationStatus {
 impl InvocationAdapterKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ProgenitorCliBridge => {{ mcp_runtime.invocation_adapter.kind_literal }},
+            Self::DirectHttp => {{ mcp_runtime.invocation_adapter.kind_literal }},
         }
     }
 }
@@ -47,8 +42,8 @@ pub const INVOCATION_ADAPTER_CONTRACT: InvocationAdapterContract = InvocationAda
     kind: {{ mcp_runtime.invocation_adapter.kind_rust_variant }},
     reason: {{ mcp_runtime.invocation_adapter.reason_literal }},
     direct_typed_invocation: {{ mcp_runtime.invocation_adapter.direct_typed_invocation_rust_variant }},
-    preserves_cli_dispatch: true,
-    uses_temp_json_body_files: true,
+    preserves_cli_dispatch: false,
+    uses_temp_json_body_files: false,
     requires_generated_cli_command: {{ mcp_runtime.invocation_adapter.requires_generated_cli_command }},
 };
 pub const INVOCATION_ADAPTER_KIND: InvocationAdapterKind = INVOCATION_ADAPTER_CONTRACT.kind;
@@ -59,7 +54,8 @@ pub const DIRECT_TYPED_INVOCATION_STATUS_NAME: &str = DIRECT_TYPED_INVOCATION_ST
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgBinding {
-    CliFlag { cli_name: &'static str },
+    PathParam { wire_name: &'static str },
+    QueryParam { wire_name: &'static str },
     FlattenedJsonBodyField,
     WholeJsonBody,
 }
@@ -72,6 +68,8 @@ pub struct ArgDef {
 
 pub struct OperationInvocation {
     pub name: &'static str,
+    pub method: &'static str,
+    pub path_template: &'static str,
     pub args: &'static [ArgDef],
     pub arguments: rmcp::model::JsonObject,
 }
@@ -81,257 +79,261 @@ pub struct OperationInvocationResult {
     pub is_error: bool,
 }
 
-/// Invoke one generated operation from the MCP runtime.
-///
-/// This function is the stable runtime boundary used by `mcp.rs`. The current
-/// Progenitor backend satisfies that boundary through `ProgenitorCliBridgeInvoker`,
-/// which preserves generated CLI argv/Clap dispatch semantics while keeping MCP
-/// result and error shaping in the wrapper runtime.
+/// Invoke one generated operation from the MCP runtime with direct HTTP.
 pub async fn invoke_operation(
     context: Context,
     invocation: OperationInvocation,
 ) -> Result<OperationInvocationResult, McpError> {
     validate_invocation_adapter_contract_for_tool(invocation.name, invocation.args)?;
-    ProgenitorCliBridgeInvoker::invoke(context, invocation).await
+    DirectHttpInvoker::invoke(context, invocation).await
 }
 
 pub fn validate_invocation_adapter_contract_for_tool(
-    tool_name: &str,
-    args: &[ArgDef],
+    _tool_name: &str,
+    _args: &[ArgDef],
 ) -> Result<(), McpError> {
-    let contract = ProgenitorCliBridgeInvoker::CONTRACT;
-    if contract.kind != InvocationAdapterKind::ProgenitorCliBridge {
+    let contract = INVOCATION_ADAPTER_CONTRACT;
+    if contract.kind != InvocationAdapterKind::DirectHttp {
         return Err(McpError::internal_error(
             format!("unsupported MCP invocation adapter: {}", contract.kind.as_str()),
             None,
         ));
     }
-    if contract.direct_typed_invocation != DirectTypedInvocationStatus::Unsupported {
+    if contract.direct_typed_invocation != DirectTypedInvocationStatus::Supported {
         return Err(McpError::internal_error(
             format!(
-                "direct typed MCP invocation is not supported by this runtime contract: {}",
+                "direct HTTP MCP invocation is not supported by this runtime contract: {}",
                 contract.direct_typed_invocation.as_str()
             ),
             None,
         ));
     }
-    if contract.requires_generated_cli_command {
-        let command = crate::cli_builder::command_for_operation(tool_name).ok_or_else(|| {
-            McpError::internal_error(
-                format!(
-                    "MCP tool '{tool_name}' is missing a generated CLI command required by invocation adapter '{}'",
-                    contract.kind.as_str()
-                ),
-                None,
-            )
-        })?;
-        validate_cli_arg_bindings(tool_name, args, &command)?;
-    }
     Ok(())
 }
 
-fn validate_cli_arg_bindings(
-    tool_name: &str,
-    args: &[ArgDef],
-    command: &clap::Command,
-) -> Result<(), McpError> {
-    let mut requires_json_body = false;
-    for arg in args {
-        match arg.binding {
-            ArgBinding::CliFlag { cli_name } => {
-                if !command_has_long_flag(command, cli_name) {
-                    return Err(McpError::internal_error(
-                        format!(
-                            "MCP tool '{tool_name}' argument '{}' expects generated CLI flag '--{cli_name}', but the flag is missing from the invocation adapter command",
-                            arg.json_name
-                        ),
-                        None,
-                    ));
-                }
-            }
-            ArgBinding::FlattenedJsonBodyField | ArgBinding::WholeJsonBody => {
-                requires_json_body = true;
-            }
-        }
-    }
-    if requires_json_body && !command_has_long_flag(command, "json-body") {
-        return Err(McpError::internal_error(
-            format!(
-                "MCP tool '{tool_name}' expects generated CLI flag '--json-body' for JSON body binding, but the flag is missing from the invocation adapter command"
-            ),
-            None,
-        ));
-    }
-    Ok(())
-}
+struct DirectHttpInvoker;
 
-fn command_has_long_flag(command: &clap::Command, long: &str) -> bool {
-    command
-        .get_arguments()
-        .any(|arg| arg.get_long() == Some(long))
-}
-
-/// Runtime adapter for Progenitor-generated CLI surfaces.
-///
-/// Adapter contract:
-/// - convert MCP JSON arguments into the generated CLI argument contract;
-/// - dispatch through the same generated operation executor as human CLI calls;
-/// - preserve captured structured output and MCP error/result shapes;
-/// - keep temporary JSON body files process-local and cleaned up on drop.
-trait OperationInvoker {
-    const CONTRACT: InvocationAdapterContract;
-}
-
-struct ProgenitorCliBridgeInvoker;
-
-impl OperationInvoker for ProgenitorCliBridgeInvoker {
-    const CONTRACT: InvocationAdapterContract = INVOCATION_ADAPTER_CONTRACT;
-}
-
-impl ProgenitorCliBridgeInvoker {
-    pub async fn invoke(
+impl DirectHttpInvoker {
+    async fn invoke(
         context: Context,
         invocation: OperationInvocation,
     ) -> Result<OperationInvocationResult, McpError> {
-        let captured = Arc::new(Mutex::new(CapturedOutput::default()));
-        let mut context = context;
-        context.output = OutputMode::Capture(captured.clone());
+        let (path, query, body) = build_request_parts(&invocation)?;
+        let url = match build_url(&context.base_url, &path, &query) {
+            Ok(url) => url,
+            Err(error) => return Ok(transport_error(error)),
+        };
+        let method = invocation
+            .method
+            .parse::<reqwest::Method>()
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let mut request = context.client.request(method, url);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
 
-        let bridge = ProgenitorCliBridgeInvocation::from_json(
-            invocation.name,
-            invocation.args,
-            &invocation.arguments,
-        )?;
-        let command = crate::cli_builder::command_for_operation(invocation.name)
-            .ok_or_else(|| McpError::internal_error(format!("MCP tool '{}' is missing a generated CLI command required by invocation adapter '{}'", invocation.name, INVOCATION_ADAPTER_KIND_NAME), None))?;
-        let matches = command
-            .try_get_matches_from(bridge.argv())
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => return Ok(transport_error(error.to_string())),
+        };
 
-        let result = crate::cli_builder::execute_operation(context, invocation.name, &matches).await;
-        drop(bridge);
-
-        let captured = captured.lock().expect("capture lock");
-        let value = captured.value.clone().unwrap_or_else(|| json!({ "ok": true }));
-        Ok(OperationInvocationResult {
-            value,
-            is_error: result.is_err(),
-        })
+        let status = response.status();
+        let headers = headers_to_json(response.headers());
+        let text = match response.text().await {
+            Ok(text) => text,
+            Err(error) => {
+                return Ok(OperationInvocationResult {
+                    value: json!({
+                        "error": {
+                            "kind": "response_body_error",
+                            "status": status.as_u16(),
+                            "body": error.to_string(),
+                            "headers": headers,
+                        }
+                    }),
+                    is_error: true,
+                });
+            }
+        };
+        if status.is_success() {
+            Ok(OperationInvocationResult {
+                value: parse_success_body_value(&text),
+                is_error: false,
+            })
+        } else {
+            Ok(OperationInvocationResult {
+                value: json!({
+                    "error": {
+                        "kind": "error_response",
+                        "status": status.as_u16(),
+                        "body": parse_body_value(&text),
+                        "headers": headers,
+                    }
+                }),
+                is_error: true,
+            })
+        }
     }
 }
 
-struct ProgenitorCliBridgeInvocation {
-    argv: Vec<String>,
-    temp_files: Vec<std::path::PathBuf>,
-}
+fn build_request_parts(
+    invocation: &OperationInvocation,
+) -> Result<(String, Vec<(&'static str, Value)>, Option<Value>), McpError> {
+    let mut path = invocation.path_template.to_string();
+    let mut query = Vec::new();
+    let mut flattened_body = serde_json::Map::new();
+    let mut whole_body = None;
 
-impl ProgenitorCliBridgeInvocation {
-    fn from_json(
-        tool_name: &str,
-        args: &'static [ArgDef],
-        arguments: &rmcp::model::JsonObject,
-    ) -> Result<Self, McpError> {
-        let mut argv = vec![tool_name.to_string()];
-        let mut temp_files = Vec::new();
-        let mut body = serde_json::Map::new();
-
-        for arg in args {
-            if let Some(value) = arguments.get(arg.json_name) {
-                if value.is_null() {
-                    continue;
+    for arg in invocation.args {
+        let Some(value) = invocation.arguments.get(arg.json_name) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        match arg.binding {
+            ArgBinding::PathParam { wire_name } => {
+                let encoded = encode_path_value(value)?;
+                let placeholder = format!("{}{}{}", "{", wire_name, "}");
+                if !path.contains(&placeholder) {
+                    return Err(McpError::invalid_params(
+                        format!("path parameter '{wire_name}' is not present in path template"),
+                        None,
+                    ));
                 }
-                match arg.binding {
-                    ArgBinding::CliFlag { cli_name } => {
-                        argv.push(format!("--{cli_name}"));
-                        push_cli_value(&mut argv, value);
-                    }
-                    ArgBinding::FlattenedJsonBodyField => {
-                        body.insert(arg.json_name.to_string(), value.clone());
-                    }
-                    ArgBinding::WholeJsonBody => {
-                        argv.push("--json-body".to_string());
-                        let path = write_json_body(tool_name, value)?;
-                        argv.push(path.display().to_string());
-                        temp_files.push(path);
-                    }
-                }
+                path = path.replace(&placeholder, &encoded);
+            }
+            ArgBinding::QueryParam { wire_name } => query.push((wire_name, value.clone())),
+            ArgBinding::FlattenedJsonBodyField => {
+                flattened_body.insert(arg.json_name.to_string(), value.clone());
+            }
+            ArgBinding::WholeJsonBody => {
+                whole_body = Some(value.clone());
             }
         }
-
-        if !body.is_empty() {
-            argv.push("--json-body".to_string());
-            let path = write_json_body(tool_name, &Value::Object(body))?;
-            argv.push(path.display().to_string());
-            temp_files.push(path);
-        }
-
-        Ok(Self { argv, temp_files })
     }
 
-    fn argv(&self) -> Vec<String> {
-        self.argv.clone()
-    }
-}
-
-impl Drop for ProgenitorCliBridgeInvocation {
-    fn drop(&mut self) {
-        for path in self.temp_files.drain(..) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-fn write_json_body(tool_name: &str, value: &Value) -> Result<std::path::PathBuf, McpError> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-    let mut last_collision = None;
-    for _ in 0..16 {
-        let counter = MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "{}-{}-{}-{}-body.json",
-            {{ mcp_runtime.temp_body_file_prefix_literal }},
-            tool_name,
-            std::process::id(),
-            counter
+    if path.contains('{') || path.contains('}') {
+        return Err(McpError::invalid_params(
+            format!("missing path parameter for template '{}'", invocation.path_template),
+            None,
         ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                if let Err(error) = file.write_all(&bytes) {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(McpError::internal_error(error.to_string(), None));
-                }
-                return Ok(path);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_collision = Some(error);
-            }
-            Err(error) => return Err(McpError::internal_error(error.to_string(), None)),
-        }
     }
-    Err(McpError::internal_error(
-        last_collision
-            .map(|error| format!("failed to create temp JSON body file after retries: {error}"))
-            .unwrap_or_else(|| "failed to create temp JSON body file after retries".to_string()),
-        None,
-    ))
+
+    let body = whole_body.or_else(|| {
+        if flattened_body.is_empty() {
+            None
+        } else {
+            Some(Value::Object(flattened_body))
+        }
+    });
+
+    Ok((path, query, body))
 }
 
-fn push_cli_value(argv: &mut Vec<String>, value: &Value) {
+fn build_url(base_url: &str, path: &str, query: &[(&'static str, Value)]) -> Result<reqwest::Url, String> {
+    let mut base = base_url.trim_end_matches('/').to_string();
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    base.push_str(&path);
+    let mut url = reqwest::Url::parse(&base)
+        .map_err(|error| format!("invalid operation URL: {error}"))?;
+    let mut query_pairs = Vec::new();
+    for (name, value) in query {
+        collect_query_pairs(&mut query_pairs, name, value);
+    }
+    if !query_pairs.is_empty() {
+        url.query_pairs_mut().extend_pairs(query_pairs);
+    }
+    Ok(url)
+}
+
+fn collect_query_pairs(pairs: &mut Vec<(String, String)>, name: &str, value: &Value) {
     match value {
-        Value::String(value) => argv.push(value.clone()),
-        Value::Number(value) => argv.push(value.to_string()),
-        Value::Bool(value) => argv.push(value.to_string()),
         Value::Array(values) => {
-            let flag = argv.pop().expect("flag exists");
             for value in values {
-                argv.push(flag.clone());
-                push_cli_value(argv, value);
+                collect_query_pairs(pairs, name, value);
             }
         }
-        other => argv.push(other.to_string()),
+        Value::String(value) => pairs.push((name.to_string(), value.clone())),
+        Value::Number(value) => pairs.push((name.to_string(), value.to_string())),
+        Value::Bool(value) => pairs.push((
+            name.to_string(),
+            (if *value { "true" } else { "false" }).to_string(),
+        )),
+        other => pairs.push((name.to_string(), other.to_string())),
     }
+}
+
+fn encode_path_value(value: &Value) -> Result<String, McpError> {
+    let raw = match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            return Err(McpError::invalid_params(
+                "path parameters must be strings, numbers, or booleans",
+                None,
+            ));
+        }
+        Value::Null => String::new(),
+    };
+    Ok(percent_encode_path_segment(&raw))
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char);
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+fn transport_error(body: String) -> OperationInvocationResult {
+    OperationInvocationResult {
+        value: json!({
+            "error": {
+                "kind": "communication_error",
+                "status": null,
+                "body": body,
+                "headers": {},
+            }
+        }),
+        is_error: true,
+    }
+}
+
+fn parse_success_body_value(text: &str) -> Value {
+    if text.is_empty() {
+        json!({ "ok": true })
+    } else {
+        parse_body_value(text)
+    }
+}
+
+fn parse_body_value(text: &str) -> Value {
+    if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+    }
+}
+
+fn headers_to_json(headers: &reqwest::header::HeaderMap) -> Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in headers {
+        object.insert(
+            name.as_str().to_string(),
+            value.to_str().unwrap_or_default().to_string().into(),
+        );
+    }
+    Value::Object(object)
 }

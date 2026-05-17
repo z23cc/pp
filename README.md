@@ -93,7 +93,7 @@ Human-readable progress and diagnostics stay on stderr.
 MCP `tools/list` uses standard cursor pagination with a server-defined page size.
 Clients should follow `nextCursor` until it is absent to discover every generated tool.
 
-MCP tool calls currently use an audited Progenitor CLI bridge adapter: MCP JSON arguments are adapted into generated CLI argv/Clap dispatch before reaching the generated operation executor. This keeps CLI and MCP behavior aligned today, and each generated workspace records the adapter in `pp-transform-plan.json` as `runtime.mcp_invocation.progenitor_cli_bridge`. Direct typed invocation is blocked until generated Progenitor output exposes stable operation metadata such as method names, parameter setters, request body types, and response types.
+MCP tool calls use an audited direct HTTP adapter: generated operation metadata supplies the method, path template, path/query argument bindings, and JSON body bindings. Each generated workspace records the adapter in `pp-transform-plan.json` as `runtime.mcp_invocation.direct_http`. The human CLI path still uses the generated Progenitor CLI dispatch.
 
 MCP tool calls return the full structured JSON response by default. Agent clients can opt into response shaping with reserved MCP-only parameters:
 

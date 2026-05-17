@@ -8,7 +8,7 @@
 
 - README 已把 MCP 作为一等产物：生成 binary 支持 CLI 与 MCP stdio server，每个 OpenAPI operation 映射为一个 tool（`README.md:41`, `README.md:46-52`, `README.md:71-82`）。
 - 当前 `tools/list` 接收 MCP pagination 参数但返回全部工具，DigitalOcean 这类 628-tool server 会放大工具发现问题（`src/render/templates/mcp.rs.j2:199-209`）。
-- MCP 调用路径复用 CLI executor：MCP args → clap matches → `execute_operation` → `CapturedOutput` → structured MCP result（`src/render/templates/mcp.rs.j2:76-117`, `src/render/templates/cli_builder.rs.j2:58-68`）。
+- MCP 调用路径使用 direct HTTP invoker：MCP args → path/query/body bindings → `reqwest` request → structured MCP result（`src/render/templates/invoke.rs.j2`, `src/render/templates/mcp.rs.j2`）。
 - `CapturedOutput` 支持单值和列表，但目前没有字段选择、压缩或截断层（`src/render/templates/context.rs.j2:20-24`, `src/render/templates/print.rs.j2:107-155`）。
 - PokeAPI Claude Desktop dogfood 已验证 v0.4 runtime nullable tolerance 有效；`pokemon_retrieve` 这类端点单次返回约 270KB，说明 correctness 已过关，token/context 经济性成为下一瓶颈。
 - MCP 官方工具发现是 `tools/list` + opaque cursor pagination；没有标准 `tools/search` 方法。`rmcp 1.6.0` 已有 `PaginatedRequestParams` 与 `ListToolsResult.next_cursor`，因此分页可在 generated template 层落地。参考：<https://modelcontextprotocol.io/specification/2025-11-25/server/tools>, <https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination>。

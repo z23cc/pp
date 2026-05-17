@@ -18,7 +18,7 @@ Purpose:
 - Unit and integration tests that do not build generated release workspaces.
 - Inspect/slicing/pipeline/model/backend behavior.
 - Auth-selection coverage for fail-ambiguous defaults, removed auth-policy flag handling, and explicit `--auth-scheme` behavior.
-- Transform-plan audit JSON coverage, including structured audit fields and the runtime Progenitor CLI bridge audit.
+- Transform-plan audit JSON coverage, including structured audit fields and the generated direct HTTP MCP invocation audit.
 
 ## Standard
 
@@ -40,7 +40,7 @@ Purpose:
 - Preflight sliced generation with the petstore `store` tag so pruning remains covered outside fast PR CI.
 - Exercise bearer, API key, and basic auth header behavior against local `mockito` servers.
 - Exercise MCP error classification, `tools/list` pagination, and response shaping.
-- Rebuild generated runtimes that currently expose MCP through the audited Progenitor CLI bridge.
+- Rebuild generated runtimes that expose MCP through generated direct HTTP invocation metadata.
 
 These are the first ignored tests promoted to scheduled/manual CI because they cover generated artifact correctness without external network dependencies.
 

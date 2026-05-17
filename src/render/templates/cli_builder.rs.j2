@@ -55,24 +55,6 @@ pub async fn run_with_matches(context: Context, matches: &clap::ArgMatches) -> R
     }
 }
 
-pub async fn execute_operation(context: Context, name: &str, matches: &clap::ArgMatches) -> Result<()> {
-    let client = {{ progenitor_crate_name }}::Client::new_with_client(
-        &context.base_url,
-        context.client.clone(),
-    );
-    let cli = {{ progenitor_crate_name }}::cli::Cli::new(client, context);
-    let cmd = {{ progenitor_crate_name }}::cli::CliCommand::iter()
-        .find(|cmd| cmd.operation_id() == name)
-        .ok_or_else(|| anyhow::anyhow!("unknown operation: {name}"))?;
-    cli.execute(cmd, matches).await
-}
-
-pub fn command_for_operation(name: &str) -> Option<clap::Command> {
-    {{ progenitor_crate_name }}::cli::CliCommand::iter()
-        .find(|cmd| cmd.operation_id() == name)
-        .map(|cmd| {{ progenitor_crate_name }}::cli::Cli::<Context>::get_command(cmd).name(cmd.operation_id()))
-}
-
 fn build_command() -> clap::Command {
     let mut command = clap::Command::new("{{ bin_name }}")
         .about("Generated API CLI")

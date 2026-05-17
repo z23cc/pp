@@ -452,13 +452,13 @@ fn generate_writes_transform_plan_with_approval_metadata() {
             && audit.get("after_json").is_some()
     }));
     assert!(audits.iter().any(|audit| {
-        audit["code"] == "runtime.mcp_invocation.progenitor_cli_bridge"
+        audit["code"] == "runtime.mcp_invocation.direct_http"
             && audit["source_stage"] == "runtime_generation"
-            && audit["action_kind"] == "runtime_bridge"
-            && audit["backend_requirement_id"] == "progenitor.cli_bridge.mcp_invocation"
-            && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
-            && audit["after_json"]["direct_typed_invocation"] == "unsupported"
-            && audit["after_json"]["requires_generated_cli_command"] == true
+            && audit["action_kind"] == "runtime_direct_invocation"
+            && audit["backend_requirement_id"] == "mcp.direct_http.invocation"
+            && audit["after_json"]["invocation_adapter_kind"] == "direct_http"
+            && audit["after_json"]["direct_typed_invocation"] == "supported"
+            && audit["after_json"]["requires_generated_cli_command"] == false
     }));
 }
 

@@ -273,19 +273,19 @@ fn backend_diagnostic_audits(
 }
 
 fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEntry> {
-    vec![TransformAuditEntry::new(
+    let mut audits = vec![TransformAuditEntry::new(
         "runtime_generation",
-        "runtime.mcp_invocation.progenitor_cli_bridge",
+        "runtime.mcp_invocation.direct_http",
         "generated src/invoke.rs",
-        "route MCP tool calls through the Progenitor CLI bridge adapter",
+        "route MCP tool calls through the direct HTTP adapter",
     )
-    .with_action_kind(TransformActionKind::RuntimeBridge)
-    .with_backend_requirement_id("progenitor.cli_bridge.mcp_invocation")
+    .with_action_kind(TransformActionKind::RuntimeDirectInvocation)
+    .with_backend_requirement_id("mcp.direct_http.invocation")
     .with_backend_requirement(
-        "MCP runtime uses generated Progenitor CLI argv/Clap dispatch because direct typed operation invocation is unsupported by the current generated surface",
+        "MCP runtime uses direct HTTP invocation from generated operation method/path metadata",
     )
     .with_before_after(
-        "no explicit runtime-generation bridge audit",
+        "no explicit runtime-generation direct invocation audit",
         manifest.mcp_runtime.invocation_adapter_kind.as_str(),
     )
     .with_before_after_json(
@@ -295,9 +295,36 @@ fn runtime_generation_audits(manifest: &WrapperManifest) -> Vec<TransformAuditEn
             "invocation_adapter_reason": &manifest.mcp_runtime.invocation_adapter_reason,
             "direct_typed_invocation": &manifest.mcp_runtime.invocation_adapter.direct_typed_invocation,
             "requires_generated_cli_command": manifest.mcp_runtime.invocation_adapter.requires_generated_cli_command,
+            "direct_tool_count": manifest.mcp_tools.len(),
+            "unsupported_tool_count": manifest.unsupported_mcp_operations.len(),
             "preserves_runtime_behavior": true,
         }),
-    )]
+    )];
+
+    audits.extend(manifest.unsupported_mcp_operations.iter().map(|operation| {
+        TransformAuditEntry::new(
+            "runtime_generation",
+            "runtime.mcp_invocation.unsupported_operation",
+            format!("{} {}", operation.method, operation.path),
+            "exclude operation from MCP tools/list because direct HTTP invocation is unsupported",
+        )
+        .with_action_kind(TransformActionKind::RuntimeDirectInvocation)
+        .with_backend_requirement_id("mcp.direct_http.supported_operation_shape")
+        .with_backend_requirement("MCP direct HTTP invocation currently supports path/query schema parameters and JSON request bodies")
+        .with_before_after("operation selected for generation", "operation excluded from MCP tools/list")
+        .with_before_after_json(
+            json!({
+                "operation_id": operation.operation_id,
+                "method": operation.method,
+                "path": operation.path,
+            }),
+            json!({
+                "reason": operation.reason,
+            }),
+        )
+    }));
+
+    audits
 }
 
 fn source_transform_purpose_label(purpose: SourceTransformPurpose) -> &'static str {
@@ -483,16 +510,13 @@ paths:
         }));
         assert!(result.transform_plan.audits.iter().any(|audit| {
             audit.source_stage == "runtime_generation"
-                && audit.code == "runtime.mcp_invocation.progenitor_cli_bridge"
-                && audit.action_kind == Some(TransformActionKind::RuntimeBridge)
-                && audit.backend_requirement_id.as_deref()
-                    == Some("progenitor.cli_bridge.mcp_invocation")
+                && audit.code == "runtime.mcp_invocation.direct_http"
+                && audit.action_kind == Some(TransformActionKind::RuntimeDirectInvocation)
+                && audit.backend_requirement_id.as_deref() == Some("mcp.direct_http.invocation")
                 && audit
                     .backend_requirement
                     .as_deref()
-                    .is_some_and(|requirement| {
-                        requirement.contains("direct typed operation invocation is unsupported")
-                    })
+                    .is_some_and(|requirement| requirement.contains("direct HTTP invocation"))
         }));
         let transform_plan_json: serde_json::Value = serde_json::from_slice(
             &std::fs::read(transform_plan_path).expect("read transform plan"),
@@ -519,16 +543,16 @@ paths:
             .iter()
             .any(|audit| {
                 audit["source_stage"] == "runtime_generation"
-                    && audit["code"] == "runtime.mcp_invocation.progenitor_cli_bridge"
-                    && audit["action_kind"] == "runtime_bridge"
-                    && audit["backend_requirement_id"] == "progenitor.cli_bridge.mcp_invocation"
+                    && audit["code"] == "runtime.mcp_invocation.direct_http"
+                    && audit["action_kind"] == "runtime_direct_invocation"
+                    && audit["backend_requirement_id"] == "mcp.direct_http.invocation"
                     && audit["backend_requirement"]
                         .as_str()
                         .unwrap()
-                        .contains("direct typed operation invocation is unsupported")
-                    && audit["after_json"]["invocation_adapter_kind"] == "progenitor_cli_bridge"
-                    && audit["after_json"]["direct_typed_invocation"] == "unsupported"
-                    && audit["after_json"]["requires_generated_cli_command"] == true
+                        .contains("direct HTTP invocation")
+                    && audit["after_json"]["invocation_adapter_kind"] == "direct_http"
+                    && audit["after_json"]["direct_typed_invocation"] == "supported"
+                    && audit["after_json"]["requires_generated_cli_command"] == false
             }));
     }
 

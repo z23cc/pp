@@ -38,6 +38,7 @@ pub(crate) struct WrapperManifest {
     pub basic_password_env_var: String,
     pub auth_env_var: Option<String>,
     pub mcp_tools: Vec<RenderMcpTool>,
+    pub unsupported_mcp_operations: Vec<RenderMcpUnsupportedOperation>,
     pub mcp_runtime: McpRuntimeManifest,
 }
 
@@ -67,6 +68,14 @@ pub(crate) struct RenderMcpInvocationAdapterContract {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct RenderMcpUnsupportedOperation {
+    pub operation_id: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct RenderMcpTool {
     pub name: String,
     pub name_literal: String,
@@ -76,6 +85,10 @@ pub(crate) struct RenderMcpTool {
     pub description_literal: String,
     pub input_schema: String,
     pub input_schema_literal: String,
+    pub method: String,
+    pub method_literal: String,
+    pub path_template: String,
+    pub path_template_literal: String,
     pub args: Vec<RenderMcpArg>,
 }
 
@@ -112,7 +125,7 @@ impl WrapperManifest {
         let auth_env_var = auth_env_var(&auth_kind, &env_prefix);
         let temp_body_file_prefix = format!("{bin_name}-mcp");
         let invocation_adapter =
-            render_invocation_adapter(McpInvocationAdapterContract::progenitor_cli_bridge());
+            render_invocation_adapter(McpInvocationAdapterContract::direct_http());
         Self {
             bin_name,
             base_url,
@@ -126,6 +139,7 @@ impl WrapperManifest {
             basic_password_env_var: format!("{env_prefix}_PASSWORD"),
             auth_env_var: auth_env_var.clone(),
             mcp_tools: Vec::new(),
+            unsupported_mcp_operations: Vec::new(),
             mcp_runtime: McpRuntimeManifest {
                 tools_page_size: 100,
                 temp_body_file_prefix_literal: serde_json::to_string(&temp_body_file_prefix)
@@ -144,6 +158,16 @@ impl WrapperManifest {
 
     pub(crate) fn with_api_model(mut self, api_model: ApiModel) -> Self {
         self.mcp_tools = render_mcp_tools(api_model.mcp_tools);
+        self.unsupported_mcp_operations = api_model
+            .unsupported_mcp_operations
+            .into_iter()
+            .map(|operation| RenderMcpUnsupportedOperation {
+                operation_id: operation.operation_id,
+                method: operation.method,
+                path: operation.path,
+                reason: operation.reason,
+            })
+            .collect();
         self.mcp_runtime.response_shaping = render_response_shaping(api_model.mcp_response_shaping);
         let invocation_adapter = render_invocation_adapter(api_model.mcp_invocation_adapter);
         self.mcp_runtime.invocation_adapter_kind = invocation_adapter.kind.clone();
@@ -167,10 +191,16 @@ fn render_mcp_tools(tools: Vec<ModelMcpTool>) -> Vec<RenderMcpTool> {
                     .expect("description serializes"),
                 input_schema_literal: serde_json::to_string(&tool.input_schema)
                     .expect("schema literal serializes"),
+                method_literal: serde_json::to_string(&tool.method)
+                    .expect("method literal serializes"),
+                path_template_literal: serde_json::to_string(&tool.path_template)
+                    .expect("path template literal serializes"),
                 args: tool.args.into_iter().map(render_mcp_arg).collect(),
                 name: tool.name,
                 description: tool.description,
                 input_schema: tool.input_schema,
+                method: tool.method,
+                path_template: tool.path_template,
             }
         })
         .collect()
@@ -178,9 +208,13 @@ fn render_mcp_tools(tools: Vec<ModelMcpTool>) -> Vec<RenderMcpTool> {
 
 fn render_mcp_arg(arg: crate::model::McpArg) -> RenderMcpArg {
     let binding_expr = match arg.binding {
-        McpArgBinding::CliFlag { cli_name } => {
-            let cli_name_literal = serde_json::to_string(&cli_name).expect("arg name serializes");
-            format!("crate::invoke::ArgBinding::CliFlag {{ cli_name: {cli_name_literal} }}")
+        McpArgBinding::PathParam { wire_name } => {
+            let wire_name_literal = serde_json::to_string(&wire_name).expect("arg name serializes");
+            format!("crate::invoke::ArgBinding::PathParam {{ wire_name: {wire_name_literal} }}")
+        }
+        McpArgBinding::QueryParam { wire_name } => {
+            let wire_name_literal = serde_json::to_string(&wire_name).expect("arg name serializes");
+            format!("crate::invoke::ArgBinding::QueryParam {{ wire_name: {wire_name_literal} }}")
         }
         McpArgBinding::FlattenedBodyField => {
             "crate::invoke::ArgBinding::FlattenedJsonBodyField".to_string()
@@ -368,6 +402,8 @@ paths:
         assert!(rendered.contains("static ARGS_1: &[ArgDef]"));
         assert!(rendered.contains("crate::invoke::ArgBinding::"));
         assert!(rendered.contains("name: \"list_items\""));
+        assert!(rendered.contains("method: \"GET\""));
+        assert!(rendered.contains("path_template: \"/items\""));
         assert!(rendered.contains("crate::runtime::parse_response_shaping(&arguments)"));
         assert!(rendered.contains("crate::runtime::classify_tool_error(result.value)"));
         assert!(rendered.contains("response_shaping.shape_success(result.value)"));
@@ -375,7 +411,7 @@ paths:
         assert!(!rendered.contains("fn classify_tool_error"));
         assert!(rendered.contains("\"env\": \"PETSTORE_TOKEN\""));
         assert!(rendered.contains("invoke_operation("));
-        assert!(rendered.contains("validate_mcp_invocation_bridge()"));
+        assert!(rendered.contains("validate_mcp_direct_invocation()"));
         assert!(!rendered.contains("write_json_body"));
     }
 
@@ -459,7 +495,7 @@ paths: {}
     }
 
     #[test]
-    fn invocation_template_uses_process_local_counter_for_temp_body_files() {
+    fn invocation_template_uses_direct_http_runtime() {
         let manifest = WrapperManifest::new(
             "petstore".to_string(),
             "https://example.test".to_string(),
@@ -471,41 +507,31 @@ paths: {}
         let rendered = render_template("invoke.rs", INVOKE_TEMPLATE, &manifest).unwrap();
 
         assert!(rendered.contains("pub async fn invoke_operation"));
-        assert!(rendered.contains("struct ProgenitorCliBridgeInvoker"));
+        assert!(rendered.contains("struct DirectHttpInvoker"));
         assert!(rendered.contains("pub enum InvocationAdapterKind"));
         assert!(rendered.contains("pub enum DirectTypedInvocationStatus"));
         assert!(rendered.contains("pub struct InvocationAdapterContract"));
-        assert!(rendered.contains("trait OperationInvoker"));
-        assert!(rendered.contains(
-            "pub const INVOCATION_ADAPTER_KIND: InvocationAdapterKind = INVOCATION_ADAPTER_CONTRACT.kind;"
-        ));
-        assert!(rendered.contains(
-            "pub const INVOCATION_ADAPTER_KIND_NAME: &str = INVOCATION_ADAPTER_KIND.as_str();"
-        ));
-        assert!(rendered.contains("pub const DIRECT_TYPED_INVOCATION_STATUS_NAME: &str = DIRECT_TYPED_INVOCATION_STATUS.as_str();"));
         assert!(rendered.contains("validate_invocation_adapter_contract_for_tool"));
-        assert!(rendered.contains("requires_generated_cli_command: true"));
-        assert!(rendered.contains("Adapter contract:"));
-        assert!(rendered.contains("generated CLI argv/Clap dispatch semantics"));
-        assert!(!rendered.contains("backend debt"));
-        assert!(!rendered.contains("Transitional Progenitor CLI bridge"));
-        assert_eq!(
-            manifest.mcp_runtime.invocation_adapter_kind,
-            "progenitor_cli_bridge"
-        );
+        assert!(rendered.contains("requires_generated_cli_command: false"));
+        assert!(rendered.contains("uses_temp_json_body_files: false"));
+        assert!(rendered.contains("context.client.request(method, url)"));
+        assert!(rendered.contains("ArgBinding::PathParam"));
+        assert!(rendered.contains("ArgBinding::QueryParam"));
+        assert!(!rendered.contains("write_json_body"));
+        assert_eq!(manifest.mcp_runtime.invocation_adapter_kind, "direct_http");
         assert_eq!(
             manifest.mcp_runtime.invocation_adapter.kind_rust_variant,
-            "InvocationAdapterKind::ProgenitorCliBridge"
+            "InvocationAdapterKind::DirectHttp"
         );
         assert_eq!(
             manifest
                 .mcp_runtime
                 .invocation_adapter
                 .direct_typed_invocation,
-            "unsupported"
+            "supported"
         );
         assert!(
-            manifest
+            !manifest
                 .mcp_runtime
                 .invocation_adapter
                 .requires_generated_cli_command
@@ -513,12 +539,7 @@ paths: {}
         assert!(manifest
             .mcp_runtime
             .invocation_adapter_reason
-            .contains("direct typed operation invocation is not supported"));
-        assert!(rendered.contains(".create_new(true)"));
-        assert!(rendered.contains("static MCP_BODY_FILE_COUNTER: AtomicU64"));
-        assert!(rendered.contains("MCP_BODY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)"));
-        assert!(rendered.contains("{}-{}-{}-{}-body.json"));
-        assert!(rendered.contains("\"petstore-mcp\""));
+            .contains("direct HTTP operation invocation"));
     }
 
     #[test]

@@ -1,13 +1,15 @@
-use anyhow::Result;
-use heck::ToKebabCase;
+use anyhow::{bail, Result};
 use openapiv3::{
-    OpenAPI, Parameter, ParameterData, ParameterSchemaOrContent, ReferenceOr, RequestBody,
+    OpenAPI, Parameter, ParameterData, ParameterSchemaOrContent, PathStyle, QueryStyle,
+    ReferenceOr, RequestBody,
 };
 use serde::Serialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use super::response::reject_reserved_arg;
 use super::schema::schema_json;
+
+pub(super) const DIRECT_UNSUPPORTED_PREFIX: &str = "MCP direct HTTP invocation does not support";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct McpArg {
@@ -18,16 +20,24 @@ pub struct McpArg {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum McpArgBinding {
-    CliFlag { cli_name: String },
+    PathParam { wire_name: String },
+    QueryParam { wire_name: String },
     FlattenedBodyField,
     WholeJsonBody,
 }
 
 impl McpArg {
-    pub(super) fn cli_flag(json_name: String, cli_name: String) -> Self {
+    pub(super) fn path_param(json_name: String, wire_name: String) -> Self {
         Self {
             json_name,
-            binding: McpArgBinding::CliFlag { cli_name },
+            binding: McpArgBinding::PathParam { wire_name },
+        }
+    }
+
+    pub(super) fn query_param(json_name: String, wire_name: String) -> Self {
+        Self {
+            json_name,
+            binding: McpArgBinding::QueryParam { wire_name },
         }
     }
 
@@ -61,33 +71,6 @@ fn reject_duplicate_arg(
     Ok(())
 }
 
-fn reject_cli_arg_collision(
-    args: &[McpArg],
-    cli_name: &str,
-    json_name: &str,
-    tool_name: &str,
-    operation_id: &str,
-    source: &str,
-) -> Result<()> {
-    if cli_name == "json-body" {
-        anyhow::bail!(
-            "MCP CLI argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{json_name}' from {source} maps to reserved generated flag '--json-body'"
-        );
-    }
-    if let Some(existing) = args.iter().find(|arg| {
-        matches!(
-            &arg.binding,
-            McpArgBinding::CliFlag { cli_name: existing_cli_name } if existing_cli_name == cli_name
-        )
-    }) {
-        anyhow::bail!(
-            "MCP CLI argument collision for tool '{tool_name}' (operationId '{operation_id}'): argument '{json_name}' from {source} maps to '--{cli_name}', already used by argument '{}'",
-            existing.json_name
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn add_parameter(
     parameter: &ReferenceOr<Parameter>,
     properties: &mut Map<String, Value>,
@@ -98,12 +81,25 @@ pub(super) fn add_parameter(
     operation_id: &str,
 ) -> Result<()> {
     let ReferenceOr::Item(parameter) = parameter else {
-        return Ok(());
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} unresolved parameter references for tool '{tool_name}' (operationId '{operation_id}')"
+        );
     };
     let (data, is_path) = match parameter {
         Parameter::Query { parameter_data, .. } => (parameter_data, false),
         Parameter::Path { parameter_data, .. } => (parameter_data, true),
-        _ => return Ok(()),
+        Parameter::Header { parameter_data, .. } => {
+            bail!(
+                "{DIRECT_UNSUPPORTED_PREFIX} header parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
+                parameter_data.name
+            );
+        }
+        Parameter::Cookie { parameter_data, .. } => {
+            bail!(
+                "{DIRECT_UNSUPPORTED_PREFIX} cookie parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
+                parameter_data.name
+            );
+        }
     };
     reject_reserved_arg(&data.name, tool_name, operation_id)?;
     reject_duplicate_arg(
@@ -113,28 +109,122 @@ pub(super) fn add_parameter(
         operation_id,
         "OpenAPI parameter",
     )?;
-    let cli_name = data.name.to_kebab_case();
-    reject_cli_arg_collision(
-        args,
-        &cli_name,
+    let schema = parameter_schema(data, api, tool_name, operation_id)?;
+    reject_unsupported_direct_parameter_schema(
+        &schema,
         &data.name,
         tool_name,
         operation_id,
-        "OpenAPI parameter",
+        is_path,
     )?;
-    let schema = parameter_schema(data, api);
+    reject_unsupported_direct_parameter_serialization(
+        parameter,
+        &schema,
+        &data.name,
+        tool_name,
+        operation_id,
+    )?;
     properties.insert(data.name.clone(), schema);
     if is_path || data.required {
         required.push(data.name.clone());
     }
-    args.push(McpArg::cli_flag(data.name.clone(), cli_name));
+    if is_path {
+        args.push(McpArg::path_param(data.name.clone(), data.name.clone()));
+    } else {
+        args.push(McpArg::query_param(data.name.clone(), data.name.clone()));
+    }
     Ok(())
 }
 
-fn parameter_schema(data: &ParameterData, api: &OpenAPI) -> Value {
+fn parameter_schema(
+    data: &ParameterData,
+    api: &OpenAPI,
+    tool_name: &str,
+    operation_id: &str,
+) -> Result<Value> {
     match &data.format {
-        ParameterSchemaOrContent::Schema(schema) => schema_json(schema, api),
-        ParameterSchemaOrContent::Content(_) => json!({ "type": "string" }),
+        ParameterSchemaOrContent::Schema(schema) => Ok(schema_json(schema, api)),
+        ParameterSchemaOrContent::Content(_) => bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} content-encoded parameter '{}' for tool '{tool_name}' (operationId '{operation_id}')",
+            data.name
+        ),
+    }
+}
+
+fn reject_unsupported_direct_parameter_schema(
+    schema: &Value,
+    name: &str,
+    tool_name: &str,
+    operation_id: &str,
+    is_path: bool,
+) -> Result<()> {
+    let Some(schema_type) = schema.get("type").and_then(Value::as_str) else {
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} parameter '{name}' without primitive schema type for tool '{tool_name}' (operationId '{operation_id}')"
+        );
+    };
+    match schema_type {
+        "string" | "integer" | "number" | "boolean" => Ok(()),
+        "array" if !is_path => {
+            let item_type = schema
+                .get("items")
+                .and_then(|items| items.get("type"))
+                .and_then(Value::as_str);
+            match item_type {
+                Some("string" | "integer" | "number" | "boolean") => Ok(()),
+                _ => bail!(
+                    "{DIRECT_UNSUPPORTED_PREFIX} non-primitive array parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+                ),
+            }
+        }
+        "array" => bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} array path parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+        ),
+        _ => bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} {schema_type} parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+        ),
+    }
+}
+
+fn reject_unsupported_direct_parameter_serialization(
+    parameter: &Parameter,
+    schema: &Value,
+    name: &str,
+    tool_name: &str,
+    operation_id: &str,
+) -> Result<()> {
+    match parameter {
+        Parameter::Query {
+            parameter_data,
+            style,
+            ..
+        } => {
+            if *style != QueryStyle::Form {
+                bail!(
+                    "{DIRECT_UNSUPPORTED_PREFIX} non-form query parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
+                );
+            }
+            if schema.get("type").and_then(Value::as_str) == Some("array")
+                && parameter_data.explode == Some(false)
+            {
+                bail!(
+                    "{DIRECT_UNSUPPORTED_PREFIX} non-exploded query array parameter '{name}' for tool '{tool_name}' (operationId '{operation_id}')"
+                );
+            }
+            Ok(())
+        }
+        Parameter::Path {
+            parameter_data,
+            style,
+        } => {
+            if *style != PathStyle::Simple || parameter_data.explode == Some(true) {
+                bail!(
+                    "{DIRECT_UNSUPPORTED_PREFIX} non-simple path parameter serialization for '{name}' on tool '{tool_name}' (operationId '{operation_id}')"
+                );
+            }
+            Ok(())
+        }
+        Parameter::Header { .. } | Parameter::Cookie { .. } => Ok(()),
     }
 }
 
@@ -147,18 +237,26 @@ pub(super) fn add_body(
     tool_name: &str,
     operation_id: &str,
 ) -> Result<()> {
-    let Some(ReferenceOr::Item(body)) = request_body else {
+    let Some(request_body) = request_body else {
         return Ok(());
     };
-    let Some(media_type) = body
-        .content
-        .get("application/json")
-        .or_else(|| body.content.values().next())
-    else {
-        return Ok(());
+    let ReferenceOr::Item(body) = request_body else {
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} unresolved requestBody references for tool '{tool_name}' (operationId '{operation_id}')"
+        );
+    };
+    let Some(media_type) = body.content.get("application/json") else {
+        if body.content.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} non-JSON request bodies for tool '{tool_name}' (operationId '{operation_id}')"
+        );
     };
     let Some(schema) = media_type.schema.as_ref() else {
-        return Ok(());
+        bail!(
+            "{DIRECT_UNSUPPORTED_PREFIX} schemaless JSON request body for tool '{tool_name}' (operationId '{operation_id}')"
+        );
     };
     let body_schema = schema_json(schema, api);
     if let Some(object) = body_schema.as_object() {

@@ -20,12 +20,13 @@ pub use response::{
     McpResponseShaping, McpResponseShapingArg,
 };
 
-pub(crate) use identity::mcp_tools;
+pub(crate) use identity::mcp_model;
 use response::mcp_response_shaping;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiModel {
     pub mcp_tools: Vec<McpTool>,
+    pub unsupported_mcp_operations: Vec<McpUnsupportedOperation>,
     pub mcp_response_shaping: McpResponseShaping,
     pub mcp_invocation_adapter: McpInvocationAdapterContract,
 }
@@ -35,15 +36,32 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: String,
+    pub method: String,
+    pub path_template: String,
     pub args: Vec<McpArg>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpUnsupportedOperation {
+    pub operation_id: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub reason: String,
+}
+
+#[cfg(test)]
+fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
+    Ok(mcp_model(api, auth_env_var)?.tools)
 }
 
 impl ApiModel {
     pub fn from_openapi(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Self> {
+        let mcp_model = mcp_model(api, auth_env_var)?;
         Ok(Self {
-            mcp_tools: mcp_tools(api, auth_env_var)?,
+            mcp_tools: mcp_model.tools,
+            unsupported_mcp_operations: mcp_model.unsupported_operations,
             mcp_response_shaping: mcp_response_shaping(),
-            mcp_invocation_adapter: McpInvocationAdapterContract::progenitor_cli_bridge(),
+            mcp_invocation_adapter: McpInvocationAdapterContract::direct_http(),
         })
     }
 }
@@ -53,12 +71,22 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
-    fn has_cli_arg(tool: &McpTool, json_name: &str, cli_name: &str) -> bool {
+    fn has_path_param(tool: &McpTool, json_name: &str, wire_name: &str) -> bool {
         tool.args.iter().any(|arg| {
             arg.json_name == json_name
                 && matches!(
                     &arg.binding,
-                    McpArgBinding::CliFlag { cli_name: actual_cli_name } if actual_cli_name == cli_name
+                    McpArgBinding::PathParam { wire_name: actual_wire_name } if actual_wire_name == wire_name
+                )
+        })
+    }
+
+    fn has_query_param(tool: &McpTool, json_name: &str, wire_name: &str) -> bool {
+        tool.args.iter().any(|arg| {
+            arg.json_name == json_name
+                && matches!(
+                    &arg.binding,
+                    McpArgBinding::QueryParam { wire_name: actual_wire_name } if actual_wire_name == wire_name
                 )
         })
     }
@@ -109,21 +137,18 @@ paths:
         assert_eq!(model.mcp_response_shaping.compact.schema["type"], "boolean");
         assert_eq!(
             model.mcp_invocation_adapter.kind,
-            McpInvocationAdapterKind::ProgenitorCliBridge
+            McpInvocationAdapterKind::DirectHttp
         );
-        assert_eq!(
-            model.mcp_invocation_adapter.kind.as_str(),
-            "progenitor_cli_bridge"
-        );
+        assert_eq!(model.mcp_invocation_adapter.kind.as_str(), "direct_http");
         assert_eq!(
             model.mcp_invocation_adapter.direct_typed_invocation,
-            McpDirectTypedInvocationStatus::Unsupported
+            McpDirectTypedInvocationStatus::Supported
         );
-        assert!(model.mcp_invocation_adapter.requires_generated_cli_command);
+        assert!(!model.mcp_invocation_adapter.requires_generated_cli_command);
         assert!(model
             .mcp_invocation_adapter
             .reason
-            .contains("direct typed operation invocation is not supported"));
+            .contains("direct HTTP operation invocation"));
     }
 
     #[test]
@@ -154,6 +179,10 @@ paths:
         assert_eq!(tools[1].name, "get_item");
         assert_eq!(tools[0].description, "GET /items");
         assert_eq!(tools[1].description, "GET /items/{id}");
+        assert_eq!(tools[0].method, "GET");
+        assert_eq!(tools[0].path_template, "/items");
+        assert_eq!(tools[1].method, "GET");
+        assert_eq!(tools[1].path_template, "/items/{id}");
     }
 
     #[test]
@@ -279,7 +308,7 @@ paths:
             .as_array()
             .unwrap()
             .contains(&json!("id")));
-        assert!(has_cli_arg(tool, "id", "id"));
+        assert!(has_path_param(tool, "id", "id"));
     }
 
     #[test]
@@ -357,6 +386,185 @@ paths:
     }
 
     #[test]
+    fn unsupported_operation_name_does_not_poison_later_supported_collision() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Unsupported Collision API
+  version: "1.0.0"
+paths:
+  /unsupported:
+    get:
+      operationId: search-items
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+      responses:
+        '200':
+          description: ok
+  /supported:
+    get:
+      operationId: search_items
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let model = mcp_model(&api, None).unwrap();
+
+        assert_eq!(model.tools.len(), 1);
+        assert_eq!(model.tools[0].name, "search_items");
+        assert_eq!(model.tools[0].path_template, "/supported");
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert_eq!(
+            model.unsupported_operations[0].operation_id.as_deref(),
+            Some("search-items")
+        );
+    }
+
+    #[test]
+    fn unsupported_parameter_shapes_are_excluded_from_direct_invocation() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Unsupported Parameter Shapes API
+  version: "1.0.0"
+paths:
+  /query-object:
+    get:
+      operationId: queryObject
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+      responses:
+        '200':
+          description: ok
+  /query-composed:
+    get:
+      operationId: queryComposed
+      parameters:
+        - name: filter
+          in: query
+          schema:
+            allOf:
+              - type: string
+      responses:
+        '200':
+          description: ok
+  /query-missing-type:
+    get:
+      operationId: queryMissingType
+      parameters:
+        - name: filter
+          in: query
+          schema: {}
+      responses:
+        '200':
+          description: ok
+  /path-object/{id}:
+    get:
+      operationId: pathObject
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: object
+            properties:
+              value:
+                type: string
+      responses:
+        '200':
+          description: ok
+  /path-composed/{id}:
+    get:
+      operationId: pathComposed
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            allOf:
+              - type: string
+      responses:
+        '200':
+          description: ok
+  /path-missing-type/{id}:
+    get:
+      operationId: pathMissingType
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {}
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let model = mcp_model(&api, None).unwrap();
+
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 6);
+        for unsupported in &model.unsupported_operations {
+            assert!(unsupported
+                .reason
+                .starts_with(arguments::DIRECT_UNSUPPORTED_PREFIX));
+        }
+        assert!(model
+            .unsupported_operations
+            .iter()
+            .any(|operation| operation.reason.contains("object parameter 'filter'")));
+        assert!(model
+            .unsupported_operations
+            .iter()
+            .any(|operation| operation.reason.contains("without primitive schema type")));
+    }
+
+    #[test]
+    fn unsupported_query_array_serialization_is_excluded() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Unsupported Query Array Serialization API
+  version: "1.0.0"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: tags
+          in: query
+          explode: false
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: ok
+"#;
+        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
+        let model = mcp_model(&api, None).unwrap();
+
+        assert!(model.tools.is_empty());
+        assert_eq!(model.unsupported_operations.len(), 1);
+        assert!(model.unsupported_operations[0]
+            .reason
+            .contains("non-exploded query array parameter 'tags'"));
+    }
+
+    #[test]
     fn mcp_flattened_body_property_collision_falls_back_to_whole_body_arg() {
         let spec = r#"
 openapi: 3.0.0
@@ -396,7 +604,7 @@ paths:
 
         assert!(properties.contains_key("id"));
         assert!(properties.contains_key("body"));
-        assert!(has_cli_arg(tool, "id", "id"));
+        assert!(has_query_param(tool, "id", "id"));
         assert!(has_whole_json_body(tool, "body"));
         assert!(!has_flattened_body_field(tool, "id"));
     }
@@ -464,68 +672,6 @@ paths:
 
         assert!(error.to_string().contains("reserved pp namespace"));
         assert!(error.to_string().contains("_pp_fields"));
-    }
-
-    #[test]
-    fn mcp_query_parameter_cannot_map_to_reserved_json_body_flag() {
-        let spec = r#"
-openapi: 3.0.0
-info:
-  title: Json Body Flag Collision API
-  version: "1.0.0"
-paths:
-  /items:
-    get:
-      operationId: listItems
-      parameters:
-        - name: json_body
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: ok
-"#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let error = mcp_tools(&api, None).unwrap_err().to_string();
-
-        assert!(error.contains("MCP CLI argument collision"));
-        assert!(error.contains("json_body"));
-        assert!(error.contains("--json-body"));
-        assert!(error.contains("reserved generated flag"));
-    }
-
-    #[test]
-    fn mcp_query_parameters_cannot_share_generated_cli_flag() {
-        let spec = r#"
-openapi: 3.0.0
-info:
-  title: Cli Flag Collision API
-  version: "1.0.0"
-paths:
-  /items:
-    get:
-      operationId: listItems
-      parameters:
-        - name: foo_bar
-          in: query
-          schema:
-            type: string
-        - name: foo-bar
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: ok
-"#;
-        let api: OpenAPI = serde_yaml::from_str(spec).unwrap();
-        let error = mcp_tools(&api, None).unwrap_err().to_string();
-
-        assert!(error.contains("MCP CLI argument collision"));
-        assert!(error.contains("foo-bar"));
-        assert!(error.contains("foo_bar"));
-        assert!(error.contains("--foo-bar"));
     }
 
     #[test]

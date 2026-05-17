@@ -16,6 +16,8 @@ struct ToolDef {
     name: &'static str,
     description: &'static str,
     input_schema: fn() -> rmcp::model::JsonObject,
+    method: &'static str,
+    path_template: &'static str,
     args: &'static [ArgDef],
 }
 
@@ -40,19 +42,21 @@ static TOOLS: &[ToolDef] = &[
         name: {{ tool.name_literal }},
         description: {{ tool.description_literal }},
         input_schema: {{ tool.schema_fn_name }},
+        method: {{ tool.method_literal }},
+        path_template: {{ tool.path_template_literal }},
         args: {{ tool.args_static_name }},
     },
 {% endfor %}
 ];
 
 pub async fn serve(context: Context) -> anyhow::Result<()> {
-    validate_mcp_invocation_bridge().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    validate_mcp_direct_invocation().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let service = ApiMcpServer { context }.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
 
-fn validate_mcp_invocation_bridge() -> Result<(), McpError> {
+fn validate_mcp_direct_invocation() -> Result<(), McpError> {
     for tool in TOOLS {
         crate::invoke::validate_invocation_adapter_contract_for_tool(tool.name, tool.args)?;
     }
@@ -71,12 +75,15 @@ impl ApiMcpServer {
         }
 
 {% endif %}
+        validate_required_arguments(&(tool.input_schema)(), &arguments)?;
         let response_shaping = crate::runtime::parse_response_shaping(&arguments)?;
 
         let result = invoke_operation(
             self.context.clone(),
             OperationInvocation {
                 name: tool.name,
+                method: tool.method,
+                path_template: tool.path_template,
                 args: tool.args,
                 arguments,
             },
@@ -92,6 +99,24 @@ impl ApiMcpServer {
             response_shaping.shape_success(result.value),
         ))
     }
+}
+
+fn validate_required_arguments(
+    schema: &rmcp::model::JsonObject,
+    arguments: &rmcp::model::JsonObject,
+) -> Result<(), McpError> {
+    let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for name in required.iter().filter_map(serde_json::Value::as_str) {
+        if arguments.get(name).map_or(true, serde_json::Value::is_null) {
+            return Err(McpError::invalid_params(
+                format!("missing required argument: {name}"),
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl ServerHandler for ApiMcpServer {

@@ -5,21 +5,46 @@ use openapiv3::OpenAPI;
 use serde_json::{json, Map};
 use std::collections::BTreeMap;
 
-use super::arguments::{add_body, add_parameter};
+use super::arguments::{add_body, add_parameter, DIRECT_UNSUPPORTED_PREFIX};
 use super::response::add_mcp_reserved_properties;
-use super::McpTool;
+use super::{McpTool, McpUnsupportedOperation};
 
-pub(crate) fn mcp_tools(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<Vec<McpTool>> {
+pub(crate) struct McpModel {
+    pub tools: Vec<McpTool>,
+    pub unsupported_operations: Vec<McpUnsupportedOperation>,
+}
+
+pub(crate) fn mcp_model(api: &OpenAPI, auth_env_var: Option<&str>) -> Result<McpModel> {
     let mut tools = Vec::new();
+    let mut unsupported_operations = Vec::new();
     let mut ctx = McpBuildContext {
         auth_env_var,
         api,
         seen_tool_names: BTreeMap::new(),
     };
     for operation in traversal::operations(api) {
-        push_operation(&mut tools, operation, &mut ctx)?;
+        match build_operation(operation, &mut ctx) {
+            Ok(tool) => tools.push(tool),
+            Err(error) => {
+                let reason = error.to_string();
+                if reason.starts_with(DIRECT_UNSUPPORTED_PREFIX) {
+                    unsupported_operations.push(McpUnsupportedOperation {
+                        operation_id: traversal::explicit_operation_id(operation.operation)
+                            .map(str::to_string),
+                        method: operation.method_uppercase.to_string(),
+                        path: operation.path.to_string(),
+                        reason,
+                    });
+                } else {
+                    return Err(error);
+                }
+            }
+        }
     }
-    Ok(tools)
+    Ok(McpModel {
+        tools,
+        unsupported_operations,
+    })
 }
 
 struct McpBuildContext<'a> {
@@ -28,11 +53,10 @@ struct McpBuildContext<'a> {
     seen_tool_names: BTreeMap<String, String>,
 }
 
-fn push_operation(
-    tools: &mut Vec<McpTool>,
+fn build_operation(
     operation_ref: traversal::OperationRef<'_>,
     ctx: &mut McpBuildContext<'_>,
-) -> Result<()> {
+) -> Result<McpTool> {
     let method = operation_ref.method_uppercase;
     let path = operation_ref.path;
     let path_params = operation_ref.path_parameters;
@@ -44,12 +68,6 @@ fn push_operation(
         );
     };
     let name = operation_name(&raw_name);
-    if let Some(previous_operation_id) = ctx.seen_tool_names.insert(name.clone(), raw_name.clone())
-    {
-        anyhow::bail!(
-            "MCP tool name collision: operationId '{previous_operation_id}' and operationId '{raw_name}' both produce MCP tool '{name}'"
-        );
-    }
     let fallback_description = format!("{method} {path}");
     let mut description = operation
         .summary
@@ -97,13 +115,20 @@ fn push_operation(
     });
 
     let input_schema = serde_json::to_string(&schema).expect("schema serializes");
-    tools.push(McpTool {
+    if let Some(previous_operation_id) = ctx.seen_tool_names.insert(name.clone(), raw_name.clone())
+    {
+        anyhow::bail!(
+            "MCP tool name collision: operationId '{previous_operation_id}' and operationId '{raw_name}' both produce MCP tool '{name}'"
+        );
+    }
+    Ok(McpTool {
         name,
         description,
         input_schema,
+        method: method.to_string(),
+        path_template: path.to_string(),
         args,
-    });
-    Ok(())
+    })
 }
 
 fn operation_name(operation_id: &str) -> String {

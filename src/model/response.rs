@@ -17,25 +17,25 @@ pub struct McpInvocationAdapterContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpInvocationAdapterKind {
-    ProgenitorCliBridge,
+    DirectHttp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpDirectTypedInvocationStatus {
-    Unsupported,
+    Supported,
 }
 
 impl McpDirectTypedInvocationStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Unsupported => "unsupported",
+            Self::Supported => "supported",
         }
     }
 
     pub fn rust_variant(self) -> &'static str {
         match self {
-            Self::Unsupported => "DirectTypedInvocationStatus::Unsupported",
+            Self::Supported => "DirectTypedInvocationStatus::Supported",
         }
     }
 }
@@ -43,24 +43,24 @@ impl McpDirectTypedInvocationStatus {
 impl McpInvocationAdapterKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ProgenitorCliBridge => "progenitor_cli_bridge",
+            Self::DirectHttp => "direct_http",
         }
     }
 
     pub fn rust_variant(self) -> &'static str {
         match self {
-            Self::ProgenitorCliBridge => "InvocationAdapterKind::ProgenitorCliBridge",
+            Self::DirectHttp => "InvocationAdapterKind::DirectHttp",
         }
     }
 }
 
 impl McpInvocationAdapterContract {
-    pub fn progenitor_cli_bridge() -> Self {
+    pub fn direct_http() -> Self {
         Self {
-            kind: McpInvocationAdapterKind::ProgenitorCliBridge,
-            reason: "MCP tool calls use the Progenitor CLI bridge adapter because direct typed operation invocation is not supported by the current generated surface".to_string(),
-            direct_typed_invocation: McpDirectTypedInvocationStatus::Unsupported,
-            requires_generated_cli_command: true,
+            kind: McpInvocationAdapterKind::DirectHttp,
+            reason: "MCP tool calls use direct HTTP operation invocation from generated operation metadata".to_string(),
+            direct_typed_invocation: McpDirectTypedInvocationStatus::Supported,
+            requires_generated_cli_command: false,
         }
     }
 }
